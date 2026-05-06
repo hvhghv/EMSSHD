@@ -1,0 +1,54 @@
+# Build directories
+/build*/
+/cmake-build*/
+
+# CMake/Ninja artifacts
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Generic binaries/libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Logs and runtime outputs
+*.log
+*.out
+*.err
+
+# Project runtime/interoperability generated files
+/interop_*
+/tmp_*
+/stdio_fs_root/
+
+# Cache/temp
+/.cache/
+*.tmp
+*.temp
+*~
+
+# IDE/editor
+/.idea/
+/.vscode/
+*.code-workspace
+*.suo
+*.user
+*.vcxproj.user
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

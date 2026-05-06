@@ -1,0 +1,5 @@
+ssh-userauth
+publickey
+ssh-ed25519
+dummy-key
+fake-signature

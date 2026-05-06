@@ -1,0 +1,2 @@
+INIT VERSION REALPATH OPEN READ WRITE CLOSE OPENDIR READDIR
+posix-rename@openssh.com fsync@openssh.com hardlink@openssh.com statvfs@openssh.com
