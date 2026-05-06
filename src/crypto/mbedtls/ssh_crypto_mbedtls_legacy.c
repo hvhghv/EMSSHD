@@ -1346,11 +1346,12 @@ void ssh_mbedtls_kexinit_algorithm_set_defaults(ssh_kexinit_algorithm_set_t *alg
         return;
     }
 
-#if defined(MBEDTLS_ECP_DP_CURVE25519_ENABLED)
-    algorithms->kex_algorithms = "curve25519-sha256,ecdh-sha2-nistp256,ext-info-s";
-#else
+    /*
+     * Keep legacy backend on the conservative ECDH-P256 path.
+     * This avoids curve25519-specific interop/runtime instability on some
+     * musl/embedded targets while keeping standards-compliant SSH KEX.
+     */
     algorithms->kex_algorithms = "ecdh-sha2-nistp256,ext-info-s";
-#endif
     algorithms->server_host_key_algorithms = "ecdsa-sha2-nistp256";
     algorithms->encryption_algorithms_client_to_server = "aes128-ctr";
     algorithms->encryption_algorithms_server_to_client = "aes128-ctr";

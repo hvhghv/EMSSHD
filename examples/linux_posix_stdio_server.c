@@ -14,11 +14,13 @@
 
 #if defined(EMSSH_USE_MBEDTLS)
 #include "emssh/crypto_mbedtls.h"
-#if defined(MBEDTLS_ENTROPY_HARDWARE_ALT)
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
+#include <sys/types.h>
+#if !defined(_WIN32)
+#include <sys/random.h>
 #endif
+#include <unistd.h>
 #endif
 #if defined(EMSSH_USE_OPENSSL)
 #include "emssh/crypto_openssl.h"
@@ -61,11 +63,11 @@
 #error "linux_posix_stdio_server requires at least one crypto backend enabled"
 #endif
 
-#if defined(EMSSH_USE_MBEDTLS) && defined(MBEDTLS_ENTROPY_HARDWARE_ALT)
+#if defined(EMSSH_USE_MBEDTLS)
 int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t *olen)
 {
-    int fd;
     size_t total;
+    int fd;
 
     (void)data;
 
@@ -78,12 +80,41 @@ int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t 
         return 0;
     }
 
+    total = 0u;
+
+#if !defined(_WIN32)
+    /* Prefer getrandom() when available. */
+    while (total < len) {
+        ssize_t n = getrandom(output + total, len - total, 0u);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0 && (errno == ENOSYS || errno == EAGAIN)) {
+            break;
+        }
+        if (n <= 0) {
+            break;
+        }
+    }
+    if (total == len) {
+        *olen = total;
+        return 0;
+    }
+#endif
+
     fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0) {
-        return -1;
+        fd = open("/dev/random", O_RDONLY);
+        if (fd < 0) {
+            *olen = total;
+            return -1;
+        }
     }
 
-    total = 0u;
     while (total < len) {
         ssize_t n = read(fd, output + total, len - total);
         if (n > 0) {
