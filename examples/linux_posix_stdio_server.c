@@ -14,6 +14,11 @@
 
 #if defined(EMSSH_USE_MBEDTLS)
 #include "emssh/crypto_mbedtls.h"
+#if defined(MBEDTLS_ENTROPY_HARDWARE_ALT)
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #endif
 #if defined(EMSSH_USE_OPENSSL)
 #include "emssh/crypto_openssl.h"
@@ -54,6 +59,52 @@
 
 #if !EMSSH_LINUX_SERVER_ENABLE_MBEDTLS && !EMSSH_LINUX_SERVER_ENABLE_OPENSSL && !EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
 #error "linux_posix_stdio_server requires at least one crypto backend enabled"
+#endif
+
+#if defined(EMSSH_USE_MBEDTLS) && defined(MBEDTLS_ENTROPY_HARDWARE_ALT)
+int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t *olen)
+{
+    int fd;
+    size_t total;
+
+    (void)data;
+
+    if (output == NULL || olen == NULL) {
+        return -1;
+    }
+
+    *olen = 0u;
+    if (len == 0u) {
+        return 0;
+    }
+
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    total = 0u;
+    while (total < len) {
+        ssize_t n = read(fd, output + total, len - total);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        (void)close(fd);
+        *olen = total;
+        return -1;
+    }
+
+    (void)close(fd);
+    *olen = total;
+    return total == len ? 0 : -1;
+}
 #endif
 
 #define LINUX_SERVER_DEFAULT_PORT 2222u
