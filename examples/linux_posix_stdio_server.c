@@ -61,9 +61,9 @@
 #define LINUX_SERVER_DEFAULT_PORT 2222u
 #define LINUX_SERVER_DEFAULT_TIMEOUT_MS 30000u
 #define LINUX_SERVER_DEFAULT_MAX_WORKERS 16u
+#define LINUX_SERVER_DEFAULT_WORKER_STACK_KB 1024u
 #define LINUX_SERVER_MAX_PATH 512u
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
-#define LINUX_SERVER_WORKER_STACK_SIZE (1024u * 1024u)
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
 
@@ -226,6 +226,7 @@ typedef struct program_options {
     uint16_t port;
     uint32_t timeout_ms;
     unsigned max_workers;
+    unsigned worker_stack_kb;
     crypto_backend_t backend;
     int port_overridden;
     int listen_overridden;
@@ -282,6 +283,7 @@ static void usage(const char *program)
         "  --shadow-file <path>     shadow file (default: /etc/shadow)\n"
         "  --timeout-ms <ms>        Session timeout (default: 30000)\n"
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
+        "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
         "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n",
         program);
 }
@@ -438,6 +440,7 @@ static void options_defaults(program_options_t *opts)
     opts->port = LINUX_SERVER_DEFAULT_PORT;
     opts->timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
     opts->max_workers = LINUX_SERVER_DEFAULT_MAX_WORKERS;
+    opts->worker_stack_kb = LINUX_SERVER_DEFAULT_WORKER_STACK_KB;
     opts->backend = default_backend();
 }
 
@@ -516,6 +519,17 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
                 return status;
             }
             status = parse_positive_unsigned(argv[++i], &opts->max_workers);
+            if (status != SSH_OK) {
+                return status;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--worker-stack-kb") == 0) {
+            status = (i + 1 < argc) ? SSH_OK : SSH_ERR_INVALID_ARGUMENT;
+            if (status != SSH_OK) {
+                return status;
+            }
+            status = parse_positive_unsigned(argv[++i], &opts->worker_stack_kb);
             if (status != SSH_OK) {
                 return status;
             }
@@ -855,6 +869,68 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
         return SSH_OK;
     }
 
+    if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_SHELL) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_EXEC) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_ENV) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_WINDOW_CHANGE) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_SIGNAL)) {
+        fprintf(
+            stderr,
+            "ignored non-sftp channel request from %s: type=%s%s\n",
+            peer != NULL ? peer : "unknown",
+            request_type[0] != '\0' ? request_type : "(empty)",
+            type_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+
+        if (request_type_is(request, SSH_CHANNEL_REQUEST_EXEC)) {
+            char command[128];
+            int status = view_to_printable(request->command, command, sizeof(command));
+            fprintf(
+                stderr,
+                "  exec=%s%s\n",
+                command[0] != '\0' ? command : "(empty)",
+                status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+        } else if (request_type_is(request, SSH_CHANNEL_REQUEST_ENV)) {
+            char env_name[64];
+            int name_status = view_to_printable(request->env_name, env_name, sizeof(env_name));
+            fprintf(
+                stderr,
+                "  env=%s%s value_len=%lu\n",
+                env_name[0] != '\0' ? env_name : "(empty)",
+                name_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
+                (unsigned long)request->env_value.len);
+        } else if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ)) {
+            char term_type[64];
+            int status = view_to_printable(request->term_type, term_type, sizeof(term_type));
+            fprintf(
+                stderr,
+                "  pty term=%s%s cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
+                term_type[0] != '\0' ? term_type : "(empty)",
+                status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
+                (unsigned long)request->cols,
+                (unsigned long)request->rows,
+                (unsigned long)request->width_px,
+                (unsigned long)request->height_px);
+        } else if (request_type_is(request, SSH_CHANNEL_REQUEST_WINDOW_CHANGE)) {
+            fprintf(
+                stderr,
+                "  window-change cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
+                (unsigned long)request->cols,
+                (unsigned long)request->rows,
+                (unsigned long)request->width_px,
+                (unsigned long)request->height_px);
+        } else if (request_type_is(request, SSH_CHANNEL_REQUEST_SIGNAL)) {
+            char signal_name[64];
+            int status = view_to_printable(request->signal_name, signal_name, sizeof(signal_name));
+            fprintf(
+                stderr,
+                "  signal=%s%s\n",
+                signal_name[0] != '\0' ? signal_name : "(empty)",
+                status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+        }
+        return SSH_OK;
+    }
+
     fprintf(
         stderr,
         "unsupported channel request from %s: type=%s%s\n",
@@ -869,51 +945,6 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
             stderr,
             "  subsystem=%s%s\n",
             subsystem[0] != '\0' ? subsystem : "(empty)",
-            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
-    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_EXEC)) {
-        char command[128];
-        int status = view_to_printable(request->command, command, sizeof(command));
-        fprintf(
-            stderr,
-            "  exec=%s%s\n",
-            command[0] != '\0' ? command : "(empty)",
-            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
-    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_ENV)) {
-        char env_name[64];
-        int name_status = view_to_printable(request->env_name, env_name, sizeof(env_name));
-        fprintf(
-            stderr,
-            "  env=%s%s value_len=%lu\n",
-            env_name[0] != '\0' ? env_name : "(empty)",
-            name_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
-            (unsigned long)request->env_value.len);
-    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ)) {
-        char term_type[64];
-        int status = view_to_printable(request->term_type, term_type, sizeof(term_type));
-        fprintf(
-            stderr,
-            "  pty term=%s%s cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
-            term_type[0] != '\0' ? term_type : "(empty)",
-            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
-            (unsigned long)request->cols,
-            (unsigned long)request->rows,
-            (unsigned long)request->width_px,
-            (unsigned long)request->height_px);
-    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_WINDOW_CHANGE)) {
-        fprintf(
-            stderr,
-            "  window-change cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
-            (unsigned long)request->cols,
-            (unsigned long)request->rows,
-            (unsigned long)request->width_px,
-            (unsigned long)request->height_px);
-    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_SIGNAL)) {
-        char signal_name[64];
-        int status = view_to_printable(request->signal_name, signal_name, sizeof(signal_name));
-        fprintf(
-            stderr,
-            "  signal=%s%s\n",
-            signal_name[0] != '\0' ? signal_name : "(empty)",
             status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
     }
 
@@ -961,6 +992,9 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     if (status != SSH_OK) {
         const char *peer = ssh_posix_conn_peer_address(conn);
         fprintf(stderr, "session %s ended: %s\n", peer != NULL ? peer : "unknown", ssh_status_string(status));
+        if (status == SSH_ERR_UNSUPPORTED) {
+            fprintf(stderr, "hint: this example serves SFTP subsystem only; use an SFTP client/session.\n");
+        }
     }
 
     if (initialized_server) {
@@ -1002,6 +1036,7 @@ int main(int argc, char **argv)
     int initialized_host_fs;
     int initialized_passwd_auth;
     int initialized_pool;
+    size_t worker_stack_size_bytes;
 
     status = parse_args(argc, argv, &opts);
     if (status == SSH_ERR_UNSUPPORTED) {
@@ -1034,6 +1069,20 @@ int main(int argc, char **argv)
     initialized_passwd_auth = 0;
     initialized_pool = 0;
     shared.backend = opts.backend;
+    if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
+        fprintf(stderr, "invalid --worker-stack-kb value: overflow\n");
+        return 2;
+    }
+    worker_stack_size_bytes = (size_t)opts.worker_stack_kb * 1024u;
+#if defined(PTHREAD_STACK_MIN)
+    if (worker_stack_size_bytes < (size_t)PTHREAD_STACK_MIN) {
+        worker_stack_size_bytes = (size_t)PTHREAD_STACK_MIN;
+        fprintf(
+            stderr,
+            "note: worker stack adjusted to pthread minimum: %lu bytes\n",
+            (unsigned long)worker_stack_size_bytes);
+    }
+#endif
 
     status = normalize_host_fs_path(opts.passwd_path, passwd_path_normalized);
     if (status != SSH_OK) {
@@ -1125,11 +1174,12 @@ int main(int argc, char **argv)
     }
 
     printf(
-        "linux posix+stdio sftp server listening on %s:%u, backend=%s, max-workers=%u\n",
+        "linux posix+stdio sftp server listening on %s:%u, backend=%s, max-workers=%u, worker-stack=%luKB\n",
         shared.base_server_config.listen_address != NULL ? shared.base_server_config.listen_address : "0.0.0.0",
         (unsigned)shared.port,
         backend_name(shared.backend),
-        opts.max_workers);
+        opts.max_workers,
+        (unsigned long)(worker_stack_size_bytes / 1024u));
     printf("note: command line overrides sshd_config for overlapping parameters.\n");
     fflush(stdout);
     set_linux_server_stage(LINUX_STAGE_MAIN_LISTEN);
@@ -1175,13 +1225,13 @@ int main(int argc, char **argv)
             continue;
         }
 
-        attr_status = pthread_attr_setstacksize(&thread_attr, (size_t)LINUX_SERVER_WORKER_STACK_SIZE);
+        attr_status = pthread_attr_setstacksize(&thread_attr, worker_stack_size_bytes);
         if (attr_status != 0) {
             (void)pthread_attr_destroy(&thread_attr);
             (void)ssh_posix_conn_close(&shared.net, &task->conn);
             worker_pool_release_slot(&pool);
             free(task);
-            fprintf(stderr, "pthread_attr_setstacksize failed (size=%u)\n", (unsigned)LINUX_SERVER_WORKER_STACK_SIZE);
+            fprintf(stderr, "pthread_attr_setstacksize failed (size=%lu bytes)\n", (unsigned long)worker_stack_size_bytes);
             continue;
         }
 
