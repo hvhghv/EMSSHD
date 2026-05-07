@@ -1088,6 +1088,13 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
                 (unsigned)server.diag_last_received_message_id,
                 (unsigned)server.diag_last_received_message_id);
         }
+        if (status == SSH_ERR_UNSUPPORTED && server.diag_last_channel_request_type_valid) {
+            fprintf(
+                stderr,
+                "diag: unsupported channel request type=%s want-reply=%d\n",
+                server.diag_last_channel_request_type,
+                server.diag_last_channel_request_want_reply != 0 ? 1 : 0);
+        }
         if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_SFTP) {
             fprintf(stderr, "hint: this example serves SFTP subsystem only; use an SFTP client/session.\n");
         } else if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_TERMINAL) {

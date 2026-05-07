@@ -381,6 +381,26 @@ static void reset_rekey_direction(ssh_transport_session_t *session, int outbound
     update_rekey_needed(session);
 }
 
+static void record_last_channel_request_diag(
+    ssh_transport_session_t *session,
+    const ssh_channel_request_t *request)
+{
+    size_t copy_len;
+
+    if (session == NULL || request == NULL || request->request_type.data == NULL) {
+        return;
+    }
+
+    copy_len = request->request_type.len;
+    if (copy_len >= sizeof(session->last_channel_request_type)) {
+        copy_len = sizeof(session->last_channel_request_type) - 1u;
+    }
+    memcpy(session->last_channel_request_type, request->request_type.data, copy_len);
+    session->last_channel_request_type[copy_len] = '\0';
+    session->last_channel_request_type_valid = 1;
+    session->last_channel_request_want_reply = request->want_reply;
+}
+
 static int receive_plain_packet(
     ssh_transport_session_t *session,
     void *conn,
@@ -622,6 +642,9 @@ int ssh_transport_session_init(
     session->state = SSH_TRANSPORT_STATE_INIT;
     session->last_received_message_id = 0u;
     session->last_received_message_id_valid = 0;
+    session->last_channel_request_type[0] = '\0';
+    session->last_channel_request_type_valid = 0;
+    session->last_channel_request_want_reply = 0;
     transport_copy_algorithms(&session->server_algorithms, server_algorithms);
     ssh_packet_protection_init(&session->inbound);
     ssh_packet_protection_init(&session->outbound);
@@ -1858,8 +1881,12 @@ int ssh_transport_receive_channel_request(
             ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
             status = ssh_channel_request_decode(&buf, request);
             if (status != SSH_OK) {
+                if (status == SSH_ERR_UNSUPPORTED) {
+                    record_last_channel_request_diag(session, request);
+                }
                 return status;
             }
+            record_last_channel_request_diag(session, request);
             session->state = SSH_TRANSPORT_STATE_CHANNEL_REQUEST_RECEIVED;
             return SSH_OK;
         }
@@ -2132,6 +2159,17 @@ int ssh_transport_receive_channel_message(
         ssh_buffer_wrap(&buf, session->channel_message_payload, payload_len);
         status = ssh_channel_message_decode(&buf, message);
         if (status != SSH_OK) {
+            if (status == SSH_ERR_UNSUPPORTED &&
+                payload_len != 0u &&
+                session->channel_message_payload[0] == SSH_MSG_CHANNEL_REQUEST) {
+                ssh_channel_request_t request_diag;
+                ssh_buffer_t request_buf;
+
+                memset(&request_diag, 0, sizeof(request_diag));
+                ssh_buffer_wrap(&request_buf, session->channel_message_payload, payload_len);
+                (void)ssh_channel_request_decode(&request_buf, &request_diag);
+                record_last_channel_request_diag(session, &request_diag);
+            }
             return status;
         }
         break;

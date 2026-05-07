@@ -64,6 +64,9 @@ typedef struct ssh_server {
     int initialized;
     uint8_t diag_last_received_message_id;
     int diag_last_received_message_id_valid;
+    char diag_last_channel_request_type[64];
+    int diag_last_channel_request_type_valid;
+    int diag_last_channel_request_want_reply;
 } ssh_server_t;
 
 typedef struct ssh_server_session_options {

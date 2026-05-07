@@ -342,17 +342,32 @@ static void update_server_diag_from_transport(
     ssh_server_t *server,
     const ssh_transport_session_t *transport)
 {
+    size_t len;
+
     if (server == NULL) {
         return;
     }
     server->diag_last_received_message_id = 0u;
     server->diag_last_received_message_id_valid = 0;
+    server->diag_last_channel_request_type[0] = '\0';
+    server->diag_last_channel_request_type_valid = 0;
+    server->diag_last_channel_request_want_reply = 0;
     if (transport == NULL) {
         return;
     }
     if (transport->last_received_message_id_valid) {
         server->diag_last_received_message_id = transport->last_received_message_id;
         server->diag_last_received_message_id_valid = 1;
+    }
+    if (transport->last_channel_request_type_valid) {
+        len = strlen(transport->last_channel_request_type);
+        if (len >= sizeof(server->diag_last_channel_request_type)) {
+            len = sizeof(server->diag_last_channel_request_type) - 1u;
+        }
+        memcpy(server->diag_last_channel_request_type, transport->last_channel_request_type, len);
+        server->diag_last_channel_request_type[len] = '\0';
+        server->diag_last_channel_request_type_valid = 1;
+        server->diag_last_channel_request_want_reply = transport->last_channel_request_want_reply;
     }
 }
 
@@ -366,7 +381,7 @@ const char *ssh_status_string(int status)
     case SSH_ERR_BUFFER_TOO_SMALL:
         return "buffer too small";
     case SSH_ERR_BUFFER_OVERFLOW:
-        return "buffer overflow";
+        return "no space left";
     case SSH_ERR_BUFFER_UNDERFLOW:
         return "buffer underflow";
     case SSH_ERR_MALFORMED_PACKET:
@@ -428,6 +443,9 @@ int ssh_server_init(ssh_server_t *server, const ssh_platform_t *platform, const 
     server->platform = *platform;
     server->diag_last_received_message_id = 0u;
     server->diag_last_received_message_id_valid = 0;
+    server->diag_last_channel_request_type[0] = '\0';
+    server->diag_last_channel_request_type_valid = 0;
+    server->diag_last_channel_request_want_reply = 0;
 
     if (server->config.software_name == NULL ||
         server->config.max_packet_size == 0u ||

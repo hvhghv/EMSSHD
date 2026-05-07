@@ -45,6 +45,21 @@ typedef struct stdio_dir_handle {
 
 static int error_to_status(void)
 {
+#ifdef ENOSPC
+    if (errno == ENOSPC) {
+        return SSH_ERR_BUFFER_OVERFLOW;
+    }
+#endif
+#ifdef EDQUOT
+    if (errno == EDQUOT) {
+        return SSH_ERR_BUFFER_OVERFLOW;
+    }
+#endif
+#ifdef EFBIG
+    if (errno == EFBIG) {
+        return SSH_ERR_BUFFER_OVERFLOW;
+    }
+#endif
     if (errno == ENOENT
 #ifdef ENOTDIR
         || errno == ENOTDIR

@@ -148,6 +148,9 @@ typedef struct ssh_transport_session {
     size_t authenticated_username_len;
     uint8_t last_received_message_id;
     int last_received_message_id_valid;
+    char last_channel_request_type[64];
+    int last_channel_request_type_valid;
+    int last_channel_request_want_reply;
 } ssh_transport_session_t;
 
 int ssh_identification_parse_line(const uint8_t *line, size_t len, ssh_identification_t *ident);
