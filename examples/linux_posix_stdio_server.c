@@ -656,6 +656,117 @@ static int initialize_server_templates(
     return SSH_OK;
 }
 
+static int request_type_is(const ssh_channel_request_t *request, const char *request_type)
+{
+    size_t len;
+
+    if (request == NULL || request_type == NULL || request->request_type.data == NULL) {
+        return 0;
+    }
+    len = strlen(request_type);
+    return request->request_type.len == len &&
+           memcmp(request->request_type.data, request_type, len) == 0;
+}
+
+static int view_to_printable(const ssh_string_view_t view, char *out, size_t out_capacity)
+{
+    size_t copy_len;
+
+    if (out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (view.data == NULL) {
+        out[0] = '\0';
+        return SSH_OK;
+    }
+
+    copy_len = view.len;
+    if (copy_len + 1u > out_capacity) {
+        copy_len = out_capacity - 1u;
+    }
+    memcpy(out, view.data, copy_len);
+    out[copy_len] = '\0';
+    return copy_len == view.len ? SSH_OK : SSH_ERR_BUFFER_TOO_SMALL;
+}
+
+static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_request_t *request)
+{
+    const ssh_posix_conn_t *conn = (const ssh_posix_conn_t *)ctx;
+    const char *peer = ssh_posix_conn_peer_address(conn);
+    char request_type[64];
+    int type_status;
+
+    if (request == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    type_status = view_to_printable(request->request_type, request_type, sizeof(request_type));
+    fprintf(
+        stderr,
+        "unsupported channel request from %s: type=%s%s\n",
+        peer != NULL ? peer : "unknown",
+        request_type[0] != '\0' ? request_type : "(empty)",
+        type_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+
+    if (request_type_is(request, SSH_CHANNEL_REQUEST_SUBSYSTEM)) {
+        char subsystem[64];
+        int status = view_to_printable(request->subsystem_name, subsystem, sizeof(subsystem));
+        fprintf(
+            stderr,
+            "  subsystem=%s%s\n",
+            subsystem[0] != '\0' ? subsystem : "(empty)",
+            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_EXEC)) {
+        char command[128];
+        int status = view_to_printable(request->command, command, sizeof(command));
+        fprintf(
+            stderr,
+            "  exec=%s%s\n",
+            command[0] != '\0' ? command : "(empty)",
+            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_ENV)) {
+        char env_name[64];
+        int name_status = view_to_printable(request->env_name, env_name, sizeof(env_name));
+        fprintf(
+            stderr,
+            "  env=%s%s value_len=%lu\n",
+            env_name[0] != '\0' ? env_name : "(empty)",
+            name_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
+            (unsigned long)request->env_value.len);
+    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ)) {
+        char term_type[64];
+        int status = view_to_printable(request->term_type, term_type, sizeof(term_type));
+        fprintf(
+            stderr,
+            "  pty term=%s%s cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
+            term_type[0] != '\0' ? term_type : "(empty)",
+            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "",
+            (unsigned long)request->cols,
+            (unsigned long)request->rows,
+            (unsigned long)request->width_px,
+            (unsigned long)request->height_px);
+    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_WINDOW_CHANGE)) {
+        fprintf(
+            stderr,
+            "  window-change cols=%lu rows=%lu width_px=%lu height_px=%lu\n",
+            (unsigned long)request->cols,
+            (unsigned long)request->rows,
+            (unsigned long)request->width_px,
+            (unsigned long)request->height_px);
+    } else if (request_type_is(request, SSH_CHANNEL_REQUEST_SIGNAL)) {
+        char signal_name[64];
+        int status = view_to_printable(request->signal_name, signal_name, sizeof(signal_name));
+        fprintf(
+            stderr,
+            "  signal=%s%s\n",
+            signal_name[0] != '\0' ? signal_name : "(empty)",
+            status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+    }
+
+    return SSH_ERR_UNSUPPORTED;
+}
+
 static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 {
     backend_instance_t backend;
@@ -680,6 +791,8 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 
     config = shared->base_server_config;
     options = shared->base_session_options;
+    options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
+    options.non_sftp_channel_request_policy_ctx = conn;
     status = ssh_server_init(&server, &backend.platform, &config);
     if (status != SSH_OK) {
         backend_instance_deinit(&backend);
