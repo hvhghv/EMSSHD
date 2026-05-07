@@ -555,7 +555,7 @@ int ssh_server_accept_sftp_channel(
             (void)ssh_transport_send_channel_failure(
                 transport,
                 conn,
-                request.recipient_channel,
+                open.sender_channel,
                 effective.timeout_ms);
         }
         if (effective.non_sftp_channel_request_policy == NULL ||
@@ -573,7 +573,7 @@ int ssh_server_accept_sftp_channel(
         status = ssh_transport_send_channel_success(
             transport,
             conn,
-            request.recipient_channel,
+            open.sender_channel,
             effective.timeout_ms);
         if (status != SSH_OK) {
             return status;
@@ -945,7 +945,7 @@ int ssh_server_accept_terminal_channel(
                 (void)ssh_transport_send_channel_failure(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
             }
             if (effective.non_sftp_channel_request_policy == NULL ||
@@ -972,7 +972,7 @@ int ssh_server_accept_terminal_channel(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
                 if (status != SSH_OK) {
                     return status;
@@ -986,7 +986,7 @@ int ssh_server_accept_terminal_channel(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
                 if (status != SSH_OK) {
                     return status;
@@ -1012,7 +1012,7 @@ int ssh_server_accept_terminal_channel(
                     (void)ssh_transport_send_channel_failure(
                         transport,
                         conn,
-                        request.recipient_channel,
+                        channel->client_channel,
                         effective.timeout_ms);
                     continue;
                 }
@@ -1021,7 +1021,7 @@ int ssh_server_accept_terminal_channel(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
                 if (status != SSH_OK) {
                     return status;
@@ -1043,7 +1043,7 @@ int ssh_server_accept_terminal_channel(
                     (void)ssh_transport_send_channel_failure(
                         transport,
                         conn,
-                        request.recipient_channel,
+                        channel->client_channel,
                         effective.timeout_ms);
                     continue;
                 }
@@ -1052,7 +1052,7 @@ int ssh_server_accept_terminal_channel(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
                 if (status != SSH_OK) {
                     return status;
@@ -1068,7 +1068,7 @@ int ssh_server_accept_terminal_channel(
                     (void)ssh_transport_send_channel_failure(
                         transport,
                         conn,
-                        request.recipient_channel,
+                        channel->client_channel,
                         effective.timeout_ms);
                 }
                 return SSH_ERR_SECURITY;
@@ -1080,7 +1080,7 @@ int ssh_server_accept_terminal_channel(
                         (void)ssh_transport_send_channel_failure(
                             transport,
                             conn,
-                            request.recipient_channel,
+                            channel->client_channel,
                             effective.timeout_ms);
                     }
                     return SSH_ERR_UNSUPPORTED;
@@ -1102,7 +1102,7 @@ int ssh_server_accept_terminal_channel(
                         (void)ssh_transport_send_channel_failure(
                             transport,
                             conn,
-                            request.recipient_channel,
+                            channel->client_channel,
                             effective.timeout_ms);
                     }
                     return SSH_ERR_UNSUPPORTED;
@@ -1113,7 +1113,7 @@ int ssh_server_accept_terminal_channel(
                         (void)ssh_transport_send_channel_failure(
                             transport,
                             conn,
-                            request.recipient_channel,
+                            channel->client_channel,
                             effective.timeout_ms);
                     }
                     return status;
@@ -1135,7 +1135,7 @@ int ssh_server_accept_terminal_channel(
                     (void)ssh_transport_send_channel_failure(
                         transport,
                         conn,
-                        request.recipient_channel,
+                        channel->client_channel,
                         effective.timeout_ms);
                 }
                 return status;
@@ -1147,7 +1147,7 @@ int ssh_server_accept_terminal_channel(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request.recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
                 if (status != SSH_OK) {
                     return status;
@@ -1160,7 +1160,7 @@ int ssh_server_accept_terminal_channel(
             (void)ssh_transport_send_channel_failure(
                 transport,
                 conn,
-                request.recipient_channel,
+                channel->client_channel,
                 effective.timeout_ms);
         }
         if (effective.non_sftp_channel_request_policy == NULL ||
