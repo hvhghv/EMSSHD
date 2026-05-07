@@ -1800,7 +1800,6 @@ int ssh_transport_receive_channel_request(
     ssh_channel_request_t *request,
     uint32_t timeout_ms)
 {
-    uint8_t payload[512];
     size_t payload_len;
     ssh_buffer_t buf;
     int status;
@@ -1809,12 +1808,19 @@ int ssh_transport_receive_channel_request(
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    status = receive_protected_payload_skip_ignorable(session, conn, payload, sizeof(payload), &payload_len, timeout_ms);
+    status = receive_protected_payload_skip_ignorable(
+        session,
+        conn,
+        session->channel_request_payload,
+        sizeof(session->channel_request_payload),
+        &payload_len,
+        timeout_ms);
     if (status != SSH_OK) {
         return status;
     }
+    session->channel_request_payload_len = payload_len;
 
-    ssh_buffer_wrap(&buf, payload, payload_len);
+    ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
     status = ssh_channel_request_decode(&buf, request);
     if (status != SSH_OK) {
         return status;

@@ -24,6 +24,7 @@
 #define EMSSH_MAX_KEX_REPLY_PAYLOAD 2048u
 #define EMSSH_MAX_SERVICE_PAYLOAD 256u
 #define EMSSH_MAX_EXT_INFO_PAYLOAD 256u
+#define EMSSH_MAX_CHANNEL_REQUEST_PAYLOAD 512u
 
 struct ssh_server;
 
@@ -133,6 +134,8 @@ typedef struct ssh_transport_session {
 
     uint8_t service_payload[EMSSH_MAX_SERVICE_PAYLOAD];
     size_t service_payload_len;
+    uint8_t channel_request_payload[EMSSH_MAX_CHANNEL_REQUEST_PAYLOAD];
+    size_t channel_request_payload_len;
     uint8_t userauth_payload[EMSSH_MAX_USERAUTH_PAYLOAD];
     size_t userauth_payload_len;
     char authenticated_username[EMSSH_MAX_USERAUTH_PAYLOAD];
