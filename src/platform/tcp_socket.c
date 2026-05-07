@@ -26,6 +26,8 @@ typedef int emssh_socket_t;
 
 #include "emssh/ssh_error.h"
 
+#define EMSSH_NET_IO_TIMEOUT (-2)
+
 static emssh_socket_t handle_to_socket(uintptr_t handle)
 {
     return (emssh_socket_t)handle;
@@ -88,8 +90,13 @@ static int tcp_read(void *ctx, void *conn, uint8_t *buf, size_t len, uint32_t ti
     }
 
     socket_handle = handle_to_socket(tcp_conn->socket_handle);
-    if (wait_for_socket(socket_handle, 0, timeout_ms) <= 0) {
+    switch (wait_for_socket(socket_handle, 0, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)recv(socket_handle, (char *)buf, (int)len, 0);
@@ -115,8 +122,13 @@ static int tcp_write(void *ctx, void *conn, const uint8_t *buf, size_t len, uint
     }
 
     socket_handle = handle_to_socket(tcp_conn->socket_handle);
-    if (wait_for_socket(socket_handle, 1, timeout_ms) <= 0) {
+    switch (wait_for_socket(socket_handle, 1, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)send(socket_handle, (const char *)buf, (int)len, 0);

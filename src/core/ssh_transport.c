@@ -10,6 +10,8 @@
 #include "emssh/ssh_service.h"
 #include "emssh/ssh_userauth.h"
 
+#define EMSSH_NET_IO_TIMEOUT (-2)
+
 #define EMSSH_AUTO_SERVER_SIG_ALGS_ED25519_SUFFIX ",ssh-ed25519"
 #define EMSSH_AUTO_SERVER_SIG_ALGS_CAPACITY \
     (sizeof(EMSSH_SERVER_SIG_ALGS_DEFAULT_BASE) + sizeof(EMSSH_AUTO_SERVER_SIG_ALGS_ED25519_SUFFIX) - 1u)
@@ -259,6 +261,9 @@ static int net_read_exact(
 
         if (n == 0) {
             return SSH_ERR_CLOSED;
+        }
+        if (n == EMSSH_NET_IO_TIMEOUT) {
+            return SSH_ERR_NOT_FOUND;
         }
         if (n < 0) {
             return SSH_ERR_PLATFORM;

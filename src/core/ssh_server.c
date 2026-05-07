@@ -14,6 +14,7 @@
 #define EMSSH_DEFAULT_SESSION_TIMEOUT_MS 10000u
 #define EMSSH_DEFAULT_CHANNEL_WINDOW_SIZE 65536u
 #define EMSSH_DEFAULT_CHANNEL_MAX_PACKET_SIZE 32768u
+#define EMSSH_TERMINAL_RECV_POLL_MS 50u
 
 static int view_equals_cstr(ssh_string_view_t view, const char *value)
 {
@@ -1174,6 +1175,9 @@ int ssh_server_run_terminal_session(
             status = SSH_OK;
             break;
         }
+        if (status == SSH_ERR_NOT_FOUND) {
+            continue;
+        }
         if (status != SSH_OK) {
             break;
         }
@@ -1296,6 +1300,9 @@ int ssh_server_run_auto_session(
                 if (status == SSH_ERR_CLOSED) {
                     status = SSH_OK;
                     break;
+                }
+                if (status == SSH_ERR_NOT_FOUND) {
+                    continue;
                 }
                 if (status != SSH_OK) {
                     break;
@@ -1530,6 +1537,7 @@ int ssh_server_process_terminal_channel_data(
     ssh_channel_message_t message;
     uint8_t channel_data[2048];
     size_t channel_data_len;
+    uint32_t receive_timeout_ms;
     size_t written_len;
     int status;
     int closed_now;
@@ -1549,6 +1557,22 @@ int ssh_server_process_terminal_channel_data(
         return SSH_ERR_CLOSED;
     }
 
+    status = maybe_pump_terminal_output(transport, conn, channel, &effective);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = maybe_send_terminal_exit_and_close(transport, conn, channel, &effective, &closed_now);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (closed_now) {
+        return SSH_ERR_CLOSED;
+    }
+
+    receive_timeout_ms = effective.timeout_ms;
+    if (receive_timeout_ms == 0u || receive_timeout_ms > EMSSH_TERMINAL_RECV_POLL_MS) {
+        receive_timeout_ms = EMSSH_TERMINAL_RECV_POLL_MS;
+    }
     status = ssh_transport_receive_channel_message(
         transport,
         conn,
@@ -1556,7 +1580,21 @@ int ssh_server_process_terminal_channel_data(
         channel_data,
         sizeof(channel_data),
         &channel_data_len,
-        effective.timeout_ms);
+        receive_timeout_ms);
+    if (status == SSH_ERR_NOT_FOUND) {
+        status = maybe_pump_terminal_output(transport, conn, channel, &effective);
+        if (status != SSH_OK) {
+            return status;
+        }
+        status = maybe_send_terminal_exit_and_close(transport, conn, channel, &effective, &closed_now);
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (closed_now) {
+            return SSH_ERR_CLOSED;
+        }
+        return SSH_ERR_NOT_FOUND;
+    }
     if (status != SSH_OK) {
         return status;
     }

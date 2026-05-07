@@ -11,6 +11,8 @@
 
 #include "emssh/ssh_error.h"
 
+#define EMSSH_NET_IO_TIMEOUT (-2)
+
 static int posix_is_peer_closed_error(void)
 {
     return errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN;
@@ -55,8 +57,13 @@ static int posix_net_read(void *ctx, void *conn, uint8_t *buf, size_t len, uint3
         return -1;
     }
 
-    if (posix_wait_socket(posix_conn->socket_fd, 0, timeout_ms) <= 0) {
+    switch (posix_wait_socket(posix_conn->socket_fd, 0, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)recv(posix_conn->socket_fd, buf, len, 0);
@@ -80,8 +87,13 @@ static int posix_net_write(void *ctx, void *conn, const uint8_t *buf, size_t len
         return 0;
     }
 
-    if (posix_wait_socket(posix_conn->socket_fd, 1, timeout_ms) <= 0) {
+    switch (posix_wait_socket(posix_conn->socket_fd, 1, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)send(posix_conn->socket_fd, buf, len, 0);

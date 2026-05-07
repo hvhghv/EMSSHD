@@ -10,6 +10,8 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
+#define EMSSH_NET_IO_TIMEOUT (-2)
+
 static int is_peer_closed_error(void)
 {
     return errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE;
@@ -59,8 +61,13 @@ static int lwip_read(void *ctx, void *conn, uint8_t *buf, size_t len, uint32_t t
         return -1;
     }
 
-    if (wait_for_socket(lwip_conn->socket_fd, 0, timeout_ms) <= 0) {
+    switch (wait_for_socket(lwip_conn->socket_fd, 0, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)lwip_recv(lwip_conn->socket_fd, buf, len, 0);
@@ -84,8 +91,13 @@ static int lwip_write(void *ctx, void *conn, const uint8_t *buf, size_t len, uin
         return 0;
     }
 
-    if (wait_for_socket(lwip_conn->socket_fd, 1, timeout_ms) <= 0) {
+    switch (wait_for_socket(lwip_conn->socket_fd, 1, timeout_ms)) {
+    case 0:
+        return EMSSH_NET_IO_TIMEOUT;
+    case -1:
         return -1;
+    default:
+        break;
     }
 
     n = (int)lwip_send(lwip_conn->socket_fd, buf, len, 0);
