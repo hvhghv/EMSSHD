@@ -485,17 +485,401 @@ int ssh_server_run_userauth(
     return SSH_ERR_SECURITY;
 }
 
+static int sftp_accept_after_open(
+    struct ssh_transport_session *transport,
+    void *conn,
+    ssh_server_sftp_channel_t *channel,
+    const ssh_server_session_options_t *options,
+    const ssh_channel_open_t *open,
+    const ssh_channel_request_t *first_request,
+    int has_first_request)
+{
+    ssh_server_session_options_t effective;
+    ssh_channel_request_t request;
+    unsigned non_sftp_attempts;
+    int accepted_subsystem;
+    int status;
+
+    if (transport == NULL || transport->server == NULL || conn == NULL || channel == NULL || open == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (transport->server->platform.fs == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+
+    effective_session_options(options, &effective);
+    accepted_subsystem = 0;
+    memset(&request, 0, sizeof(request));
+    for (non_sftp_attempts = 0u; non_sftp_attempts < 8u; ++non_sftp_attempts) {
+        if (has_first_request) {
+            request = *first_request;
+            status = SSH_OK;
+            has_first_request = 0;
+        } else {
+            status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
+        }
+        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            return status;
+        }
+
+        if (status == SSH_OK && request.recipient_channel != effective.server_channel) {
+            return SSH_ERR_SECURITY;
+        }
+        if (status == SSH_OK &&
+            channel_request_is_subsystem_name(
+                &request,
+                effective.sftp_subsystem_name != NULL ? effective.sftp_subsystem_name : SSH_SUBSYSTEM_SFTP)) {
+            accepted_subsystem = 1;
+            break;
+        }
+
+        if (request.want_reply) {
+            (void)ssh_transport_send_channel_failure(
+                transport,
+                conn,
+                open->sender_channel,
+                effective.timeout_ms);
+        }
+        if (effective.non_sftp_channel_request_policy == NULL ||
+            effective.non_sftp_channel_request_policy(
+                effective.non_sftp_channel_request_policy_ctx,
+                &request) != SSH_OK) {
+            return SSH_ERR_UNSUPPORTED;
+        }
+    }
+    if (!accepted_subsystem) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    if (request.want_reply) {
+        status = ssh_transport_send_channel_success(
+            transport,
+            conn,
+            open->sender_channel,
+            effective.timeout_ms);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+
+    status = sftp_server_session_init(&channel->sftp, transport->server->platform.fs);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (effective.sftp_policy != NULL) {
+        status = sftp_server_session_set_policy(&channel->sftp, effective.sftp_policy, effective.sftp_policy_ctx);
+        if (status != SSH_OK) {
+            sftp_server_session_deinit(&channel->sftp);
+            return status;
+        }
+    }
+
+    channel->client_channel = open->sender_channel;
+    channel->server_channel = effective.server_channel;
+    channel->window_size = effective.channel_window_size;
+    channel->window_max_size = effective.channel_window_size;
+    channel->max_packet_size = effective.channel_max_packet_size;
+    channel->peer_window_size = open->initial_window_size;
+    channel->peer_max_packet_size = open->maximum_packet_size;
+    channel->initialized = 1;
+    return SSH_OK;
+}
+
+static int terminal_accept_after_open(
+    struct ssh_transport_session *transport,
+    void *conn,
+    ssh_server_terminal_channel_t *channel,
+    const ssh_server_session_options_t *options,
+    const ssh_channel_open_t *open,
+    const ssh_channel_request_t *first_request,
+    int has_first_request)
+{
+    ssh_server_session_options_t effective;
+    ssh_channel_request_t request;
+    const ssh_term_api_t *term;
+    unsigned attempts;
+    int status;
+
+    if (transport == NULL || transport->server == NULL || conn == NULL || channel == NULL || open == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    term = transport->server->platform.term;
+    if (term == NULL || (term->spawn_shell == NULL && term->spawn_exec == NULL)) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    effective_session_options(options, &effective);
+
+    channel->client_channel = open->sender_channel;
+    channel->server_channel = effective.server_channel;
+    channel->window_size = effective.channel_window_size;
+    channel->window_max_size = effective.channel_window_size;
+    channel->max_packet_size = effective.channel_max_packet_size;
+    channel->peer_window_size = open->initial_window_size;
+    channel->peer_max_packet_size = open->maximum_packet_size;
+    channel->initialized = 1;
+    channel->state = SSH_SERVER_TERMINAL_STATE_SESSION_OPEN;
+
+    memset(&request, 0, sizeof(request));
+    for (attempts = 0u; attempts < 16u; ++attempts) {
+        if (has_first_request) {
+            request = *first_request;
+            status = SSH_OK;
+            has_first_request = 0;
+        } else {
+            status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
+        }
+        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            return status;
+        }
+
+        if (status == SSH_OK && request.recipient_channel != channel->server_channel) {
+            return SSH_ERR_SECURITY;
+        }
+
+        if (status == SSH_ERR_UNSUPPORTED) {
+            if (request.want_reply) {
+                (void)ssh_transport_send_channel_failure(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+            }
+            if (effective.non_sftp_channel_request_policy == NULL ||
+                effective.non_sftp_channel_request_policy(
+                    effective.non_sftp_channel_request_policy_ctx,
+                    &request) != SSH_OK) {
+                return SSH_ERR_UNSUPPORTED;
+            }
+            continue;
+        }
+
+        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_PTY_REQ)) {
+            status = view_to_cstring(request.term_type, channel->term_type, sizeof(channel->term_type));
+            if (status != SSH_OK) {
+                return status;
+            }
+            channel->cols = request.cols;
+            channel->rows = request.rows;
+            channel->width_px = request.width_px;
+            channel->height_px = request.height_px;
+            channel->pty_requested = 1;
+            channel->state = SSH_SERVER_TERMINAL_STATE_PTY_CONFIGURED;
+            if (request.want_reply) {
+                status = ssh_transport_send_channel_success(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_ENV)) {
+            if (request.want_reply) {
+                status = ssh_transport_send_channel_success(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_WINDOW_CHANGE)) {
+            channel->cols = request.cols;
+            channel->rows = request.rows;
+            channel->width_px = request.width_px;
+            channel->height_px = request.height_px;
+            if (channel->running && term->resize != NULL && channel->term_handle != NULL) {
+                status = term->resize(
+                    term->ctx,
+                    channel->term_handle,
+                    channel->cols,
+                    channel->rows,
+                    channel->width_px,
+                    channel->height_px);
+                if (status != SSH_OK && request.want_reply) {
+                    (void)ssh_transport_send_channel_failure(
+                        transport,
+                        conn,
+                        channel->client_channel,
+                        effective.timeout_ms);
+                    continue;
+                }
+            }
+            if (request.want_reply) {
+                status = ssh_transport_send_channel_success(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SIGNAL)) {
+            if (channel->running && term->signal != NULL && channel->term_handle != NULL) {
+                char signal_name[64];
+
+                status = view_to_cstring(request.signal_name, signal_name, sizeof(signal_name));
+                if (status != SSH_OK) {
+                    return status;
+                }
+                status = term->signal(term->ctx, channel->term_handle, signal_name);
+                if (status != SSH_OK && request.want_reply) {
+                    (void)ssh_transport_send_channel_failure(
+                        transport,
+                        conn,
+                        channel->client_channel,
+                        effective.timeout_ms);
+                    continue;
+                }
+            }
+            if (request.want_reply) {
+                status = ssh_transport_send_channel_success(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SHELL) ||
+            view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_EXEC)) {
+            if (channel->running) {
+                if (request.want_reply) {
+                    (void)ssh_transport_send_channel_failure(
+                        transport,
+                        conn,
+                        channel->client_channel,
+                        effective.timeout_ms);
+                }
+                return SSH_ERR_SECURITY;
+            }
+
+            if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SHELL)) {
+                if (term->spawn_shell == NULL) {
+                    if (request.want_reply) {
+                        (void)ssh_transport_send_channel_failure(
+                            transport,
+                            conn,
+                            channel->client_channel,
+                            effective.timeout_ms);
+                    }
+                    return SSH_ERR_UNSUPPORTED;
+                }
+                status = term->spawn_shell(
+                    term->ctx,
+                    transport->authenticated_username_len != 0u ? transport->authenticated_username : NULL,
+                    channel->pty_requested ? channel->term_type : NULL,
+                    channel->cols,
+                    channel->rows,
+                    channel->width_px,
+                    channel->height_px,
+                    &channel->term_handle);
+            } else {
+                char command[256];
+
+                if (term->spawn_exec == NULL) {
+                    if (request.want_reply) {
+                        (void)ssh_transport_send_channel_failure(
+                            transport,
+                            conn,
+                            channel->client_channel,
+                            effective.timeout_ms);
+                    }
+                    return SSH_ERR_UNSUPPORTED;
+                }
+                status = view_to_cstring(request.command, command, sizeof(command));
+                if (status != SSH_OK) {
+                    if (request.want_reply) {
+                        (void)ssh_transport_send_channel_failure(
+                            transport,
+                            conn,
+                            channel->client_channel,
+                            effective.timeout_ms);
+                    }
+                    return status;
+                }
+                status = term->spawn_exec(
+                    term->ctx,
+                    transport->authenticated_username_len != 0u ? transport->authenticated_username : NULL,
+                    command,
+                    channel->pty_requested ? channel->term_type : NULL,
+                    channel->cols,
+                    channel->rows,
+                    channel->width_px,
+                    channel->height_px,
+                    &channel->term_handle);
+            }
+
+            if (status != SSH_OK) {
+                if (request.want_reply) {
+                    (void)ssh_transport_send_channel_failure(
+                        transport,
+                        conn,
+                        channel->client_channel,
+                        effective.timeout_ms);
+                }
+                return status;
+            }
+
+            channel->running = 1;
+            channel->state = SSH_SERVER_TERMINAL_STATE_RUNNING;
+            if (request.want_reply) {
+                status = ssh_transport_send_channel_success(
+                    transport,
+                    conn,
+                    channel->client_channel,
+                    effective.timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            return SSH_OK;
+        }
+
+        if (request.want_reply) {
+            (void)ssh_transport_send_channel_failure(
+                transport,
+                conn,
+                channel->client_channel,
+                effective.timeout_ms);
+        }
+        if (effective.non_sftp_channel_request_policy == NULL ||
+            effective.non_sftp_channel_request_policy(
+                effective.non_sftp_channel_request_policy_ctx,
+                &request) != SSH_OK) {
+            return SSH_ERR_UNSUPPORTED;
+        }
+    }
+
+    return SSH_ERR_UNSUPPORTED;
+}
+
 int ssh_server_accept_sftp_channel(
     struct ssh_transport_session *transport,
     void *conn,
     ssh_server_sftp_channel_t *channel,
     const ssh_server_session_options_t *options)
 {
-    ssh_server_session_options_t effective;
     ssh_channel_open_t open;
-    ssh_channel_request_t request;
-    unsigned non_sftp_attempts;
-    int accepted_subsystem;
+    ssh_server_session_options_t effective;
     int status;
 
     if (transport == NULL || transport->server == NULL || conn == NULL || channel == NULL) {
@@ -536,71 +920,7 @@ int ssh_server_accept_sftp_channel(
         return status;
     }
 
-    accepted_subsystem = 0;
-    for (non_sftp_attempts = 0u; non_sftp_attempts < 8u; ++non_sftp_attempts) {
-        status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
-        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
-            return status;
-        }
-        if (status == SSH_OK &&
-            request.recipient_channel == effective.server_channel &&
-            channel_request_is_subsystem_name(
-                &request,
-                effective.sftp_subsystem_name != NULL ? effective.sftp_subsystem_name : SSH_SUBSYSTEM_SFTP)) {
-            accepted_subsystem = 1;
-            break;
-        }
-
-        if (request.want_reply) {
-            (void)ssh_transport_send_channel_failure(
-                transport,
-                conn,
-                open.sender_channel,
-                effective.timeout_ms);
-        }
-        if (effective.non_sftp_channel_request_policy == NULL ||
-            effective.non_sftp_channel_request_policy(
-                effective.non_sftp_channel_request_policy_ctx,
-                &request) != SSH_OK) {
-            return SSH_ERR_UNSUPPORTED;
-        }
-    }
-    if (!accepted_subsystem) {
-        return SSH_ERR_UNSUPPORTED;
-    }
-
-    if (request.want_reply) {
-        status = ssh_transport_send_channel_success(
-            transport,
-            conn,
-            open.sender_channel,
-            effective.timeout_ms);
-        if (status != SSH_OK) {
-            return status;
-        }
-    }
-
-    status = sftp_server_session_init(&channel->sftp, transport->server->platform.fs);
-    if (status != SSH_OK) {
-        return status;
-    }
-    if (effective.sftp_policy != NULL) {
-        status = sftp_server_session_set_policy(&channel->sftp, effective.sftp_policy, effective.sftp_policy_ctx);
-        if (status != SSH_OK) {
-            sftp_server_session_deinit(&channel->sftp);
-            return status;
-        }
-    }
-
-    channel->client_channel = open.sender_channel;
-    channel->server_channel = effective.server_channel;
-    channel->window_size = effective.channel_window_size;
-    channel->window_max_size = effective.channel_window_size;
-    channel->max_packet_size = effective.channel_max_packet_size;
-    channel->peer_window_size = open.initial_window_size;
-    channel->peer_max_packet_size = open.maximum_packet_size;
-    channel->initialized = 1;
-    return SSH_OK;
+    return sftp_accept_after_open(transport, conn, channel, &effective, &open, NULL, 0);
 }
 
 int ssh_server_process_sftp_channel_data(
@@ -867,26 +1187,158 @@ int ssh_server_run_terminal_session(
     return status;
 }
 
+int ssh_server_run_auto_session(
+    ssh_server_t *server,
+    void *conn,
+    const ssh_server_session_options_t *options)
+{
+    ssh_server_session_options_t effective;
+    ssh_transport_session_t transport;
+    ssh_server_sftp_channel_t sftp_channel;
+    ssh_server_terminal_channel_t term_channel;
+    ssh_channel_open_t open;
+    ssh_channel_request_t request;
+    unsigned attempts;
+    unsigned processed;
+    int status;
+
+    if (server == NULL || conn == NULL || !server->initialized) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    effective_session_options(options, &effective);
+    memset(&sftp_channel, 0, sizeof(sftp_channel));
+    memset(&term_channel, 0, sizeof(term_channel));
+    memset(&open, 0, sizeof(open));
+    memset(&request, 0, sizeof(request));
+
+    status = ssh_server_run_transport_setup(server, conn, &transport, &effective);
+    if (status == SSH_OK) {
+        status = ssh_server_run_userauth(&transport, conn, &effective);
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    status = ssh_transport_receive_channel_open_skip_global_requests(&transport, conn, &open, effective.timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (!ssh_channel_type_is_session(open.channel_type)) {
+        (void)ssh_transport_send_channel_open_failure(
+            &transport,
+            conn,
+            open.sender_channel,
+            SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
+            "unsupported channel type",
+            effective.timeout_ms);
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    status = ssh_transport_send_channel_open_confirmation(
+        &transport,
+        conn,
+        open.sender_channel,
+        effective.server_channel,
+        effective.channel_window_size,
+        effective.channel_max_packet_size,
+        effective.timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    for (attempts = 0u; attempts < 16u; ++attempts) {
+        status = ssh_transport_receive_channel_request(&transport, conn, &request, effective.timeout_ms);
+        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            return status;
+        }
+        if (status == SSH_OK && request.recipient_channel != effective.server_channel) {
+            return SSH_ERR_SECURITY;
+        }
+
+        if (status == SSH_OK &&
+            channel_request_is_subsystem_name(
+                &request,
+                effective.sftp_subsystem_name != NULL ? effective.sftp_subsystem_name : SSH_SUBSYSTEM_SFTP)) {
+            status = sftp_accept_after_open(&transport, conn, &sftp_channel, &effective, &open, &request, 1);
+            if (status != SSH_OK) {
+                ssh_server_sftp_channel_deinit(&sftp_channel);
+                return status;
+            }
+            processed = 0u;
+            while (effective.max_sftp_packets == 0u || processed < effective.max_sftp_packets) {
+                status = ssh_server_process_sftp_channel_data(&transport, conn, &sftp_channel, &effective);
+                if (status == SSH_ERR_CLOSED) {
+                    status = SSH_OK;
+                    break;
+                }
+                if (status != SSH_OK) {
+                    break;
+                }
+                ++processed;
+            }
+            ssh_server_sftp_channel_deinit(&sftp_channel);
+            if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+                return SSH_OK;
+            }
+            return status;
+        }
+
+        if (status == SSH_OK && ssh_channel_request_is_terminal(&request)) {
+            status = terminal_accept_after_open(&transport, conn, &term_channel, &effective, &open, &request, 1);
+            if (status != SSH_OK) {
+                ssh_server_terminal_channel_deinit(&transport, &term_channel);
+                return status;
+            }
+            processed = 0u;
+            while (effective.max_sftp_packets == 0u || processed < effective.max_sftp_packets) {
+                status = ssh_server_process_terminal_channel_data(&transport, conn, &term_channel, &effective);
+                if (status == SSH_ERR_CLOSED) {
+                    status = SSH_OK;
+                    break;
+                }
+                if (status != SSH_OK) {
+                    break;
+                }
+                ++processed;
+            }
+            ssh_server_terminal_channel_deinit(&transport, &term_channel);
+            if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+                return SSH_OK;
+            }
+            return status;
+        }
+
+        if (request.want_reply) {
+            (void)ssh_transport_send_channel_failure(
+                &transport,
+                conn,
+                open.sender_channel,
+                effective.timeout_ms);
+        }
+        if (effective.non_sftp_channel_request_policy == NULL ||
+            effective.non_sftp_channel_request_policy(
+                effective.non_sftp_channel_request_policy_ctx,
+                &request) != SSH_OK) {
+            return SSH_ERR_UNSUPPORTED;
+        }
+    }
+
+    return SSH_ERR_UNSUPPORTED;
+}
+
 int ssh_server_accept_terminal_channel(
     struct ssh_transport_session *transport,
     void *conn,
     ssh_server_terminal_channel_t *channel,
     const ssh_server_session_options_t *options)
 {
-    ssh_server_session_options_t effective;
     ssh_channel_open_t open;
-    ssh_channel_request_t request;
-    const ssh_term_api_t *term;
-    unsigned attempts;
+    ssh_server_session_options_t effective;
     int status;
 
     if (transport == NULL || transport->server == NULL || conn == NULL || channel == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
-    }
-
-    term = transport->server->platform.term;
-    if (term == NULL || (term->spawn_shell == NULL && term->spawn_exec == NULL)) {
-        return SSH_ERR_UNSUPPORTED;
     }
 
     effective_session_options(options, &effective);
@@ -920,258 +1372,7 @@ int ssh_server_accept_terminal_channel(
         return status;
     }
 
-    channel->client_channel = open.sender_channel;
-    channel->server_channel = effective.server_channel;
-    channel->window_size = effective.channel_window_size;
-    channel->window_max_size = effective.channel_window_size;
-    channel->max_packet_size = effective.channel_max_packet_size;
-    channel->peer_window_size = open.initial_window_size;
-    channel->peer_max_packet_size = open.maximum_packet_size;
-    channel->initialized = 1;
-    channel->state = SSH_SERVER_TERMINAL_STATE_SESSION_OPEN;
-
-    for (attempts = 0u; attempts < 16u; ++attempts) {
-        status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
-        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
-            return status;
-        }
-
-        if (status == SSH_OK && request.recipient_channel != channel->server_channel) {
-            return SSH_ERR_SECURITY;
-        }
-
-        if (status == SSH_ERR_UNSUPPORTED) {
-            if (request.want_reply) {
-                (void)ssh_transport_send_channel_failure(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-            }
-            if (effective.non_sftp_channel_request_policy == NULL ||
-                effective.non_sftp_channel_request_policy(
-                    effective.non_sftp_channel_request_policy_ctx,
-                    &request) != SSH_OK) {
-                return SSH_ERR_UNSUPPORTED;
-            }
-            continue;
-        }
-
-        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_PTY_REQ)) {
-            status = view_to_cstring(request.term_type, channel->term_type, sizeof(channel->term_type));
-            if (status != SSH_OK) {
-                return status;
-            }
-            channel->cols = request.cols;
-            channel->rows = request.rows;
-            channel->width_px = request.width_px;
-            channel->height_px = request.height_px;
-            channel->pty_requested = 1;
-            channel->state = SSH_SERVER_TERMINAL_STATE_PTY_CONFIGURED;
-            if (request.want_reply) {
-                status = ssh_transport_send_channel_success(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-                if (status != SSH_OK) {
-                    return status;
-                }
-            }
-            continue;
-        }
-
-        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_ENV)) {
-            if (request.want_reply) {
-                status = ssh_transport_send_channel_success(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-                if (status != SSH_OK) {
-                    return status;
-                }
-            }
-            continue;
-        }
-
-        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_WINDOW_CHANGE)) {
-            channel->cols = request.cols;
-            channel->rows = request.rows;
-            channel->width_px = request.width_px;
-            channel->height_px = request.height_px;
-            if (channel->running && term->resize != NULL && channel->term_handle != NULL) {
-                status = term->resize(
-                    term->ctx,
-                    channel->term_handle,
-                    channel->cols,
-                    channel->rows,
-                    channel->width_px,
-                    channel->height_px);
-                if (status != SSH_OK && request.want_reply) {
-                    (void)ssh_transport_send_channel_failure(
-                        transport,
-                        conn,
-                        channel->client_channel,
-                        effective.timeout_ms);
-                    continue;
-                }
-            }
-            if (request.want_reply) {
-                status = ssh_transport_send_channel_success(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-                if (status != SSH_OK) {
-                    return status;
-                }
-            }
-            continue;
-        }
-
-        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SIGNAL)) {
-            if (channel->running && term->signal != NULL && channel->term_handle != NULL) {
-                char signal_name[64];
-
-                status = view_to_cstring(request.signal_name, signal_name, sizeof(signal_name));
-                if (status != SSH_OK) {
-                    return status;
-                }
-                status = term->signal(term->ctx, channel->term_handle, signal_name);
-                if (status != SSH_OK && request.want_reply) {
-                    (void)ssh_transport_send_channel_failure(
-                        transport,
-                        conn,
-                        channel->client_channel,
-                        effective.timeout_ms);
-                    continue;
-                }
-            }
-            if (request.want_reply) {
-                status = ssh_transport_send_channel_success(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-                if (status != SSH_OK) {
-                    return status;
-                }
-            }
-            continue;
-        }
-
-        if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SHELL) ||
-            view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_EXEC)) {
-            if (channel->running) {
-                if (request.want_reply) {
-                    (void)ssh_transport_send_channel_failure(
-                        transport,
-                        conn,
-                        channel->client_channel,
-                        effective.timeout_ms);
-                }
-                return SSH_ERR_SECURITY;
-            }
-
-            if (view_equals_cstr(request.request_type, SSH_CHANNEL_REQUEST_SHELL)) {
-                if (term->spawn_shell == NULL) {
-                    if (request.want_reply) {
-                        (void)ssh_transport_send_channel_failure(
-                            transport,
-                            conn,
-                            channel->client_channel,
-                            effective.timeout_ms);
-                    }
-                    return SSH_ERR_UNSUPPORTED;
-                }
-                status = term->spawn_shell(
-                    term->ctx,
-                    transport->authenticated_username_len != 0u ? transport->authenticated_username : NULL,
-                    channel->pty_requested ? channel->term_type : NULL,
-                    channel->cols,
-                    channel->rows,
-                    channel->width_px,
-                    channel->height_px,
-                    &channel->term_handle);
-            } else {
-                char command[256];
-
-                if (term->spawn_exec == NULL) {
-                    if (request.want_reply) {
-                        (void)ssh_transport_send_channel_failure(
-                            transport,
-                            conn,
-                            channel->client_channel,
-                            effective.timeout_ms);
-                    }
-                    return SSH_ERR_UNSUPPORTED;
-                }
-                status = view_to_cstring(request.command, command, sizeof(command));
-                if (status != SSH_OK) {
-                    if (request.want_reply) {
-                        (void)ssh_transport_send_channel_failure(
-                            transport,
-                            conn,
-                            channel->client_channel,
-                            effective.timeout_ms);
-                    }
-                    return status;
-                }
-                status = term->spawn_exec(
-                    term->ctx,
-                    transport->authenticated_username_len != 0u ? transport->authenticated_username : NULL,
-                    command,
-                    channel->pty_requested ? channel->term_type : NULL,
-                    channel->cols,
-                    channel->rows,
-                    channel->width_px,
-                    channel->height_px,
-                    &channel->term_handle);
-            }
-
-            if (status != SSH_OK) {
-                if (request.want_reply) {
-                    (void)ssh_transport_send_channel_failure(
-                        transport,
-                        conn,
-                        channel->client_channel,
-                        effective.timeout_ms);
-                }
-                return status;
-            }
-
-            channel->running = 1;
-            channel->state = SSH_SERVER_TERMINAL_STATE_RUNNING;
-            if (request.want_reply) {
-                status = ssh_transport_send_channel_success(
-                    transport,
-                    conn,
-                    channel->client_channel,
-                    effective.timeout_ms);
-                if (status != SSH_OK) {
-                    return status;
-                }
-            }
-            return SSH_OK;
-        }
-
-        if (request.want_reply) {
-            (void)ssh_transport_send_channel_failure(
-                transport,
-                conn,
-                channel->client_channel,
-                effective.timeout_ms);
-        }
-        if (effective.non_sftp_channel_request_policy == NULL ||
-            effective.non_sftp_channel_request_policy(
-                effective.non_sftp_channel_request_policy_ctx,
-                &request) != SSH_OK) {
-            return SSH_ERR_UNSUPPORTED;
-        }
-    }
-
-    return SSH_ERR_UNSUPPORTED;
+    return terminal_accept_after_open(transport, conn, channel, &effective, &open, NULL, 0);
 }
 
 static int maybe_send_terminal_exit_and_close(

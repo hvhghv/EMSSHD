@@ -212,8 +212,9 @@ typedef enum crypto_backend {
 } crypto_backend_t;
 
 typedef enum session_mode {
-    SESSION_MODE_SFTP = 0,
-    SESSION_MODE_TERMINAL = 1
+    SESSION_MODE_AUTO = 0,
+    SESSION_MODE_SFTP = 1,
+    SESSION_MODE_TERMINAL = 2
 } session_mode_t;
 
 typedef struct worker_pool {
@@ -295,7 +296,7 @@ static void usage(const char *program)
         "  --timeout-ms <ms>        Session timeout (default: 30000)\n"
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
         "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
-        "  --session-mode <mode>    sftp|terminal (default: sftp)\n"
+        "  --session-mode <mode>    auto|sftp|terminal (default: auto)\n"
         "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n",
         program);
 }
@@ -383,7 +384,13 @@ static const char *backend_name(crypto_backend_t backend)
 
 static const char *session_mode_name(session_mode_t mode)
 {
-    return mode == SESSION_MODE_TERMINAL ? "terminal" : "sftp";
+    if (mode == SESSION_MODE_TERMINAL) {
+        return "terminal";
+    }
+    if (mode == SESSION_MODE_SFTP) {
+        return "sftp";
+    }
+    return "auto";
 }
 
 static int parse_session_mode(const char *text, session_mode_t *mode)
@@ -397,6 +404,10 @@ static int parse_session_mode(const char *text, session_mode_t *mode)
     }
     if (strcmp(text, "terminal") == 0) {
         *mode = SESSION_MODE_TERMINAL;
+        return SSH_OK;
+    }
+    if (strcmp(text, "auto") == 0) {
+        *mode = SESSION_MODE_AUTO;
         return SSH_OK;
     }
     return SSH_ERR_INVALID_ARGUMENT;
@@ -474,7 +485,7 @@ static void options_defaults(program_options_t *opts)
     opts->timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
     opts->max_workers = LINUX_SERVER_DEFAULT_MAX_WORKERS;
     opts->worker_stack_kb = LINUX_SERVER_DEFAULT_WORKER_STACK_KB;
-    opts->session_mode = SESSION_MODE_SFTP;
+    opts->session_mode = SESSION_MODE_AUTO;
     opts->backend = default_backend();
 }
 
@@ -695,7 +706,7 @@ static int backend_instance_init(backend_instance_t *backend, const app_shared_t
     backend->platform.time = ssh_posix_time_api((ssh_posix_runtime_t *)&shared->runtime);
     backend->platform.log = ssh_posix_log_api((ssh_posix_runtime_t *)&shared->runtime);
 #if defined(EMSSH_BUILD_POSIX_TERM)
-    backend->platform.term = shared->session_mode == SESSION_MODE_TERMINAL ? ssh_posix_term_api((ssh_posix_term_platform_t *)&shared->term) : NULL;
+    backend->platform.term = shared->session_mode == SESSION_MODE_SFTP ? NULL : ssh_posix_term_api((ssh_posix_term_platform_t *)&shared->term);
 #else
     backend->platform.term = NULL;
 #endif
@@ -1025,7 +1036,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 
     config = shared->base_server_config;
     options = shared->base_session_options;
-    if (shared->session_mode == SESSION_MODE_SFTP) {
+    if (shared->session_mode == SESSION_MODE_SFTP || shared->session_mode == SESSION_MODE_AUTO) {
         options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
         options.non_sftp_channel_request_policy_ctx = conn;
     }
@@ -1040,6 +1051,8 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     set_linux_server_stage(LINUX_STAGE_WORKER_RUN_SFTP);
     if (shared->session_mode == SESSION_MODE_TERMINAL) {
         status = ssh_server_run_terminal_session(&server, conn, &options);
+    } else if (shared->session_mode == SESSION_MODE_AUTO) {
+        status = ssh_server_run_auto_session(&server, conn, &options);
     } else {
         status = ssh_server_run_sftp_session(&server, conn, &options);
     }
@@ -1050,6 +1063,8 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
             fprintf(stderr, "hint: this example serves SFTP subsystem only; use an SFTP client/session.\n");
         } else if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_TERMINAL) {
             fprintf(stderr, "hint: terminal mode expects shell/exec channel requests.\n");
+        } else if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_AUTO) {
+            fprintf(stderr, "hint: auto mode supports both subsystem sftp and terminal requests.\n");
         }
     }
 
@@ -1191,7 +1206,7 @@ int main(int argc, char **argv)
     }
     initialized_host_fs = 1;
 
-    if (opts.session_mode == SESSION_MODE_TERMINAL) {
+    if (opts.session_mode != SESSION_MODE_SFTP) {
 #if defined(EMSSH_BUILD_POSIX_TERM)
         status = ssh_posix_term_platform_init(&shared.term);
         if (status != SSH_OK) {
@@ -1200,7 +1215,7 @@ int main(int argc, char **argv)
         }
         initialized_term = 1;
 #else
-        fprintf(stderr, "terminal mode not compiled: enable EMSSH_BUILD_POSIX_TERM=ON\n");
+        fprintf(stderr, "session mode '%s' needs terminal adapter; enable EMSSH_BUILD_POSIX_TERM=ON\n", session_mode_name(opts.session_mode));
         status = SSH_ERR_UNSUPPORTED;
         goto cleanup;
 #endif

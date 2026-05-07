@@ -169,6 +169,11 @@ int ssh_server_run_terminal_session(
     void *conn,
     const ssh_server_session_options_t *options);
 
+int ssh_server_run_auto_session(
+    ssh_server_t *server,
+    void *conn,
+    const ssh_server_session_options_t *options);
+
 int ssh_server_accept_terminal_channel(
     struct ssh_transport_session *transport,
     void *conn,
