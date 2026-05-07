@@ -1111,8 +1111,8 @@ int ssh_server_process_sftp_channel_data(
     const ssh_server_session_options_t *options)
 {
     ssh_server_session_options_t effective;
-    uint8_t channel_data[EMSSH_SFTP_MAX_IO + 256u];
-    uint8_t response[EMSSH_SFTP_MAX_IO + 256u];
+    uint8_t channel_data[EMSSH_MAX_PACKET_SIZE];
+    uint8_t response[EMSSH_MAX_PACKET_SIZE];
     ssh_channel_message_t message;
     size_t channel_data_len;
     int trace_enabled;
