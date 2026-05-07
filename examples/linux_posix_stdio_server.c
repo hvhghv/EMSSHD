@@ -63,6 +63,7 @@
 #define LINUX_SERVER_DEFAULT_MAX_WORKERS 16u
 #define LINUX_SERVER_MAX_PATH 512u
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
+#define LINUX_SERVER_WORKER_STACK_SIZE (1024u * 1024u)
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
 
@@ -1136,7 +1137,9 @@ int main(int argc, char **argv)
     for (;;) {
         ssh_posix_conn_t conn;
         worker_task_t *task;
+        pthread_attr_t thread_attr;
         pthread_t thread;
+        int attr_status;
         int create_status;
 
         memset(&conn, 0, sizeof(conn));
@@ -1163,7 +1166,27 @@ int main(int argc, char **argv)
         task->pool = &pool;
         task->conn = conn;
 
-        create_status = pthread_create(&thread, NULL, worker_main, task);
+        attr_status = pthread_attr_init(&thread_attr);
+        if (attr_status != 0) {
+            (void)ssh_posix_conn_close(&shared.net, &task->conn);
+            worker_pool_release_slot(&pool);
+            free(task);
+            fprintf(stderr, "pthread_attr_init failed\n");
+            continue;
+        }
+
+        attr_status = pthread_attr_setstacksize(&thread_attr, (size_t)LINUX_SERVER_WORKER_STACK_SIZE);
+        if (attr_status != 0) {
+            (void)pthread_attr_destroy(&thread_attr);
+            (void)ssh_posix_conn_close(&shared.net, &task->conn);
+            worker_pool_release_slot(&pool);
+            free(task);
+            fprintf(stderr, "pthread_attr_setstacksize failed (size=%u)\n", (unsigned)LINUX_SERVER_WORKER_STACK_SIZE);
+            continue;
+        }
+
+        create_status = pthread_create(&thread, &thread_attr, worker_main, task);
+        (void)pthread_attr_destroy(&thread_attr);
         if (create_status != 0) {
             (void)ssh_posix_conn_close(&shared.net, &task->conn);
             worker_pool_release_slot(&pool);
