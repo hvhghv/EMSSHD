@@ -91,6 +91,13 @@ static int should_tolerate_pre_request_malformed(
            transport->last_received_message_id == SSH_MSG_CHANNEL_EXTENDED_DATA;
 }
 
+static int should_tolerate_data_path_malformed(
+    const ssh_transport_session_t *transport,
+    int status)
+{
+    return should_tolerate_pre_request_malformed(transport, status);
+}
+
 static int maybe_replenish_terminal_receive_window(
     struct ssh_transport_session *transport,
     void *conn,
@@ -1168,6 +1175,9 @@ int ssh_server_run_sftp_session(
         if (status == SSH_ERR_NOT_FOUND) {
             continue;
         }
+        if (should_tolerate_data_path_malformed(&transport, status)) {
+            continue;
+        }
         if (status != SSH_OK) {
             break;
         }
@@ -1223,6 +1233,9 @@ int ssh_server_run_terminal_session(
             break;
         }
         if (status == SSH_ERR_NOT_FOUND) {
+            continue;
+        }
+        if (should_tolerate_data_path_malformed(&transport, status)) {
             continue;
         }
         if (status != SSH_OK) {
@@ -1338,6 +1351,9 @@ int ssh_server_run_auto_session(
                 if (status == SSH_ERR_NOT_FOUND) {
                     continue;
                 }
+                if (should_tolerate_data_path_malformed(&transport, status)) {
+                    continue;
+                }
                 if (status != SSH_OK) {
                     break;
                 }
@@ -1367,6 +1383,9 @@ int ssh_server_run_auto_session(
                     break;
                 }
                 if (status == SSH_ERR_NOT_FOUND) {
+                    continue;
+                }
+                if (should_tolerate_data_path_malformed(&transport, status)) {
                     continue;
                 }
                 if (status != SSH_OK) {
