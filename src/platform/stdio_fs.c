@@ -189,6 +189,25 @@ static int stat_path(const char *path, ssh_fs_attrs_t *attrs)
     return SSH_OK;
 }
 
+#ifndef _WIN32
+static int lstat_path(const char *path, ssh_fs_attrs_t *attrs)
+{
+    struct stat st;
+
+    if (lstat(path, &st) != 0) {
+        return error_to_status();
+    }
+
+    memset(attrs, 0, sizeof(*attrs));
+    attrs->flags = SSH_FILEXFER_ATTR_SIZE | SSH_FILEXFER_ATTR_PERMISSIONS | SSH_FILEXFER_ATTR_ACMODTIME;
+    attrs->size = (uint64_t)st.st_size;
+    attrs->permissions = (uint32_t)st.st_mode;
+    attrs->atime = (uint32_t)st.st_atime;
+    attrs->mtime = (uint32_t)st.st_mtime;
+    return SSH_OK;
+}
+#endif
+
 static int join_path_child(
     const char *parent,
     const char *child,
@@ -481,7 +500,7 @@ static int tell_file(FILE *file, uint64_t *offset)
 static int stdio_read(void *ctx, void *handle, uint8_t *buf, size_t len, size_t *read_len)
 {
     stdio_file_handle_t *file_handle = (stdio_file_handle_t *)handle;
-    uint64_t offset;
+    uint64_t offset = 0u;
     int status;
 
     (void)ctx;
@@ -500,7 +519,7 @@ static int stdio_read(void *ctx, void *handle, uint8_t *buf, size_t len, size_t 
 static int stdio_write(void *ctx, void *handle, const uint8_t *buf, size_t len, size_t *written_len)
 {
     stdio_file_handle_t *file_handle = (stdio_file_handle_t *)handle;
-    uint64_t offset;
+    uint64_t offset = 0u;
     int status;
 
     (void)ctx;
@@ -884,26 +903,22 @@ static int stdio_readdir(void *ctx, void *handle, ssh_fs_dirent_t *entry, int *e
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    memset(entry, 0, sizeof(*entry));
-#ifdef _WIN32
     for (;;) {
+        memset(entry, 0, sizeof(*entry));
+#ifdef _WIN32
         if (dir_handle->first_ready) {
             dir_handle->first_ready = 0;
         } else if (_findnext(dir_handle->find_handle, &dir_handle->find_data) != 0) {
             *eof = 1;
             return SSH_OK;
         }
-        if (strcmp(dir_handle->find_data.name, ".") != 0 && strcmp(dir_handle->find_data.name, "..") != 0) {
-            break;
-        }
-    }
-    snprintf(dir_handle->name, sizeof(dir_handle->name), "%s", dir_handle->find_data.name);
-    entry->attrs.flags = SSH_FILEXFER_ATTR_SIZE;
-    entry->attrs.size = (uint64_t)dir_handle->find_data.size;
+        snprintf(dir_handle->name, sizeof(dir_handle->name), "%s", dir_handle->find_data.name);
+        entry->attrs.flags = SSH_FILEXFER_ATTR_SIZE;
+        entry->attrs.size = (uint64_t)dir_handle->find_data.size;
 #else
-    {
-        struct dirent *dirent;
-        do {
+        {
+            struct dirent *dirent;
+
             errno = 0;
             dirent = readdir(dir_handle->dir);
             if (dirent == NULL) {
@@ -913,25 +928,33 @@ static int stdio_readdir(void *ctx, void *handle, ssh_fs_dirent_t *entry, int *e
                 *eof = 1;
                 return SSH_OK;
             }
-        } while (strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0);
-        snprintf(dir_handle->name, sizeof(dir_handle->name), "%s", dirent->d_name);
-    }
+            snprintf(dir_handle->name, sizeof(dir_handle->name), "%s", dirent->d_name);
+        }
 #endif
 
-    snprintf(dir_handle->longname, sizeof(dir_handle->longname), "%s", dir_handle->name);
-    status = join_path_child(dir_handle->path, dir_handle->name, entry_path);
-    if (status != SSH_OK) {
-        return status;
-    }
-    status = stat_path(entry_path, &entry->attrs);
-    if (status != SSH_OK) {
-        return status;
-    }
+        snprintf(dir_handle->longname, sizeof(dir_handle->longname), "%s", dir_handle->name);
+        status = join_path_child(dir_handle->path, dir_handle->name, entry_path);
+        if (status != SSH_OK) {
+            return status;
+        }
+#ifdef _WIN32
+        status = stat_path(entry_path, &entry->attrs);
+#else
+        status = lstat_path(entry_path, &entry->attrs);
+        if (status != SSH_OK) {
+            status = stat_path(entry_path, &entry->attrs);
+        }
+#endif
+        if (status != SSH_OK) {
+            /* Skip entries we cannot stat (broken links/permission races). */
+            continue;
+        }
 
-    entry->filename = dir_handle->name;
-    entry->longname = dir_handle->longname;
-    *eof = 0;
-    return SSH_OK;
+        entry->filename = dir_handle->name;
+        entry->longname = dir_handle->longname;
+        *eof = 0;
+        return SSH_OK;
+    }
 }
 
 static int stdio_closedir(void *ctx, void *handle)
