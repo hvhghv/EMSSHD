@@ -1822,32 +1822,77 @@ int ssh_transport_receive_channel_request(
 {
     size_t payload_len;
     ssh_buffer_t buf;
+    unsigned skipped_messages;
     int status;
+    uint8_t message_id;
+    uint32_t recipient_channel;
 
     if (session == NULL || request == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    status = receive_protected_payload_skip_ignorable(
-        session,
-        conn,
-        session->channel_request_payload,
-        sizeof(session->channel_request_payload),
-        &payload_len,
-        timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
-    session->channel_request_payload_len = payload_len;
+    for (skipped_messages = 0u; skipped_messages < 16u; ++skipped_messages) {
+        status = receive_protected_payload_skip_ignorable(
+            session,
+            conn,
+            session->channel_request_payload,
+            sizeof(session->channel_request_payload),
+            &payload_len,
+            timeout_ms);
+        if (status != SSH_OK) {
+            return status;
+        }
+        session->channel_request_payload_len = payload_len;
+        if (payload_len == 0u) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
 
-    ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
-    status = ssh_channel_request_decode(&buf, request);
-    if (status != SSH_OK) {
-        return status;
+        message_id = session->channel_request_payload[0];
+        if (message_id == SSH_MSG_CHANNEL_REQUEST) {
+            ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
+            status = ssh_channel_request_decode(&buf, request);
+            if (status != SSH_OK) {
+                return status;
+            }
+            session->state = SSH_TRANSPORT_STATE_CHANNEL_REQUEST_RECEIVED;
+            return SSH_OK;
+        }
+
+        if (message_id == SSH_MSG_CHANNEL_CLOSE || message_id == SSH_MSG_CHANNEL_EOF) {
+            ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
+            status = ssh_buffer_get_u8(&buf, &message_id);
+            if (status == SSH_OK) {
+                status = ssh_buffer_get_u32(&buf, &recipient_channel);
+            }
+            if (status != SSH_OK || ssh_buffer_remaining_read(&buf) != 0u) {
+                return SSH_ERR_MALFORMED_PACKET;
+            }
+            session->state = message_id == SSH_MSG_CHANNEL_CLOSE ?
+                SSH_TRANSPORT_STATE_CHANNEL_CLOSE_RECEIVED :
+                SSH_TRANSPORT_STATE_CHANNEL_EOF_RECEIVED;
+            return SSH_ERR_CLOSED;
+        }
+
+        if (message_id == SSH_MSG_CHANNEL_SUCCESS || message_id == SSH_MSG_CHANNEL_FAILURE) {
+            ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
+            status = ssh_buffer_get_u8(&buf, &message_id);
+            if (status == SSH_OK) {
+                status = ssh_buffer_get_u32(&buf, &recipient_channel);
+            }
+            if (status != SSH_OK || ssh_buffer_remaining_read(&buf) != 0u) {
+                return SSH_ERR_MALFORMED_PACKET;
+            }
+            continue;
+        }
+
+        if (message_id == SSH_MSG_CHANNEL_WINDOW_ADJUST || message_id == SSH_MSG_CHANNEL_DATA) {
+            continue;
+        }
+
+        return SSH_ERR_MALFORMED_PACKET;
     }
 
-    session->state = SSH_TRANSPORT_STATE_CHANNEL_REQUEST_RECEIVED;
-    return SSH_OK;
+    return SSH_ERR_UNSUPPORTED;
 }
 
 int ssh_transport_send_channel_success(
@@ -1959,6 +2004,7 @@ int ssh_transport_receive_channel_message(
 {
     size_t payload_len;
     ssh_buffer_t buf;
+    unsigned skipped_messages;
     int status;
 
     if (session == NULL || message == NULL || data_len == NULL ||
@@ -1967,22 +2013,36 @@ int ssh_transport_receive_channel_message(
     }
 
     *data_len = 0u;
-    status = receive_protected_payload_skip_ignorable(
-        session,
-        conn,
-        session->channel_message_payload,
-        sizeof(session->channel_message_payload),
-        &payload_len,
-        timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
-    session->channel_message_payload_len = payload_len;
+    for (skipped_messages = 0u; skipped_messages < 16u; ++skipped_messages) {
+        status = receive_protected_payload_skip_ignorable(
+            session,
+            conn,
+            session->channel_message_payload,
+            sizeof(session->channel_message_payload),
+            &payload_len,
+            timeout_ms);
+        if (status != SSH_OK) {
+            return status;
+        }
+        session->channel_message_payload_len = payload_len;
+        if (payload_len == 0u) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
 
-    ssh_buffer_wrap(&buf, session->channel_message_payload, payload_len);
-    status = ssh_channel_message_decode(&buf, message);
-    if (status != SSH_OK) {
-        return status;
+        if (session->channel_message_payload[0] == SSH_MSG_CHANNEL_SUCCESS ||
+            session->channel_message_payload[0] == SSH_MSG_CHANNEL_FAILURE) {
+            continue;
+        }
+
+        ssh_buffer_wrap(&buf, session->channel_message_payload, payload_len);
+        status = ssh_channel_message_decode(&buf, message);
+        if (status != SSH_OK) {
+            return status;
+        }
+        break;
+    }
+    if (skipped_messages == 16u) {
+        return SSH_ERR_UNSUPPORTED;
     }
 
     if (message->message_id == SSH_MSG_CHANNEL_WINDOW_ADJUST) {
