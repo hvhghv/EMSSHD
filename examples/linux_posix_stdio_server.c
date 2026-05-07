@@ -77,7 +77,7 @@
 #define LINUX_STAGE_WORKER_DONE 140
 #define LINUX_STAGE_WORKER_NON_SFTP_REQUEST 150
 
-static __thread volatile sig_atomic_t g_linux_server_stage = 0;
+static volatile sig_atomic_t g_linux_server_stage = 0;
 
 static void set_linux_server_stage(sig_atomic_t stage)
 {
@@ -183,7 +183,7 @@ static void linux_server_fatal_signal_handler(int signo, siginfo_t *info, void *
     _exit(128 + signo);
 }
 
-static void install_linux_server_fatal_handlers(void)
+static int install_linux_server_fatal_handlers(void)
 {
     struct sigaction sa;
     const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE};
@@ -195,8 +195,11 @@ static void install_linux_server_fatal_handlers(void)
     sigemptyset(&sa.sa_mask);
 
     for (i = 0u; i < sizeof(signals) / sizeof(signals[0]); ++i) {
-        (void)sigaction(signals[i], &sa, NULL);
+        if (sigaction(signals[i], &sa, NULL) != 0) {
+            return SSH_ERR_PLATFORM;
+        }
     }
+    return SSH_OK;
 }
 
 typedef enum crypto_backend {
@@ -1008,8 +1011,17 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
-    install_linux_server_fatal_handlers();
+    status = install_linux_server_fatal_handlers();
+    if (status != SSH_OK) {
+        fprintf(stderr, "fatal handler install failed: %s\n", ssh_status_string(status));
+        return 2;
+    }
+    fprintf(stderr, "diag: fatal signal handlers installed\n");
     set_linux_server_stage(LINUX_STAGE_MAIN_INIT);
+    if (getenv("EMSSH_DIAG_CRASH") != NULL) {
+        volatile int *crash = (volatile int *)0;
+        *crash = 1;
+    }
 
     memset(&shared, 0, sizeof(shared));
     memset(&pool, 0, sizeof(pool));
