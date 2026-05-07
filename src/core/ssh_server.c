@@ -77,6 +77,20 @@ static int view_to_cstring(ssh_string_view_t view, char *out, size_t out_capacit
     return SSH_OK;
 }
 
+static int should_tolerate_pre_request_malformed(
+    const ssh_transport_session_t *transport,
+    int status)
+{
+    if (status != SSH_ERR_MALFORMED_PACKET || transport == NULL) {
+        return 0;
+    }
+    if (!transport->last_received_message_id_valid) {
+        return 0;
+    }
+    return transport->last_received_message_id == SSH_MSG_CHANNEL_DATA ||
+           transport->last_received_message_id == SSH_MSG_CHANNEL_EXTENDED_DATA;
+}
+
 static int maybe_replenish_terminal_receive_window(
     struct ssh_transport_session *transport,
     void *conn,
@@ -540,6 +554,9 @@ static int sftp_accept_after_open(
             status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
         }
         if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            if (should_tolerate_pre_request_malformed(transport, status)) {
+                continue;
+            }
             return status;
         }
 
@@ -652,6 +669,9 @@ static int terminal_accept_after_open(
             status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
         }
         if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            if (should_tolerate_pre_request_malformed(transport, status)) {
+                continue;
+            }
             return status;
         }
 
@@ -1287,6 +1307,9 @@ int ssh_server_run_auto_session(
     for (attempts = 0u; attempts < 16u; ++attempts) {
         status = ssh_transport_receive_channel_request(&transport, conn, &request, effective.timeout_ms);
         if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            if (should_tolerate_pre_request_malformed(&transport, status)) {
+                continue;
+            }
             update_server_diag_from_transport(server, &transport);
             return status;
         }
