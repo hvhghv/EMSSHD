@@ -568,6 +568,29 @@ int main(void)
     CHECK(sftp_server_handle_packet(&session, request, request_len, response, sizeof(response), &response_len) == SSH_OK);
     CHECK(sftp_packet_wrap(response, response_len, &packet) == SSH_OK);
     CHECK(packet.type == SSH_FXP_NAME);
+    ssh_buffer_wrap(&payload, (uint8_t *)packet.payload.data, packet.payload.len);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 1u);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 1u);
+    CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
+    CHECK(view.len == 1u && view.data[0] == '.');
+
+    ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
+    CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_REALPATH) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 2u) == SSH_OK);
+    CHECK(ssh_buffer_put_cstring(&payload, "/mnt/host/..") == SSH_OK);
+    finish_packet(request, &payload, &request_len);
+    CHECK(sftp_server_handle_packet(&session, request, request_len, response, sizeof(response), &response_len) == SSH_OK);
+    CHECK(sftp_packet_wrap(response, response_len, &packet) == SSH_OK);
+    CHECK(packet.type == SSH_FXP_NAME);
+    ssh_buffer_wrap(&payload, (uint8_t *)packet.payload.data, packet.payload.len);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 2u);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 1u);
+    CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
+    CHECK(view.len == strlen("/mnt") && memcmp(view.data, "/mnt", view.len) == 0);
 
     ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
     CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_STAT) == SSH_OK);

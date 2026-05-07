@@ -72,6 +72,8 @@ static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_P
 {
     size_t i;
     size_t out_pos;
+    size_t segment_starts[EMSSH_SFTP_MAX_PATH];
+    size_t segment_count;
     int absolute;
     int has_segment;
 
@@ -82,6 +84,7 @@ static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_P
     absolute = path.data[0] == '/';
     out_pos = 0u;
     has_segment = 0;
+    segment_count = 0u;
     if (absolute) {
         if (out_pos + 1u >= EMSSH_SFTP_MAX_PATH) {
             return SSH_ERR_BUFFER_TOO_SMALL;
@@ -117,6 +120,15 @@ static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_P
             continue;
         }
         if (seg_len == 2u && seg[0] == '.' && seg[1] == '.') {
+            if (segment_count > 0u) {
+                out_pos = segment_starts[segment_count - 1u];
+                --segment_count;
+                has_segment = segment_count > 0u;
+                continue;
+            }
+            if (absolute) {
+                continue;
+            }
             return SSH_ERR_SECURITY;
         }
 
@@ -126,6 +138,9 @@ static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_P
                 return SSH_ERR_SECURITY;
             }
         }
+
+        {
+            size_t segment_base = out_pos;
 
         if (has_segment || absolute) {
             if (out_pos > 0u && out[out_pos - 1u] != '/') {
@@ -139,9 +154,11 @@ static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_P
         if (out_pos + seg_len >= EMSSH_SFTP_MAX_PATH) {
             return SSH_ERR_BUFFER_TOO_SMALL;
         }
+        segment_starts[segment_count++] = segment_base;
         memcpy(out + out_pos, seg, seg_len);
         out_pos += seg_len;
         has_segment = 1;
+        }
     }
 
     if (!has_segment) {
