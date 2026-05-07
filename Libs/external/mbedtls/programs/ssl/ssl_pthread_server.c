@@ -10,11 +10,13 @@
 
 #include "mbedtls/platform.h"
 
-#if !defined(MBEDTLS_NET_C) || !defined(MBEDTLS_SSL_SRV_C) ||           \
+#if !defined(MBEDTLS_ENTROPY_C) || !defined(MBEDTLS_CTR_DRBG_C) ||      \
+    !defined(MBEDTLS_NET_C) || !defined(MBEDTLS_SSL_SRV_C) ||           \
     !defined(MBEDTLS_PEM_PARSE_C) || !defined(MBEDTLS_X509_CRT_PARSE_C)
 int main(void)
 {
-    mbedtls_printf("MBEDTLS_NET_C and/or MBEDTLS_SSL_SRV_C and/or "
+    mbedtls_printf("MBEDTLS_ENTROPY_C and/or MBEDTLS_CTR_DRBG_C and/or "
+                   "MBEDTLS_NET_C and/or MBEDTLS_SSL_SRV_C and/or "
                    "MBEDTLS_PEM_PARSE_C and/or MBEDTLS_X509_CRT_PARSE_C "
                    "not defined.\n");
     mbedtls_exit(0);
@@ -34,6 +36,8 @@ int main(void)
 #include <windows.h>
 #endif
 
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
 #include "mbedtls/x509.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/net_sockets.h"
@@ -282,7 +286,10 @@ int main(void)
 {
     int ret;
     mbedtls_net_context listen_fd, client_fd;
+    const char pers[] = "ssl_pthread_server";
 
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
     mbedtls_ssl_config conf;
     mbedtls_x509_crt srvcert;
     mbedtls_x509_crt cachain;
@@ -306,6 +313,7 @@ int main(void)
     mbedtls_x509_crt_init(&cachain);
 
     mbedtls_ssl_config_init(&conf);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
     memset(threads, 0, sizeof(threads));
     mbedtls_net_init(&listen_fd);
     mbedtls_net_init(&client_fd);
@@ -314,6 +322,12 @@ int main(void)
 
     base_info.config = &conf;
 
+    /*
+     * We use only a single entropy source that is used in all the threads.
+     */
+    mbedtls_entropy_init(&entropy);
+
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
     psa_status_t status = psa_crypto_init();
     if (status != PSA_SUCCESS) {
         mbedtls_fprintf(stderr, "Failed to initialize PSA Crypto implementation: %d\n",
@@ -321,11 +335,20 @@ int main(void)
         ret = MBEDTLS_ERR_SSL_HW_ACCEL_FAILED;
         goto exit;
     }
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
 
     /*
      * 1a. Seed the random number generator
      */
     mbedtls_printf("  . Seeding the random number generator...");
+
+    if ((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                     (const unsigned char *) pers,
+                                     strlen(pers))) != 0) {
+        mbedtls_printf(" failed: mbedtls_ctr_drbg_seed returned -0x%04x\n",
+                       (unsigned int) -ret);
+        goto exit;
+    }
 
     mbedtls_printf(" ok\n");
 
@@ -356,7 +379,8 @@ int main(void)
 
     mbedtls_pk_init(&pkey);
     ret =  mbedtls_pk_parse_key(&pkey, (const unsigned char *) mbedtls_test_srv_key,
-                                mbedtls_test_srv_key_len, NULL, 0);
+                                mbedtls_test_srv_key_len, NULL, 0,
+                                mbedtls_ctr_drbg_random, &ctr_drbg);
     if (ret != 0) {
         mbedtls_printf(" failed\n  !  mbedtls_pk_parse_key returned %d\n\n", ret);
         goto exit;
@@ -378,6 +402,7 @@ int main(void)
         goto exit;
     }
 
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
     mbedtls_ssl_conf_dbg(&conf, my_mutexed_debug, stdout);
 
     /* mbedtls_ssl_cache_get() and mbedtls_ssl_cache_set() are thread-safe if
@@ -451,13 +476,17 @@ exit:
 #if defined(MBEDTLS_SSL_CACHE_C)
     mbedtls_ssl_cache_free(&cache);
 #endif
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
     mbedtls_ssl_config_free(&conf);
     mbedtls_net_free(&listen_fd);
     mbedtls_mutex_free(&debug_mutex);
 #if defined(MBEDTLS_MEMORY_BUFFER_ALLOC_C)
     mbedtls_memory_buffer_alloc_free();
 #endif
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
     mbedtls_psa_crypto_free();
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
 
     mbedtls_exit(ret);
 }

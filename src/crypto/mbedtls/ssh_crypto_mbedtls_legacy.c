@@ -9,12 +9,12 @@
 
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
 
-#include <mbedtls/private/aes.h>
-#include <mbedtls/private/ctr_drbg.h>
-#include <mbedtls/private/ecdsa.h>
-#include <mbedtls/private/ecp.h>
-#include <mbedtls/private/entropy.h>
-#include <mbedtls/private/rsa.h>
+#include <mbedtls/aes.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/rsa.h>
 #include <mbedtls/md.h>
 
 typedef struct ssh_mbedtls_legacy_state {

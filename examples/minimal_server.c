@@ -135,6 +135,10 @@ static int string_view_matches(const char *expected, const char *actual, size_t 
     return expected_len == actual_len && memcmp(expected, actual, actual_len) == 0;
 }
 
+static int authorized_options_allow_peer(
+    const authorized_publickey_t *authorized,
+    const password_auth_ctx_t *auth);
+
 static int is_rsa_signature_algorithm(const char *actual, size_t actual_len)
 {
     return string_view_matches("rsa-sha2-256", actual, actual_len) ||

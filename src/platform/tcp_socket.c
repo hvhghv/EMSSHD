@@ -13,6 +13,7 @@ typedef SOCKET emssh_socket_t;
 #define EMSSH_INVALID_SOCKET INVALID_SOCKET
 #define emssh_close_socket closesocket
 #else
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <sys/select.h>

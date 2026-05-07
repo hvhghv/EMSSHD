@@ -8,7 +8,6 @@ project(emsshd
 option(EMSSH_BUILD_EXAMPLES "Build emssh examples" ON)
 option(EMSSH_BUILD_TESTS "Build emssh tests" ON)
 option(EMSSH_USE_MBEDTLS "Build mbedTLS PSA crypto backend" ON)
-option(EMSSH_MBEDTLS_USE_PSA "Use PSA-based mbedTLS backend (OFF uses classic mbedTLS APIs)" ON)
 option(EMSSH_MBEDTLS_LEGACY_EMBED_CORE "For mbedTLS legacy backend, compile vendored TF-PSA-Crypto core sources directly and skip Libs/external/mbedtls CMake" OFF)
 option(EMSSH_USE_OPENSSL "Build OpenSSL crypto backend (experimental)" OFF)
 option(EMSSH_USE_WOLFSSL "Build wolfSSL crypto backend (experimental)" OFF)
@@ -22,6 +21,11 @@ option(EMSSH_BUILD_POSIX_RUNTIME "Build POSIX runtime adapter (mem/time/log)" OF
 option(EMSSH_BUILD_POSIX_NET "Build POSIX socket network adapter" OFF)
 option(EMSSH_BUILD_POSIX_TERM "Build POSIX PTY terminal adapter" OFF)
 option(EMSSH_BUILD_POSIX_PASSWD_AUTH "Build POSIX /etc/passwd password auth adapter" OFF)
+set(_emssh_default_mbedtls_legacy_rng_linux OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_emssh_default_mbedtls_legacy_rng_linux ON)
+endif()
+option(EMSSH_BUILD_MBEDTLS_LEGACY_RNG_LINUX "Build Linux mbedTLS legacy hardware RNG adapter" ${_emssh_default_mbedtls_legacy_rng_linux})
 option(EMSSH_BUILD_FATFS_ADAPTER "Build FatFS filesystem adapter" OFF)
 option(EMSSH_BUILD_LITTLEFS_ADAPTER "Build littlefs filesystem adapter" OFF)
 option(EMSSH_BUILD_OPENSSL_PLATFORM "Build OpenSSL platform assembly helper" OFF)
@@ -37,11 +41,45 @@ option(EMSSH_LIBFUZZER "Build emssh_fuzz_decode with LLVM libFuzzer entrypoint" 
 option(EMSSH_ENABLE_OPENSSH_INTEROP_TESTS "Enable optional OpenSSH SFTP interoperability tests" OFF)
 option(EMSSH_ENABLE_OPENSSH_TERM_INTEROP_TESTS "Enable optional OpenSSH terminal interoperability tests" OFF)
 
+set(_emssh_default_mbedtls_classic_source "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/library" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/include/mbedtls")
+    set(_emssh_default_mbedtls_classic_source "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls")
+endif()
+set(_emssh_default_mbedtls_classic_layout OFF)
+if(_emssh_default_mbedtls_classic_source AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/CMakeLists.txt")
+    set(_emssh_default_mbedtls_classic_layout ON)
+endif()
+set(_emssh_default_mbedtls_use_psa ON)
+if(_emssh_default_mbedtls_classic_layout)
+    set(_emssh_default_mbedtls_use_psa OFF)
+endif()
+option(EMSSH_MBEDTLS_USE_PSA "Use PSA-based mbedTLS backend (OFF uses classic mbedTLS APIs)" ${_emssh_default_mbedtls_use_psa})
+option(EMSSH_MBEDTLS_CLASSIC_LAYOUT "Use Mbed TLS classic layout (2.x/3.x with library/*.c), skip Libs/external/mbedtls CMake" ${_emssh_default_mbedtls_classic_layout})
+set(EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR "${_emssh_default_mbedtls_classic_source}" CACHE PATH "Path to Mbed TLS classic source tree (must contain include/ and library/)")
+
 set(_emssh_default_mbedtls_legacy_config "")
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/File/mbedtls-legacy/mbedtls_config_port.h")
     set(_emssh_default_mbedtls_legacy_config "${CMAKE_CURRENT_SOURCE_DIR}/File/mbedtls-legacy/mbedtls_config_port.h")
 endif()
 set(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE "${_emssh_default_mbedtls_legacy_config}" CACHE FILEPATH "Legacy mbedTLS config header file used by EMSSH_MBEDTLS_LEGACY_EMBED_CORE")
+
+if(EMSSH_MBEDTLS_CLASSIC_LAYOUT)
+    if(NOT EMSSH_USE_MBEDTLS)
+        message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT requires EMSSH_USE_MBEDTLS=ON")
+    endif()
+    if(EMSSH_MBEDTLS_USE_PSA)
+        message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT requires EMSSH_MBEDTLS_USE_PSA=OFF")
+    endif()
+    if(NOT EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR OR
+       NOT EXISTS "${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/library" OR
+       NOT EXISTS "${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/include/mbedtls")
+        message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT requires EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR to contain include/mbedtls and library/")
+    endif()
+    if(EXISTS "${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/tf-psa-crypto/CMakeLists.txt")
+        message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT expects Mbed TLS 2.x/3.x classic source tree; provided source looks like Mbed TLS 4.x (contains tf-psa-crypto)")
+    endif()
+endif()
 
 if(EMSSH_MBEDTLS_LEGACY_EMBED_CORE)
     if(NOT EMSSH_USE_MBEDTLS)
@@ -52,12 +90,21 @@ if(EMSSH_MBEDTLS_LEGACY_EMBED_CORE)
     endif()
 endif()
 
+if(EMSSH_MBEDTLS_CLASSIC_LAYOUT AND EMSSH_MBEDTLS_LEGACY_EMBED_CORE)
+    message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT and EMSSH_MBEDTLS_LEGACY_EMBED_CORE are mutually exclusive")
+endif()
+
+set(EMSSH_MBEDTLS_CLASSIC_LAYOUT_ACTIVE OFF)
+if(EMSSH_USE_MBEDTLS AND EMSSH_MBEDTLS_CLASSIC_LAYOUT)
+    set(EMSSH_MBEDTLS_CLASSIC_LAYOUT_ACTIVE ON)
+endif()
+
 set(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE OFF)
 if(EMSSH_USE_MBEDTLS AND EMSSH_MBEDTLS_LEGACY_EMBED_CORE)
     set(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE ON)
 endif()
 
-if(EMSSH_USE_MBEDTLS AND NOT EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE)
+if(EMSSH_USE_MBEDTLS AND NOT EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE AND NOT EMSSH_MBEDTLS_CLASSIC_LAYOUT_ACTIVE)
     set(ENABLE_PROGRAMS OFF CACHE BOOL "Build Mbed TLS programs" FORCE)
     set(ENABLE_TESTING OFF CACHE BOOL "Build Mbed TLS tests" FORCE)
     set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "Do not treat Mbed TLS warnings as errors" FORCE)
@@ -105,6 +152,41 @@ target_include_directories(emssh
 
 target_compile_features(emssh PUBLIC c_std_99)
 
+if(EMSSH_BUILD_MBEDTLS_LEGACY_RNG_LINUX)
+    add_library(emssh_mbedtls_legacy_rng_linux STATIC src/platform/mbedtls_legacy_rng_linux.c)
+    target_compile_features(emssh_mbedtls_legacy_rng_linux PUBLIC c_std_99)
+endif()
+
+if(EMSSH_MBEDTLS_CLASSIC_LAYOUT_ACTIVE)
+    file(GLOB EMSSH_MBEDTLS_CLASSIC_CORE_SOURCES "${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/library/*.c")
+
+    if(NOT EMSSH_MBEDTLS_CLASSIC_CORE_SOURCES)
+        message(FATAL_ERROR "EMSSH_MBEDTLS_CLASSIC_LAYOUT enabled but no sources found in ${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/library")
+    endif()
+
+    add_library(emssh_mbedtls_classic_core STATIC ${EMSSH_MBEDTLS_CLASSIC_CORE_SOURCES})
+    target_include_directories(emssh_mbedtls_classic_core
+        PUBLIC
+            ${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/include
+    )
+    target_compile_features(emssh_mbedtls_classic_core PUBLIC c_std_99)
+    if(EMSSH_BUILD_MBEDTLS_LEGACY_RNG_LINUX)
+        target_link_libraries(emssh_mbedtls_classic_core PUBLIC emssh_mbedtls_legacy_rng_linux)
+    endif()
+
+    if(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE)
+        if(NOT EXISTS "${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}")
+            message(FATAL_ERROR "EMSSH_MBEDTLS_LEGACY_CONFIG_FILE not found: ${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}")
+        endif()
+        get_filename_component(EMSSH_MBEDTLS_LEGACY_CONFIG_DIR "${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}" DIRECTORY)
+        get_filename_component(EMSSH_MBEDTLS_LEGACY_CONFIG_NAME "${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}" NAME)
+        target_include_directories(emssh_mbedtls_classic_core PUBLIC ${EMSSH_MBEDTLS_LEGACY_CONFIG_DIR})
+        target_compile_definitions(emssh_mbedtls_classic_core PUBLIC
+            MBEDTLS_CONFIG_FILE="${EMSSH_MBEDTLS_LEGACY_CONFIG_NAME}"
+        )
+    endif()
+endif()
+
 if(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE)
     file(GLOB EMSSH_MBEDTLS_LEGACY_BUILTIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/drivers/builtin/src/*.c")
     file(GLOB EMSSH_MBEDTLS_LEGACY_EXTRAS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/extras/*.c")
@@ -127,9 +209,19 @@ if(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE)
         PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/include
             ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/drivers/builtin/include
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/dispatch
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/extras
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/platform
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/utilities
+            ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/drivers/builtin/src
     )
     target_compile_features(emssh_mbedtls_legacy_core PUBLIC c_std_99)
     target_compile_definitions(emssh_mbedtls_legacy_core PUBLIC MBEDTLS_ALLOW_PRIVATE_ACCESS)
+    if(EMSSH_BUILD_MBEDTLS_LEGACY_RNG_LINUX)
+        target_link_libraries(emssh_mbedtls_legacy_core PUBLIC emssh_mbedtls_legacy_rng_linux)
+    endif()
 
     if(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE)
         if(NOT EXISTS "${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}")
@@ -147,7 +239,16 @@ endif()
 
 if(EMSSH_USE_MBEDTLS)
     target_compile_definitions(emssh PUBLIC EMSSH_USE_MBEDTLS=1)
-    if(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE)
+    if(EMSSH_MBEDTLS_CLASSIC_LAYOUT_ACTIVE)
+        target_include_directories(emssh PUBLIC
+            ${EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR}/include
+        )
+        if(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE)
+            target_include_directories(emssh PUBLIC ${EMSSH_MBEDTLS_LEGACY_CONFIG_DIR})
+            target_compile_definitions(emssh PUBLIC MBEDTLS_CONFIG_FILE="${EMSSH_MBEDTLS_LEGACY_CONFIG_NAME}")
+        endif()
+        target_link_libraries(emssh PUBLIC emssh_mbedtls_classic_core)
+    elseif(EMSSH_MBEDTLS_LEGACY_EMBED_CORE_ACTIVE)
         target_include_directories(emssh PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/include
             ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/drivers/builtin/include
@@ -160,6 +261,9 @@ if(EMSSH_USE_MBEDTLS)
             ${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/tf-psa-crypto/drivers/builtin/include
         )
         target_link_libraries(emssh PUBLIC TF-PSA-Crypto::tfpsacrypto)
+        if(EMSSH_BUILD_MBEDTLS_LEGACY_RNG_LINUX)
+            target_link_libraries(emssh PUBLIC emssh_mbedtls_legacy_rng_linux)
+        endif()
     endif()
 endif()
 

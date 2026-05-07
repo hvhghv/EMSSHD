@@ -12,7 +12,6 @@
 #define _POSIX_C_SOURCE 200112L
 #define _XOPEN_SOURCE 600
 
-
 #include "mbedtls/build_info.h"
 
 #include "mbedtls/platform.h"
@@ -20,14 +19,14 @@
 #if !defined(MBEDTLS_BIGNUM_C) || !defined(MBEDTLS_ENTROPY_C) ||  \
     !defined(MBEDTLS_SSL_TLS_C) || !defined(MBEDTLS_SSL_CLI_C) || \
     !defined(MBEDTLS_NET_C) || !defined(MBEDTLS_RSA_C) ||         \
-    !defined(MBEDTLS_X509_CRT_PARSE_C) || \
+    !defined(MBEDTLS_CTR_DRBG_C) || !defined(MBEDTLS_X509_CRT_PARSE_C) || \
     !defined(MBEDTLS_FS_IO)
 int main(void)
 {
     mbedtls_printf("MBEDTLS_BIGNUM_C and/or MBEDTLS_ENTROPY_C and/or "
                    "MBEDTLS_SSL_TLS_C and/or MBEDTLS_SSL_CLI_C and/or "
                    "MBEDTLS_NET_C and/or MBEDTLS_RSA_C and/or "
-                   "and/or MBEDTLS_X509_CRT_PARSE_C "
+                   "MBEDTLS_CTR_DRBG_C and/or MBEDTLS_X509_CRT_PARSE_C "
                    "not defined.\n");
     mbedtls_exit(0);
 }
@@ -37,6 +36,8 @@ int main(void)
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
 #include "test/certs.h"
 #include "mbedtls/x509.h"
 
@@ -331,7 +332,10 @@ int main(int argc, char *argv[])
     unsigned char buf[1024];
 #endif
     char hostname[32];
+    const char *pers = "ssl_mail_client";
 
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
     mbedtls_x509_crt cacert;
@@ -352,13 +356,17 @@ int main(int argc, char *argv[])
     mbedtls_x509_crt_init(&cacert);
     mbedtls_x509_crt_init(&clicert);
     mbedtls_pk_init(&pkey);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_entropy_init(&entropy);
 
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
     psa_status_t status = psa_crypto_init();
     if (status != PSA_SUCCESS) {
         mbedtls_fprintf(stderr, "Failed to initialize PSA Crypto implementation: %d\n",
                         (int) status);
         goto exit;
     }
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
 
     if (argc < 2) {
 usage:
@@ -448,6 +456,13 @@ usage:
     mbedtls_printf("\n  . Seeding the random number generator...");
     fflush(stdout);
 
+    if ((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                     (const unsigned char *) pers,
+                                     strlen(pers))) != 0) {
+        mbedtls_printf(" failed\n  ! mbedtls_ctr_drbg_seed returned %d\n", ret);
+        goto exit;
+    }
+
     mbedtls_printf(" ok\n");
 
     /*
@@ -499,7 +514,8 @@ usage:
 
 #if defined(MBEDTLS_FS_IO)
     if (strlen(opt.key_file)) {
-        ret = mbedtls_pk_parse_keyfile(&pkey, opt.key_file, "");
+        ret = mbedtls_pk_parse_keyfile(&pkey, opt.key_file, "",
+                                       mbedtls_ctr_drbg_random, &ctr_drbg);
     } else
 #endif
 #if defined(MBEDTLS_PEM_PARSE_C)
@@ -508,7 +524,9 @@ usage:
                                    (const unsigned char *) mbedtls_test_cli_key,
                                    mbedtls_test_cli_key_len,
                                    NULL,
-                                   0);
+                                   0,
+                                   mbedtls_ctr_drbg_random,
+                                   &ctr_drbg);
     }
 #else
     {
@@ -556,6 +574,7 @@ usage:
      * but makes interop easier in this simplified example */
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
 
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
     mbedtls_ssl_conf_dbg(&conf, my_debug, stdout);
 
     if (opt.force_ciphersuite[0] != DFL_FORCE_CIPHER) {
@@ -785,9 +804,14 @@ exit:
     mbedtls_pk_free(&pkey);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
     mbedtls_psa_crypto_free();
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
 
     mbedtls_exit(exit_code);
 }
 #endif /* MBEDTLS_BIGNUM_C && MBEDTLS_ENTROPY_C && MBEDTLS_SSL_TLS_C &&
-          MBEDTLS_SSL_CLI_C && MBEDTLS_NET_C && MBEDTLS_RSA_C */
+          MBEDTLS_SSL_CLI_C && MBEDTLS_NET_C && MBEDTLS_RSA_C **
+          MBEDTLS_CTR_DRBG_C */
