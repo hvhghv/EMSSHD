@@ -199,6 +199,123 @@ static const char *sftp_type_name_local(uint8_t type)
 static void sftp_trace_log_line(
     const struct ssh_transport_session *transport,
     int trace_enabled,
+    const char *line);
+
+static void append_view_text_local(
+    char *buf,
+    size_t capacity,
+    size_t *used,
+    ssh_string_view_t view,
+    size_t max_chars)
+{
+    size_t i;
+    size_t limit;
+
+    if (buf == NULL || used == NULL || *used >= capacity || view.data == NULL) {
+        return;
+    }
+
+    limit = view.len;
+    if (limit > max_chars) {
+        limit = max_chars;
+    }
+    for (i = 0u; i < limit && *used + 1u < capacity; ++i) {
+        uint8_t c = view.data[i];
+        if (c >= 32u && c <= 126u) {
+            buf[*used] = (char)c;
+        } else {
+            buf[*used] = '?';
+        }
+        *used += 1u;
+    }
+    if (view.len > limit) {
+        append_lit_local(buf, capacity, used, "...");
+    }
+}
+
+static void sftp_trace_log_request_paths(
+    const struct ssh_transport_session *transport,
+    int trace_enabled,
+    uint8_t request_type,
+    const uint8_t *request_packet,
+    size_t request_packet_len)
+{
+    char line[320];
+    size_t used = 0u;
+    int status = SSH_ERR_UNSUPPORTED;
+
+    if (!trace_enabled || request_packet == NULL || request_packet_len < 5u) {
+        return;
+    }
+
+    append_lit_local(line, sizeof(line), &used, "sftp-trace: req-path type=");
+    append_lit_local(line, sizeof(line), &used, sftp_type_name_local(request_type));
+
+    if (request_type == SSH_FXP_REALPATH ||
+        request_type == SSH_FXP_STAT ||
+        request_type == SSH_FXP_LSTAT ||
+        request_type == SSH_FXP_OPENDIR ||
+        request_type == SSH_FXP_REMOVE ||
+        request_type == SSH_FXP_RMDIR) {
+        sftp_path_request_t req;
+        status = (request_type == SSH_FXP_REALPATH)
+                     ? sftp_realpath_request_decode(request_packet, request_packet_len, &req)
+                 : (request_type == SSH_FXP_STAT)
+                     ? sftp_stat_request_decode(request_packet, request_packet_len, &req)
+                 : (request_type == SSH_FXP_LSTAT)
+                     ? sftp_lstat_request_decode(request_packet, request_packet_len, &req)
+                 : (request_type == SSH_FXP_OPENDIR)
+                     ? sftp_opendir_request_decode(request_packet, request_packet_len, &req)
+                 : (request_type == SSH_FXP_REMOVE)
+                     ? sftp_remove_request_decode(request_packet, request_packet_len, &req)
+                     : sftp_rmdir_request_decode(request_packet, request_packet_len, &req);
+        if (status == SSH_OK) {
+            append_lit_local(line, sizeof(line), &used, " path=");
+            append_view_text_local(line, sizeof(line), &used, req.path, 160u);
+        }
+    } else if (request_type == SSH_FXP_OPEN) {
+        sftp_open_request_t req;
+        status = sftp_open_request_decode(request_packet, request_packet_len, &req);
+        if (status == SSH_OK) {
+            append_lit_local(line, sizeof(line), &used, " path=");
+            append_view_text_local(line, sizeof(line), &used, req.filename, 160u);
+        }
+    } else if (request_type == SSH_FXP_MKDIR) {
+        sftp_mkdir_request_t req;
+        status = sftp_mkdir_request_decode(request_packet, request_packet_len, &req);
+        if (status == SSH_OK) {
+            append_lit_local(line, sizeof(line), &used, " path=");
+            append_view_text_local(line, sizeof(line), &used, req.path, 160u);
+        }
+    } else if (request_type == SSH_FXP_SETSTAT) {
+        sftp_setstat_request_t req;
+        status = sftp_setstat_request_decode(request_packet, request_packet_len, &req);
+        if (status == SSH_OK) {
+            append_lit_local(line, sizeof(line), &used, " path=");
+            append_view_text_local(line, sizeof(line), &used, req.path, 160u);
+        }
+    } else if (request_type == SSH_FXP_RENAME) {
+        sftp_rename_request_t req;
+        status = sftp_rename_request_decode(request_packet, request_packet_len, &req);
+        if (status == SSH_OK) {
+            append_lit_local(line, sizeof(line), &used, " old=");
+            append_view_text_local(line, sizeof(line), &used, req.old_path, 120u);
+            append_lit_local(line, sizeof(line), &used, " new=");
+            append_view_text_local(line, sizeof(line), &used, req.new_path, 120u);
+        }
+    }
+
+    if (status != SSH_OK) {
+        append_lit_local(line, sizeof(line), &used, " decode-status=");
+        append_i32_local(line, sizeof(line), &used, status);
+    }
+    line[used] = '\0';
+    sftp_trace_log_line(transport, trace_enabled, line);
+}
+
+static void sftp_trace_log_line(
+    const struct ssh_transport_session *transport,
+    int trace_enabled,
     const char *line)
 {
     const ssh_log_api_t *log;
@@ -1299,6 +1416,12 @@ int ssh_server_process_sftp_channel_data(
             line[used] = '\0';
             sftp_trace_log_line(transport, trace_enabled, line);
         }
+        sftp_trace_log_request_paths(
+            transport,
+            trace_enabled,
+            request_type,
+            channel->sftp_rx,
+            sftp_wire_len);
 
         status = sftp_server_handle_packet(
             &channel->sftp,
