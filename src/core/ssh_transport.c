@@ -263,7 +263,10 @@ static int net_read_exact(
             return SSH_ERR_CLOSED;
         }
         if (n == EMSSH_NET_IO_TIMEOUT) {
-            return SSH_ERR_NOT_FOUND;
+            if (done == 0u) {
+                return SSH_ERR_NOT_FOUND;
+            }
+            continue;
         }
         if (n < 0) {
             return SSH_ERR_PLATFORM;

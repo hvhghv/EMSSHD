@@ -1124,6 +1124,9 @@ int ssh_server_run_sftp_session(
             status = SSH_OK;
             break;
         }
+        if (status == SSH_ERR_NOT_FOUND) {
+            continue;
+        }
         if (status != SSH_OK) {
             break;
         }
@@ -1275,6 +1278,9 @@ int ssh_server_run_auto_session(
                 if (status == SSH_ERR_CLOSED) {
                     status = SSH_OK;
                     break;
+                }
+                if (status == SSH_ERR_NOT_FOUND) {
+                    continue;
                 }
                 if (status != SSH_OK) {
                     break;
