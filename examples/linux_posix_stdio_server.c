@@ -1,8 +1,10 @@
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "emssh/platform_posix_net.h"
 #include "emssh/platform_posix_passwd_auth.h"
@@ -63,6 +65,139 @@
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
+
+#define LINUX_STAGE_MAIN_INIT 10
+#define LINUX_STAGE_MAIN_LISTEN 20
+#define LINUX_STAGE_MAIN_ACCEPT_WAIT 30
+#define LINUX_STAGE_MAIN_ACCEPTED 40
+#define LINUX_STAGE_WORKER_START 100
+#define LINUX_STAGE_WORKER_BACKEND_INIT 110
+#define LINUX_STAGE_WORKER_SERVER_INIT 120
+#define LINUX_STAGE_WORKER_RUN_SFTP 130
+#define LINUX_STAGE_WORKER_DONE 140
+#define LINUX_STAGE_WORKER_NON_SFTP_REQUEST 150
+
+static __thread volatile sig_atomic_t g_linux_server_stage = 0;
+
+static void set_linux_server_stage(sig_atomic_t stage)
+{
+    g_linux_server_stage = stage;
+}
+
+static void append_lit(char *buf, size_t capacity, size_t *used, const char *text)
+{
+    size_t i;
+
+    if (buf == NULL || used == NULL || text == NULL || *used >= capacity) {
+        return;
+    }
+    for (i = 0u; text[i] != '\0' && *used + 1u < capacity; ++i) {
+        buf[*used] = text[i];
+        *used += 1u;
+    }
+}
+
+static void append_u32(char *buf, size_t capacity, size_t *used, uint32_t value)
+{
+    char tmp[16];
+    size_t pos;
+    size_t i;
+
+    if (buf == NULL || used == NULL || *used >= capacity) {
+        return;
+    }
+
+    if (value == 0u) {
+        if (*used + 1u < capacity) {
+            buf[*used] = '0';
+            *used += 1u;
+        }
+        return;
+    }
+
+    pos = 0u;
+    while (value != 0u && pos < sizeof(tmp)) {
+        tmp[pos++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+
+    for (i = 0u; i < pos && *used + 1u < capacity; ++i) {
+        buf[*used] = tmp[pos - 1u - i];
+        *used += 1u;
+    }
+}
+
+static void append_hex_ptr(char *buf, size_t capacity, size_t *used, uintptr_t value)
+{
+    static const char hex[] = "0123456789abcdef";
+    int shift;
+    int started;
+
+    if (buf == NULL || used == NULL || *used >= capacity) {
+        return;
+    }
+
+    append_lit(buf, capacity, used, "0x");
+    if (value == 0u) {
+        append_lit(buf, capacity, used, "0");
+        return;
+    }
+
+    started = 0;
+    for (shift = (int)(sizeof(uintptr_t) * 8u) - 4; shift >= 0; shift -= 4) {
+        unsigned nibble = (unsigned)((value >> (unsigned)shift) & 0xFu);
+        if (!started && nibble == 0u) {
+            continue;
+        }
+        started = 1;
+        if (*used + 1u >= capacity) {
+            break;
+        }
+        buf[*used] = hex[nibble];
+        *used += 1u;
+    }
+}
+
+static void linux_server_fatal_signal_handler(int signo, siginfo_t *info, void *ucontext)
+{
+    char line[192];
+    size_t used;
+
+    (void)ucontext;
+
+    used = 0u;
+    append_lit(line, sizeof(line), &used, "fatal signal ");
+    append_u32(line, sizeof(line), &used, (uint32_t)signo);
+    append_lit(line, sizeof(line), &used, " stage=");
+    append_u32(line, sizeof(line), &used, (uint32_t)g_linux_server_stage);
+    if (info != NULL) {
+        append_lit(line, sizeof(line), &used, " code=");
+        append_u32(line, sizeof(line), &used, (uint32_t)info->si_code);
+        append_lit(line, sizeof(line), &used, " addr=");
+        append_hex_ptr(line, sizeof(line), &used, (uintptr_t)info->si_addr);
+    }
+    append_lit(line, sizeof(line), &used, "\n");
+    if (used > 0u) {
+        (void)write(STDERR_FILENO, line, used);
+    }
+    _exit(128 + signo);
+}
+
+static void install_linux_server_fatal_handlers(void)
+{
+    struct sigaction sa;
+    const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE};
+    size_t i;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = linux_server_fatal_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+
+    for (i = 0u; i < sizeof(signals) / sizeof(signals[0]); ++i) {
+        (void)sigaction(signals[i], &sa, NULL);
+    }
+}
 
 typedef enum crypto_backend {
     CRYPTO_BACKEND_NONE = 0,
@@ -702,6 +837,7 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
     if (request == NULL) {
         return SSH_ERR_UNSUPPORTED;
     }
+    set_linux_server_stage(LINUX_STAGE_WORKER_NON_SFTP_REQUEST);
 
     type_status = view_to_printable(request->request_type, request_type, sizeof(request_type));
     if (request_type_is(request, LINUX_SERVER_PUTTY_REQ_SIMPLE) ||
@@ -792,6 +928,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     if (shared == NULL || conn == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    set_linux_server_stage(LINUX_STAGE_WORKER_START);
 
     memset(&backend, 0, sizeof(backend));
     memset(&server, 0, sizeof(server));
@@ -801,6 +938,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     if (status != SSH_OK) {
         return status;
     }
+    set_linux_server_stage(LINUX_STAGE_WORKER_BACKEND_INIT);
 
     config = shared->base_server_config;
     options = shared->base_session_options;
@@ -811,8 +949,10 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         backend_instance_deinit(&backend);
         return status;
     }
+    set_linux_server_stage(LINUX_STAGE_WORKER_SERVER_INIT);
     initialized_server = 1;
 
+    set_linux_server_stage(LINUX_STAGE_WORKER_RUN_SFTP);
     status = ssh_server_run_sftp_session(&server, conn, &options);
     if (status != SSH_OK) {
         const char *peer = ssh_posix_conn_peer_address(conn);
@@ -823,6 +963,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         ssh_server_deinit(&server);
     }
     backend_instance_deinit(&backend);
+    set_linux_server_stage(LINUX_STAGE_WORKER_DONE);
     return status;
 }
 
@@ -867,6 +1008,8 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
+    install_linux_server_fatal_handlers();
+    set_linux_server_stage(LINUX_STAGE_MAIN_INIT);
 
     memset(&shared, 0, sizeof(shared));
     memset(&pool, 0, sizeof(pool));
@@ -976,6 +1119,7 @@ int main(int argc, char **argv)
         opts.max_workers);
     printf("note: command line overrides sshd_config for overlapping parameters.\n");
     fflush(stdout);
+    set_linux_server_stage(LINUX_STAGE_MAIN_LISTEN);
 
     for (;;) {
         ssh_posix_conn_t conn;
@@ -985,12 +1129,14 @@ int main(int argc, char **argv)
 
         memset(&conn, 0, sizeof(conn));
         worker_pool_reserve_slot(&pool);
+        set_linux_server_stage(LINUX_STAGE_MAIN_ACCEPT_WAIT);
         status = ssh_posix_accept(&shared.net, &listener, &conn, 0u);
         if (status != SSH_OK) {
             worker_pool_release_slot(&pool);
             fprintf(stderr, "accept failed: %s\n", ssh_status_string(status));
             continue;
         }
+        set_linux_server_stage(LINUX_STAGE_MAIN_ACCEPTED);
 
         task = (worker_task_t *)malloc(sizeof(*task));
         if (task == NULL) {
