@@ -61,6 +61,8 @@
 #define LINUX_SERVER_DEFAULT_MAX_WORKERS 16u
 #define LINUX_SERVER_MAX_PATH 512u
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
+#define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
+#define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
 
 typedef enum crypto_backend {
     CRYPTO_BACKEND_NONE = 0,
@@ -702,6 +704,17 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
     }
 
     type_status = view_to_printable(request->request_type, request_type, sizeof(request_type));
+    if (request_type_is(request, LINUX_SERVER_PUTTY_REQ_SIMPLE) ||
+        request_type_is(request, LINUX_SERVER_PUTTY_REQ_WINADJ)) {
+        fprintf(
+            stderr,
+            "ignored putty channel extension from %s: type=%s%s\n",
+            peer != NULL ? peer : "unknown",
+            request_type[0] != '\0' ? request_type : "(empty)",
+            type_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
+        return SSH_OK;
+    }
+
     fprintf(
         stderr,
         "unsupported channel request from %s: type=%s%s\n",
