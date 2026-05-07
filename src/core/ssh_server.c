@@ -1308,7 +1308,9 @@ int ssh_server_process_sftp_channel_data(
         {
             uint8_t response_type = response_len >= 5u ? response[4] : 0u;
             uint32_t response_id = 0u;
+            uint32_t response_status_code = 0u;
             int has_response_id = 0;
+            int has_response_status_code = 0;
             char line[224];
             size_t used = 0u;
 
@@ -1317,6 +1319,10 @@ int ssh_server_process_sftp_channel_data(
                 response_type != SSH_FXP_INIT) {
                 response_id = read_u32_be_local(response + 5u);
                 has_response_id = 1;
+            }
+            if (response_type == SSH_FXP_STATUS && response_len >= 13u) {
+                response_status_code = read_u32_be_local(response + 9u);
+                has_response_status_code = 1;
             }
             append_lit_local(line, sizeof(line), &used, "sftp-trace: out type=");
             append_lit_local(line, sizeof(line), &used, sftp_type_name_local(response_type));
@@ -1327,6 +1333,10 @@ int ssh_server_process_sftp_channel_data(
             if (has_response_id) {
                 append_lit_local(line, sizeof(line), &used, " id=");
                 append_u32_local(line, sizeof(line), &used, response_id);
+            }
+            if (has_response_status_code) {
+                append_lit_local(line, sizeof(line), &used, " status=");
+                append_u32_local(line, sizeof(line), &used, response_status_code);
             }
             line[used] = '\0';
             sftp_trace_log_line(transport, trace_enabled, line);

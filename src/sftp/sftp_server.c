@@ -1290,6 +1290,9 @@ static int handle_rename(
     }
     if (status == SSH_OK) {
         status = session->fs->rename(session->fs->ctx, old_path, new_path);
+        if (status == SSH_ERR_ALREADY_EXISTS && session->fs->posix_rename != NULL) {
+            status = session->fs->posix_rename(session->fs->ctx, old_path, new_path);
+        }
     }
 
     return encode_status(
