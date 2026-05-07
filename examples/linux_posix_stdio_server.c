@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 
 #include "emssh/platform_posix_net.h"
@@ -15,59 +18,20 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
-#if defined(EMSSH_USE_MBEDTLS)
+#if !defined(EMSSH_USE_MBEDTLS)
+#error "linux_posix_stdio_server requires mbedtls legacy backend"
+#endif
 #include "emssh/crypto_mbedtls.h"
-#endif
-#if defined(EMSSH_USE_OPENSSL)
-#include "emssh/crypto_openssl.h"
-#endif
-#if defined(EMSSH_USE_WOLFSSL)
-#include "emssh/crypto_wolfssl.h"
-#endif
 
-#if defined(EMSSH_LINUX_SERVER_FIXED_BACKEND_MBEDTLS)
-#define EMSSH_LINUX_SERVER_ENABLE_MBEDTLS 1
-#define EMSSH_LINUX_SERVER_ENABLE_OPENSSL 0
-#define EMSSH_LINUX_SERVER_ENABLE_WOLFSSL 0
-#elif defined(EMSSH_LINUX_SERVER_FIXED_BACKEND_OPENSSL)
-#define EMSSH_LINUX_SERVER_ENABLE_MBEDTLS 0
-#define EMSSH_LINUX_SERVER_ENABLE_OPENSSL 1
-#define EMSSH_LINUX_SERVER_ENABLE_WOLFSSL 0
-#elif defined(EMSSH_LINUX_SERVER_FIXED_BACKEND_WOLFSSL)
-#define EMSSH_LINUX_SERVER_ENABLE_MBEDTLS 0
-#define EMSSH_LINUX_SERVER_ENABLE_OPENSSL 0
-#define EMSSH_LINUX_SERVER_ENABLE_WOLFSSL 1
-#else
-#if defined(EMSSH_USE_MBEDTLS)
-#define EMSSH_LINUX_SERVER_ENABLE_MBEDTLS 1
-#else
-#define EMSSH_LINUX_SERVER_ENABLE_MBEDTLS 0
-#endif
-#if defined(EMSSH_USE_OPENSSL)
-#define EMSSH_LINUX_SERVER_ENABLE_OPENSSL 1
-#else
-#define EMSSH_LINUX_SERVER_ENABLE_OPENSSL 0
-#endif
-#if defined(EMSSH_USE_WOLFSSL)
-#define EMSSH_LINUX_SERVER_ENABLE_WOLFSSL 1
-#else
-#define EMSSH_LINUX_SERVER_ENABLE_WOLFSSL 0
-#endif
-#endif
-
-#if !EMSSH_LINUX_SERVER_ENABLE_MBEDTLS && !EMSSH_LINUX_SERVER_ENABLE_OPENSSL && !EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-#error "linux_posix_stdio_server requires at least one crypto backend enabled"
-#endif
-
-#define LINUX_SERVER_DEFAULT_PORT 2222u
+#define LINUX_SERVER_DEFAULT_PORT 22u
 #define LINUX_SERVER_DEFAULT_TIMEOUT_MS 30000u
 #define LINUX_SERVER_DEFAULT_MAX_WORKERS 16u
 #define LINUX_SERVER_DEFAULT_WORKER_STACK_KB 1024u
 #define LINUX_SERVER_MAX_PATH 512u
+#define LINUX_SERVER_MAX_USERNAME 128u
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
-
 #define LINUX_STAGE_MAIN_INIT 10
 #define LINUX_STAGE_MAIN_LISTEN 20
 #define LINUX_STAGE_MAIN_ACCEPT_WAIT 30
@@ -206,9 +170,7 @@ static int install_linux_server_fatal_handlers(void)
 
 typedef enum crypto_backend {
     CRYPTO_BACKEND_NONE = 0,
-    CRYPTO_BACKEND_MBEDTLS,
-    CRYPTO_BACKEND_OPENSSL,
-    CRYPTO_BACKEND_WOLFSSL
+    CRYPTO_BACKEND_MBEDTLS
 } crypto_backend_t;
 
 typedef enum session_mode {
@@ -239,6 +201,7 @@ typedef struct program_options {
     int port_overridden;
     int listen_overridden;
     int timeout_overridden;
+    int root_overridden;
 } program_options_t;
 
 typedef struct app_shared {
@@ -254,6 +217,10 @@ typedef struct app_shared {
     ssh_server_config_t base_server_config;
     ssh_server_session_options_t base_session_options;
     ssh_kexinit_algorithm_set_t base_algorithms;
+    char sshd_config_path[LINUX_SERVER_MAX_PATH];
+    int has_sshd_config_path;
+    const char *chroot_dir_from_config;
+    const char *hostkey_path_from_config;
     uint16_t port;
     session_mode_t session_mode;
     crypto_backend_t backend;
@@ -262,18 +229,16 @@ typedef struct app_shared {
     size_t mbedtls_hostkey_private_len;
 } app_shared_t;
 
+typedef struct auth_runtime_context {
+    app_shared_t *shared;
+    const ssh_posix_conn_t *conn;
+    const ssh_server_config_t *session_server_config;
+} auth_runtime_context_t;
+
 typedef struct backend_instance {
     crypto_backend_t type;
     ssh_platform_t platform;
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     ssh_mbedtls_crypto_t mbedtls;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-    ssh_openssl_crypto_t openssl;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-    ssh_wolfssl_crypto_t wolfssl;
-#endif
     int initialized;
 } backend_instance_t;
 
@@ -289,7 +254,7 @@ static void usage(const char *program)
         stderr,
         "usage: %s [options]\n"
         "  --root-dir <path>        SFTP root (default: .)\n"
-        "  --port <1-65535>         Listen port (default: 2222)\n"
+        "  --port <1-65535>         Listen port (default: 22)\n"
         "  --listen <addr>          Listen address (default: from sshd_config or any)\n"
         "  --sshd-config <path>     OpenSSH-compatible sshd_config (read via stdio_fs rooted at /)\n"
         "  --passwd-file <path>     passwd file (default: /etc/passwd)\n"
@@ -298,7 +263,7 @@ static void usage(const char *program)
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
         "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
         "  --session-mode <mode>    auto|sftp|terminal (default: auto)\n"
-        "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n"
+        "  --backend <name>         mbedtls|mbedtls-legacy (fixed)\n"
         "env:\n"
         "  EMSSH_SFTP_TRACE=1       Enable SFTP trace logs (packet type/id/len and result)\n",
         program);
@@ -360,26 +325,14 @@ static int parse_positive_unsigned(const char *text, unsigned *value_out)
 
 static crypto_backend_t default_backend(void)
 {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     return CRYPTO_BACKEND_MBEDTLS;
-#elif EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-    return CRYPTO_BACKEND_OPENSSL;
-#elif EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-    return CRYPTO_BACKEND_WOLFSSL;
-#else
-    return CRYPTO_BACKEND_NONE;
-#endif
 }
 
 static const char *backend_name(crypto_backend_t backend)
 {
     switch (backend) {
     case CRYPTO_BACKEND_MBEDTLS:
-        return "mbedtls";
-    case CRYPTO_BACKEND_OPENSSL:
-        return "openssl";
-    case CRYPTO_BACKEND_WOLFSSL:
-        return "wolfssl";
+        return "mbedtls-legacy";
     default:
         return "unknown";
     }
@@ -422,29 +375,9 @@ static int parse_backend(const char *text, crypto_backend_t *backend)
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    if (strcmp(text, "mbedtls") == 0) {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
+    if (strcmp(text, "mbedtls") == 0 || strcmp(text, "mbedtls-legacy") == 0) {
         *backend = CRYPTO_BACKEND_MBEDTLS;
         return SSH_OK;
-#else
-        return SSH_ERR_UNSUPPORTED;
-#endif
-    }
-    if (strcmp(text, "openssl") == 0) {
-#if EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-        *backend = CRYPTO_BACKEND_OPENSSL;
-        return SSH_OK;
-#else
-        return SSH_ERR_UNSUPPORTED;
-#endif
-    }
-    if (strcmp(text, "wolfssl") == 0) {
-#if EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-        *backend = CRYPTO_BACKEND_WOLFSSL;
-        return SSH_OK;
-#else
-        return SSH_ERR_UNSUPPORTED;
-#endif
     }
 
     return SSH_ERR_INVALID_ARGUMENT;
@@ -474,6 +407,733 @@ static int normalize_host_fs_path(const char *input, char out[LINUX_SERVER_MAX_P
 
     memcpy(out, p, len + 1u);
     return SSH_OK;
+}
+
+static int is_space_char_local(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+}
+
+static int base64_value_local(char c)
+{
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A';
+    }
+    if (c >= 'a' && c <= 'z') {
+        return c - 'a' + 26;
+    }
+    if (c >= '0' && c <= '9') {
+        return c - '0' + 52;
+    }
+    if (c == '+') {
+        return 62;
+    }
+    if (c == '/') {
+        return 63;
+    }
+    if (c == '=') {
+        return -2;
+    }
+    return -1;
+}
+
+static int decode_base64_token_local(
+    const char *text,
+    size_t text_len,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len)
+{
+    uint32_t acc;
+    unsigned bits;
+    size_t i;
+    size_t written;
+    int saw_padding;
+
+    if (text == NULL || out == NULL || out_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    acc = 0u;
+    bits = 0u;
+    written = 0u;
+    saw_padding = 0;
+    for (i = 0u; i < text_len; ++i) {
+        int value = base64_value_local(text[i]);
+        if (value < 0) {
+            if (value == -2) {
+                saw_padding = 1;
+                continue;
+            }
+            return SSH_ERR_MALFORMED_PACKET;
+        }
+        if (saw_padding) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
+        acc = (acc << 6) | (uint32_t)value;
+        bits += 6u;
+        if (bits >= 8u) {
+            bits -= 8u;
+            if (written >= out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[written++] = (uint8_t)((acc >> bits) & 0xffu);
+        }
+    }
+
+    *out_len = written;
+    return written != 0u ? SSH_OK : SSH_ERR_MALFORMED_PACKET;
+}
+
+static int is_authorized_key_algorithm_token(const char *token, size_t token_len)
+{
+    return (token_len == strlen("ssh-ed25519") && memcmp(token, "ssh-ed25519", token_len) == 0) ||
+           (token_len == strlen("ssh-rsa") && memcmp(token, "ssh-rsa", token_len) == 0) ||
+           (token_len == strlen("ecdsa-sha2-nistp256") && memcmp(token, "ecdsa-sha2-nistp256", token_len) == 0);
+}
+
+static int username_is_safe_for_path(const char *username)
+{
+    size_t i;
+
+    if (username == NULL || username[0] == '\0') {
+        return 0;
+    }
+
+    for (i = 0u; username[i] != '\0'; ++i) {
+        char ch = username[i];
+        int ok = (ch >= 'a' && ch <= 'z') ||
+                 (ch >= 'A' && ch <= 'Z') ||
+                 (ch >= '0' && ch <= '9') ||
+                 ch == '_' || ch == '-' || ch == '.';
+        if (!ok) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int build_home_path_for_user(const char *username, char out[LINUX_SERVER_MAX_PATH])
+{
+    int written;
+
+    if (username == NULL || out == NULL || !username_is_safe_for_path(username)) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (strcmp(username, "root") == 0) {
+        written = snprintf(out, LINUX_SERVER_MAX_PATH, "/root");
+    } else {
+        written = snprintf(out, LINUX_SERVER_MAX_PATH, "/home/%s", username);
+    }
+    if (written < 0 || (size_t)written >= LINUX_SERVER_MAX_PATH) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return SSH_OK;
+}
+
+static int expand_authorized_keys_template(
+    const char *template_path,
+    const char *username,
+    char out[LINUX_SERVER_MAX_PATH])
+{
+    char home[LINUX_SERVER_MAX_PATH];
+    const char *src;
+    size_t out_len;
+    size_t i;
+
+    if (out == NULL || username == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    src = template_path != NULL && template_path[0] != '\0' ? template_path : ".ssh/authorized_keys";
+    if (!username_is_safe_for_path(username)) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (build_home_path_for_user(username, home) != SSH_OK) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    out_len = 0u;
+    for (i = 0u; src[i] != '\0'; ++i) {
+        if (src[i] == '%') {
+            const char *rep = NULL;
+            ++i;
+            if (src[i] == '\0') {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+            if (src[i] == 'u') {
+                rep = username;
+            } else if (src[i] == 'h') {
+                rep = home;
+            } else if (src[i] == '%') {
+                rep = "%";
+            } else {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+
+            while (*rep != '\0') {
+                if (out_len + 1u >= LINUX_SERVER_MAX_PATH) {
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                out[out_len++] = *rep++;
+            }
+            continue;
+        }
+
+        if (out_len + 1u >= LINUX_SERVER_MAX_PATH) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        out[out_len++] = src[i];
+    }
+    out[out_len] = '\0';
+
+    if (out[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (out[0] != '/') {
+        char absolute[LINUX_SERVER_MAX_PATH];
+        int written = snprintf(absolute, sizeof(absolute), "%s/%s", home, out);
+        if (written < 0 || (size_t)written >= sizeof(absolute)) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        memcpy(out, absolute, (size_t)written + 1u);
+    }
+
+    return normalize_host_fs_path(out, out);
+}
+
+static int line_publickey_blob_matches_request(
+    char *line,
+    const ssh_publickey_auth_request_t *request,
+    int *matched)
+{
+    char *p;
+    char *token_start;
+    size_t token_len;
+    char *algorithm_token;
+    char *blob_token;
+    size_t blob_token_len;
+    uint8_t blob[EMSSH_MAX_HOST_KEY_BLOB];
+    size_t blob_len;
+    int status;
+
+    if (line == NULL || request == NULL || matched == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    *matched = 0;
+    p = line;
+    while (*p != '\0' && is_space_char_local(*p)) {
+        ++p;
+    }
+    if (*p == '\0' || *p == '#') {
+        return SSH_OK;
+    }
+
+    algorithm_token = NULL;
+    blob_token = NULL;
+    while (*p != '\0') {
+        while (*p != '\0' && is_space_char_local(*p)) {
+            ++p;
+        }
+        if (*p == '\0' || *p == '#') {
+            break;
+        }
+
+        token_start = p;
+        while (*p != '\0' && !is_space_char_local(*p)) {
+            ++p;
+        }
+        token_len = (size_t)(p - token_start);
+        if (token_len == 0u) {
+            continue;
+        }
+
+        if (algorithm_token == NULL) {
+            if (is_authorized_key_algorithm_token(token_start, token_len)) {
+                algorithm_token = token_start;
+            }
+            continue;
+        }
+        blob_token = token_start;
+        blob_token_len = token_len;
+        break;
+    }
+
+    if (algorithm_token == NULL || blob_token == NULL || blob_token_len == 0u) {
+        return SSH_OK;
+    }
+
+    status = decode_base64_token_local(blob_token, blob_token_len, blob, sizeof(blob), &blob_len);
+    if (status != SSH_OK) {
+        return SSH_OK;
+    }
+    if (blob_len == request->publickey_blob_len &&
+        memcmp(blob, request->publickey_blob, blob_len) == 0) {
+        *matched = 1;
+    }
+    return SSH_OK;
+}
+
+static int authorized_keys_file_contains_key(
+    const ssh_fs_api_t *fs,
+    const char *path,
+    const ssh_publickey_auth_request_t *request,
+    int *contains)
+{
+    void *handle;
+    char chunk[512];
+    char line[1024];
+    size_t line_len;
+    size_t read_len;
+    size_t i;
+    int status;
+
+    if (fs == NULL || fs->open == NULL || fs->read == NULL || fs->close == NULL ||
+        path == NULL || request == NULL || contains == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    *contains = 0;
+    handle = NULL;
+    line_len = 0u;
+    status = fs->open(fs->ctx, path, SSH_FXF_READ, &handle);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    for (;;) {
+        read_len = 0u;
+        status = fs->read(fs->ctx, handle, (uint8_t *)chunk, sizeof(chunk), &read_len);
+        if (status != SSH_OK) {
+            (void)fs->close(fs->ctx, handle);
+            return status;
+        }
+        if (read_len == 0u) {
+            break;
+        }
+
+        for (i = 0u; i < read_len; ++i) {
+            if (chunk[i] == '\n') {
+                int matched = 0;
+                if (line_len != 0u && line[line_len - 1u] == '\r') {
+                    --line_len;
+                }
+                line[line_len] = '\0';
+                status = line_publickey_blob_matches_request(line, request, &matched);
+                if (status != SSH_OK) {
+                    (void)fs->close(fs->ctx, handle);
+                    return status;
+                }
+                if (matched) {
+                    (void)fs->close(fs->ctx, handle);
+                    *contains = 1;
+                    return SSH_OK;
+                }
+                line_len = 0u;
+                continue;
+            }
+            if (line_len + 1u >= sizeof(line)) {
+                (void)fs->close(fs->ctx, handle);
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            line[line_len++] = chunk[i];
+        }
+    }
+
+    if (line_len != 0u) {
+        int matched = 0;
+        if (line[line_len - 1u] == '\r') {
+            --line_len;
+        }
+        line[line_len] = '\0';
+        status = line_publickey_blob_matches_request(line, request, &matched);
+        if (status != SSH_OK) {
+            (void)fs->close(fs->ctx, handle);
+            return status;
+        }
+        if (matched) {
+            *contains = 1;
+        }
+    }
+
+    (void)fs->close(fs->ctx, handle);
+    return SSH_OK;
+}
+
+static int username_pattern_matches_local(
+    const char *pattern,
+    size_t pattern_len,
+    const char *username,
+    size_t username_len)
+{
+    size_t p;
+    size_t u;
+    size_t star_p;
+    size_t star_u;
+
+    if (pattern == NULL || username == NULL) {
+        return 0;
+    }
+
+    p = 0u;
+    u = 0u;
+    star_p = (size_t)-1;
+    star_u = 0u;
+    while (u < username_len) {
+        if (p < pattern_len && (pattern[p] == '?' || pattern[p] == username[u])) {
+            ++p;
+            ++u;
+            continue;
+        }
+        if (p < pattern_len && pattern[p] == '*') {
+            star_p = ++p;
+            star_u = u;
+            continue;
+        }
+        if (star_p != (size_t)-1) {
+            p = star_p;
+            ++star_u;
+            u = star_u;
+            continue;
+        }
+        return 0;
+    }
+
+    while (p < pattern_len && pattern[p] == '*') {
+        ++p;
+    }
+    return p == pattern_len;
+}
+
+static int username_allowed_by_allow_users_local(const char *allow_users, const char *username, size_t username_len)
+{
+    const char *p;
+
+    if (allow_users == NULL || allow_users[0] == '\0') {
+        return 1;
+    }
+    if (username == NULL || username_len == 0u) {
+        return 0;
+    }
+
+    p = allow_users;
+    while (*p != '\0') {
+        const char *start;
+        const char *end;
+        const char *at;
+        size_t token_len;
+
+        while (*p == ' ' || *p == '\t' || *p == ',') {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+
+        start = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != ',') {
+            ++p;
+        }
+        end = p;
+        token_len = (size_t)(end - start);
+        if (token_len == 0u) {
+            continue;
+        }
+
+        at = start;
+        while (at < end && *at != '@') {
+            ++at;
+        }
+        if (at < end) {
+            end = at;
+            token_len = (size_t)(end - start);
+            if (token_len == 0u) {
+                continue;
+            }
+        }
+
+        if (username_pattern_matches_local(start, token_len, username, username_len)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int username_is_root_local(const char *username, size_t username_len)
+{
+    return username != NULL && username_len == 4u && memcmp(username, "root", 4u) == 0;
+}
+
+static int root_login_allows_method_local(int permit_root_login, const char *username, size_t username_len, int is_password_method)
+{
+    int mode;
+
+    if (!username_is_root_local(username, username_len)) {
+        return 1;
+    }
+
+    mode = permit_root_login;
+    if (mode == EMSSH_PERMIT_ROOT_LOGIN_DEFAULT) {
+        mode = EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD;
+    }
+    if (mode == EMSSH_PERMIT_ROOT_LOGIN_NO) {
+        return 0;
+    }
+    if (mode == EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD && is_password_method) {
+        return 0;
+    }
+    return 1;
+}
+
+static int copy_username_request_local(
+    const char *username,
+    size_t username_len,
+    char username_out[LINUX_SERVER_MAX_USERNAME])
+{
+    if (username == NULL || username_out == NULL || username_len == 0u || username_len + 1u > LINUX_SERVER_MAX_USERNAME) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    memcpy(username_out, username, username_len);
+    username_out[username_len] = '\0';
+    return SSH_OK;
+}
+
+static int fill_match_context_local(
+    const app_shared_t *shared,
+    const ssh_posix_conn_t *conn,
+    const char *username,
+    ssh_sshd_match_context_t *ctx,
+    char local_addr_buf[64])
+{
+    struct sockaddr_storage local_addr;
+    socklen_t local_addr_len;
+    uint16_t local_port;
+    int have_local_addr;
+
+    if (shared == NULL || conn == NULL || ctx == NULL || local_addr_buf == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    local_addr_buf[0] = '\0';
+    if (username != NULL && username[0] != '\0') {
+        ctx->user = username;
+    }
+    ctx->host = ssh_posix_conn_peer_address(conn);
+    ctx->address = ctx->host;
+
+    have_local_addr = 0;
+    local_port = 0u;
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr_len = (socklen_t)sizeof(local_addr);
+    if (getsockname(conn->socket_fd, (struct sockaddr *)&local_addr, &local_addr_len) == 0) {
+        if (local_addr.ss_family == AF_INET) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)&local_addr;
+            if (inet_ntop(AF_INET, &in->sin_addr, local_addr_buf, 64u) != NULL) {
+                have_local_addr = 1;
+            }
+            local_port = ntohs(in->sin_port);
+        } else if (local_addr.ss_family == AF_INET6) {
+            const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)&local_addr;
+            if (inet_ntop(AF_INET6, &in6->sin6_addr, local_addr_buf, 64u) != NULL) {
+                have_local_addr = 1;
+            }
+            local_port = ntohs(in6->sin6_port);
+        }
+    }
+
+    if (have_local_addr) {
+        ctx->local_address = local_addr_buf;
+    } else {
+        ctx->local_address = shared->base_server_config.listen_address;
+    }
+    ctx->local_port = local_port != 0u ? local_port : shared->port;
+    return SSH_OK;
+}
+
+static int load_runtime_policy_for_user(
+    const auth_runtime_context_t *auth_ctx,
+    const char *username,
+    ssh_sshd_config_file_t *matched_config_out,
+    ssh_server_config_t *policy_out)
+{
+    ssh_sshd_match_context_t match_ctx;
+    char local_addr_buf[64];
+    int status;
+
+    if (auth_ctx == NULL || auth_ctx->shared == NULL || auth_ctx->conn == NULL ||
+        auth_ctx->session_server_config == NULL || matched_config_out == NULL || policy_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    *policy_out = *auth_ctx->session_server_config;
+    ssh_sshd_config_file_defaults(matched_config_out);
+    if (!auth_ctx->shared->has_sshd_config_path) {
+        return SSH_OK;
+    }
+
+    status = fill_match_context_local(auth_ctx->shared, auth_ctx->conn, username, &match_ctx, local_addr_buf);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    status = ssh_sshd_config_file_load_with_match_context(
+        ssh_stdio_fs_api(&auth_ctx->shared->host_fs),
+        auth_ctx->shared->sshd_config_path,
+        &match_ctx,
+        matched_config_out);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    return ssh_sshd_config_file_apply(
+        matched_config_out,
+        policy_out,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL);
+}
+
+static int publickey_authorized_by_path_list(
+    app_shared_t *shared,
+    const ssh_publickey_auth_request_t *request,
+    const char *username,
+    const char *path_list)
+{
+    const ssh_fs_api_t *fs;
+    const char *p;
+
+    if (shared == NULL || request == NULL || username == NULL) {
+        return 0;
+    }
+
+    fs = ssh_stdio_fs_api(&shared->host_fs);
+    if (fs == NULL) {
+        return 0;
+    }
+
+    p = (path_list != NULL && path_list[0] != '\0') ? path_list : ".ssh/authorized_keys .ssh/authorized_keys2";
+    while (*p != '\0') {
+        const char *start;
+        const char *end;
+        char token[LINUX_SERVER_MAX_PATH];
+        char resolved[LINUX_SERVER_MAX_PATH];
+        int status;
+        int contains;
+        size_t len;
+
+        while (*p != '\0' && is_space_char_local(*p)) {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        start = p;
+        while (*p != '\0' && !is_space_char_local(*p)) {
+            ++p;
+        }
+        end = p;
+        len = (size_t)(end - start);
+        if (len == 0u || len >= sizeof(token)) {
+            continue;
+        }
+
+        memcpy(token, start, len);
+        token[len] = '\0';
+        status = expand_authorized_keys_template(token, username, resolved);
+        if (status != SSH_OK) {
+            continue;
+        }
+
+        contains = 0;
+        status = authorized_keys_file_contains_key(fs, resolved, request, &contains);
+        if (status == SSH_OK && contains) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int linux_password_auth_cb(void *ctx, const ssh_password_auth_request_t *request)
+{
+    auth_runtime_context_t *auth_ctx = (auth_runtime_context_t *)ctx;
+    ssh_sshd_config_file_t matched_config;
+    ssh_server_config_t policy;
+    char username[LINUX_SERVER_MAX_USERNAME];
+    int status;
+    size_t username_len;
+
+    if (auth_ctx == NULL || auth_ctx->shared == NULL || request == NULL || request->username == NULL) {
+        return 0;
+    }
+
+    status = copy_username_request_local(request->username, request->username_len, username);
+    if (status != SSH_OK) {
+        return 0;
+    }
+    username_len = request->username_len;
+
+    status = load_runtime_policy_for_user(auth_ctx, username, &matched_config, &policy);
+    if (status != SSH_OK || policy.password_auth == NULL) {
+        return 0;
+    }
+    if (!username_allowed_by_allow_users_local(policy.allow_users, username, username_len)) {
+        return 0;
+    }
+    if (!root_login_allows_method_local(policy.permit_root_login, username, username_len, 1)) {
+        return 0;
+    }
+
+    return ssh_posix_passwd_auth_cb(&auth_ctx->shared->passwd_auth, request);
+}
+
+static int linux_publickey_auth_cb(void *ctx, const ssh_publickey_auth_request_t *request)
+{
+    auth_runtime_context_t *auth_ctx = (auth_runtime_context_t *)ctx;
+    ssh_sshd_config_file_t matched_config;
+    ssh_server_config_t policy;
+    char username[LINUX_SERVER_MAX_USERNAME];
+    int status;
+    size_t username_len;
+
+    if (auth_ctx == NULL || auth_ctx->shared == NULL || request == NULL ||
+        request->username == NULL || request->publickey_blob == NULL || request->publickey_blob_len == 0u) {
+        return 0;
+    }
+
+    status = copy_username_request_local(request->username, request->username_len, username);
+    if (status != SSH_OK) {
+        return 0;
+    }
+    username_len = request->username_len;
+    if (!username_is_safe_for_path(username)) {
+        return 0;
+    }
+
+    status = load_runtime_policy_for_user(auth_ctx, username, &matched_config, &policy);
+    if (status != SSH_OK || policy.publickey_auth == NULL) {
+        return 0;
+    }
+    if (!username_allowed_by_allow_users_local(policy.allow_users, username, username_len)) {
+        return 0;
+    }
+    if (!root_login_allows_method_local(policy.permit_root_login, username, username_len, 0)) {
+        return 0;
+    }
+
+    return publickey_authorized_by_path_list(
+        auth_ctx->shared,
+        request,
+        username,
+        policy.authorized_keys_file);
 }
 
 static void options_defaults(program_options_t *opts)
@@ -526,6 +1186,7 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
                 return SSH_ERR_INVALID_ARGUMENT;
             }
             opts->root_dir = argv[++i];
+            opts->root_overridden = 1;
             continue;
         }
         if (strcmp(argv[i], "--port") == 0) {
@@ -689,21 +1350,9 @@ static void backend_instance_deinit(backend_instance_t *backend)
     }
 
     switch (backend->type) {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     case CRYPTO_BACKEND_MBEDTLS:
         ssh_mbedtls_crypto_free(&backend->mbedtls);
         break;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-    case CRYPTO_BACKEND_OPENSSL:
-        ssh_openssl_crypto_free(&backend->openssl);
-        break;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-    case CRYPTO_BACKEND_WOLFSSL:
-        ssh_wolfssl_crypto_free(&backend->wolfssl);
-        break;
-#endif
     default:
         break;
     }
@@ -733,7 +1382,6 @@ static int backend_instance_init(backend_instance_t *backend, const app_shared_t
 #endif
 
     switch (backend->type) {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     case CRYPTO_BACKEND_MBEDTLS:
         status = ssh_mbedtls_crypto_init(&backend->mbedtls);
         if (status != SSH_OK) {
@@ -750,27 +1398,6 @@ static int backend_instance_init(backend_instance_t *backend, const app_shared_t
         backend->platform.crypto = ssh_mbedtls_crypto_api(&backend->mbedtls);
         backend->platform.rng = ssh_mbedtls_rng_api(&backend->mbedtls);
         break;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-    case CRYPTO_BACKEND_OPENSSL:
-        status = ssh_openssl_crypto_init(&backend->openssl);
-        if (status != SSH_OK) {
-            return status;
-        }
-        backend->platform.crypto = ssh_openssl_crypto_api(&backend->openssl);
-        backend->platform.rng = ssh_openssl_rng_api(&backend->openssl);
-        break;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-    case CRYPTO_BACKEND_WOLFSSL:
-        status = ssh_wolfssl_crypto_init(&backend->wolfssl);
-        if (status != SSH_OK) {
-            return status;
-        }
-        backend->platform.crypto = ssh_wolfssl_crypto_api(&backend->wolfssl);
-        backend->platform.rng = ssh_wolfssl_rng_api(&backend->wolfssl);
-        break;
-#endif
     default:
         return SSH_ERR_UNSUPPORTED;
     }
@@ -781,11 +1408,68 @@ static int backend_instance_init(backend_instance_t *backend, const app_shared_t
 
 static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
 {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     ssh_mbedtls_crypto_t bootstrap;
+    const ssh_fs_api_t *host_fs_api;
+    void *handle;
+    size_t read_len;
     int status;
 
     if (shared->backend != CRYPTO_BACKEND_MBEDTLS) {
+        return SSH_OK;
+    }
+
+    if (shared->hostkey_path_from_config != NULL) {
+        host_fs_api = ssh_stdio_fs_api(&shared->host_fs);
+        if (host_fs_api == NULL || host_fs_api->open == NULL || host_fs_api->read == NULL || host_fs_api->close == NULL) {
+            return SSH_ERR_PLATFORM;
+        }
+
+        shared->mbedtls_hostkey_private_len = 0u;
+        handle = NULL;
+        status = host_fs_api->open(host_fs_api->ctx, shared->hostkey_path_from_config, SSH_FXF_READ, &handle);
+        if (status != SSH_OK) {
+            return status;
+        }
+
+        for (;;) {
+            read_len = 0u;
+            status = host_fs_api->read(
+                host_fs_api->ctx,
+                handle,
+                shared->mbedtls_hostkey_private + shared->mbedtls_hostkey_private_len,
+                sizeof(shared->mbedtls_hostkey_private) - shared->mbedtls_hostkey_private_len,
+                &read_len);
+            if (status != SSH_OK) {
+                (void)host_fs_api->close(host_fs_api->ctx, handle);
+                return status;
+            }
+            if (read_len == 0u) {
+                break;
+            }
+            shared->mbedtls_hostkey_private_len += read_len;
+            if (shared->mbedtls_hostkey_private_len == sizeof(shared->mbedtls_hostkey_private)) {
+                size_t probe_len = 0u;
+                int probe_status = host_fs_api->read(
+                    host_fs_api->ctx,
+                    handle,
+                    shared->mbedtls_hostkey_private,
+                    1u,
+                    &probe_len);
+                if (probe_status != SSH_OK) {
+                    (void)host_fs_api->close(host_fs_api->ctx, handle);
+                    return probe_status;
+                }
+                if (probe_len != 0u) {
+                    (void)host_fs_api->close(host_fs_api->ctx, handle);
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                break;
+            }
+        }
+        (void)host_fs_api->close(host_fs_api->ctx, handle);
+        if (shared->mbedtls_hostkey_private_len == 0u) {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
         return SSH_OK;
     }
 
@@ -804,10 +1488,6 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
     }
     ssh_mbedtls_crypto_free(&bootstrap);
     return status;
-#else
-    (void)shared;
-    return SSH_OK;
-#endif
 }
 
 static void set_backend_kex_defaults(crypto_backend_t backend, ssh_kexinit_algorithm_set_t *algorithms)
@@ -817,21 +1497,9 @@ static void set_backend_kex_defaults(crypto_backend_t backend, ssh_kexinit_algor
     }
 
     switch (backend) {
-#if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
     case CRYPTO_BACKEND_MBEDTLS:
         ssh_mbedtls_kexinit_algorithm_set_defaults(algorithms);
         return;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_OPENSSL
-    case CRYPTO_BACKEND_OPENSSL:
-        ssh_openssl_kexinit_algorithm_set_defaults(algorithms);
-        return;
-#endif
-#if EMSSH_LINUX_SERVER_ENABLE_WOLFSSL
-    case CRYPTO_BACKEND_WOLFSSL:
-        ssh_wolfssl_kexinit_algorithm_set_defaults(algorithms);
-        return;
-#endif
     default:
         memset(algorithms, 0, sizeof(*algorithms));
         return;
@@ -855,8 +1523,16 @@ static int initialize_server_templates(
     shared->base_session_options.algorithms = &shared->base_algorithms;
     shared->base_session_options.timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
     shared->port = LINUX_SERVER_DEFAULT_PORT;
+    shared->has_sshd_config_path = 0;
+    shared->sshd_config_path[0] = '\0';
 
     if (sshd_config_path_normalized != NULL) {
+        size_t config_path_len = strlen(sshd_config_path_normalized);
+        if (config_path_len + 1u > sizeof(shared->sshd_config_path)) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        memcpy(shared->sshd_config_path, sshd_config_path_normalized, config_path_len + 1u);
+        shared->has_sshd_config_path = 1;
         ssh_sshd_config_file_defaults(&shared->sshd_config);
         status = ssh_sshd_config_file_load(
             ssh_stdio_fs_api(&shared->host_fs),
@@ -870,7 +1546,9 @@ static int initialize_server_templates(
             &shared->base_server_config,
             &shared->base_session_options,
             &shared->base_algorithms,
-            &shared->port);
+            &shared->port,
+            &shared->chroot_dir_from_config,
+            &shared->hostkey_path_from_config);
         if (status != SSH_OK) {
             return status;
         }
@@ -887,8 +1565,13 @@ static int initialize_server_templates(
     }
     shared->base_session_options.sftp_trace_enabled = shared->sftp_trace_enabled;
 
-    shared->base_server_config.password_auth = ssh_posix_passwd_auth_cb;
-    shared->base_server_config.auth_ctx = &shared->passwd_auth;
+    if (!shared->sshd_config.has_password_authentication || shared->sshd_config.password_authentication) {
+        shared->base_server_config.password_auth = linux_password_auth_cb;
+    }
+    if (!shared->sshd_config.has_pubkey_authentication || shared->sshd_config.pubkey_authentication) {
+        shared->base_server_config.publickey_auth = linux_publickey_auth_cb;
+    }
+    shared->base_server_config.auth_ctx = NULL;
     return SSH_OK;
 }
 
@@ -937,8 +1620,8 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
         return SSH_ERR_UNSUPPORTED;
     }
     set_linux_server_stage(LINUX_STAGE_WORKER_NON_SFTP_REQUEST);
-
     type_status = view_to_printable(request->request_type, request_type, sizeof(request_type));
+
     if (request_type_is(request, LINUX_SERVER_PUTTY_REQ_SIMPLE) ||
         request_type_is(request, LINUX_SERVER_PUTTY_REQ_WINADJ)) {
         fprintf(
@@ -947,7 +1630,7 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
             peer != NULL ? peer : "unknown",
             request_type[0] != '\0' ? request_type : "(empty)",
             type_status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
-        return SSH_OK;
+        return SSH_ERR_UNSUPPORTED;
     }
 
     if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ) ||
@@ -1009,7 +1692,7 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
                 signal_name[0] != '\0' ? signal_name : "(empty)",
                 status == SSH_ERR_BUFFER_TOO_SMALL ? "..." : "");
         }
-        return SSH_OK;
+        return SSH_ERR_UNSUPPORTED;
     }
 
     fprintf(
@@ -1038,6 +1721,11 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     ssh_server_t server;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
+    ssh_kexinit_algorithm_set_t algorithms;
+    ssh_sshd_config_file_t matched_config;
+    ssh_sshd_match_context_t match_ctx;
+    auth_runtime_context_t auth_ctx;
+    char local_addr_buf[64];
     int status;
     int initialized_server;
 
@@ -1058,6 +1746,46 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 
     config = shared->base_server_config;
     options = shared->base_session_options;
+    algorithms = shared->base_algorithms;
+    options.algorithms = &algorithms;
+    ssh_sshd_config_file_defaults(&matched_config);
+
+    if (shared->has_sshd_config_path) {
+        status = fill_match_context_local(shared, conn, NULL, &match_ctx, local_addr_buf);
+        if (status != SSH_OK) {
+            backend_instance_deinit(&backend);
+            return status;
+        }
+
+        status = ssh_sshd_config_file_load_with_match_context(
+            ssh_stdio_fs_api(&shared->host_fs),
+            shared->sshd_config_path,
+            &match_ctx,
+            &matched_config);
+        if (status != SSH_OK) {
+            backend_instance_deinit(&backend);
+            return status;
+        }
+
+        status = ssh_sshd_config_file_apply(
+            &matched_config,
+            &config,
+            &options,
+            &algorithms,
+            NULL,
+            NULL,
+            NULL);
+        if (status != SSH_OK) {
+            backend_instance_deinit(&backend);
+            return status;
+        }
+    }
+
+    auth_ctx.shared = shared;
+    auth_ctx.conn = conn;
+    auth_ctx.session_server_config = &config;
+    config.auth_ctx = &auth_ctx;
+
     if (shared->session_mode == SESSION_MODE_SFTP || shared->session_mode == SESSION_MODE_AUTO) {
         options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
         options.non_sftp_channel_request_policy_ctx = conn;
@@ -1229,13 +1957,6 @@ int main(int argc, char **argv)
     }
     initialized_net = 1;
 
-    status = ssh_stdio_fs_init(&shared.sftp_fs, opts.root_dir);
-    if (status != SSH_OK) {
-        fprintf(stderr, "stdio fs (sftp root) init failed: %s\n", ssh_status_string(status));
-        goto cleanup;
-    }
-    initialized_sftp_fs = 1;
-
     status = ssh_stdio_fs_init(&shared.host_fs, "/");
     if (status != SSH_OK) {
         fprintf(stderr, "stdio fs (host root) init failed: %s\n", ssh_status_string(status));
@@ -1273,6 +1994,19 @@ int main(int argc, char **argv)
     if (status != SSH_OK) {
         fprintf(stderr, "server template init failed: %s\n", ssh_status_string(status));
         goto cleanup;
+    }
+
+    {
+        const char *effective_sftp_root = opts.root_dir;
+        if (!opts.root_overridden && shared.chroot_dir_from_config != NULL && shared.chroot_dir_from_config[0] != '\0') {
+            effective_sftp_root = shared.chroot_dir_from_config;
+        }
+        status = ssh_stdio_fs_init(&shared.sftp_fs, effective_sftp_root);
+        if (status != SSH_OK) {
+            fprintf(stderr, "stdio fs (sftp root) init failed: %s\n", ssh_status_string(status));
+            goto cleanup;
+        }
+        initialized_sftp_fs = 1;
     }
 
     status = prepare_mbedtls_hostkey_if_needed(&shared);

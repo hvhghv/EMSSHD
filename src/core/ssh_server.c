@@ -38,6 +38,39 @@ static int channel_request_is_subsystem_name(const ssh_channel_request_t *reques
            view_equals_cstr(request->subsystem_name, subsystem_name);
 }
 
+static int channel_request_is_default_ignorable_non_sftp(const ssh_channel_request_t *request)
+{
+    if (request == NULL) {
+        return 0;
+    }
+
+    return
+        view_equals_cstr(request->request_type, "simple@putty.projects.tartarus.org") ||
+        view_equals_cstr(request->request_type, "winadj@putty.projects.tartarus.org") ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_PTY_REQ) ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_SHELL) ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_EXEC) ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_ENV) ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_WINDOW_CHANGE) ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_SIGNAL);
+}
+
+static int non_sftp_channel_request_allowed_by_policy(
+    const ssh_server_session_options_t *effective,
+    const ssh_channel_request_t *request)
+{
+    if (effective != NULL && effective->non_sftp_channel_request_policy != NULL) {
+        int policy_status = effective->non_sftp_channel_request_policy(
+            effective->non_sftp_channel_request_policy_ctx,
+            request);
+        if (policy_status == SSH_OK) {
+            return SSH_OK;
+        }
+    }
+
+    return channel_request_is_default_ignorable_non_sftp(request) ? SSH_OK : SSH_ERR_UNSUPPORTED;
+}
+
 static uint32_t add_u32_saturating(uint32_t lhs, uint32_t rhs)
 {
     if (UINT32_MAX - lhs < rhs) {
@@ -538,7 +571,7 @@ void ssh_server_config_defaults(ssh_server_config_t *config)
     config->password_auth = NULL;
     config->publickey_auth = NULL;
     config->publickey_signature_algorithms = NULL;
-    config->permit_root_login = EMSSH_PERMIT_ROOT_LOGIN_DEFAULT;
+    config->permit_root_login = EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD;
     config->allow_users = NULL;
     config->authorized_keys_file = NULL;
     config->auth_ctx = NULL;
@@ -853,10 +886,7 @@ static int sftp_accept_after_open(
                 open->sender_channel,
                 effective.timeout_ms);
         }
-        if (effective.non_sftp_channel_request_policy == NULL ||
-            effective.non_sftp_channel_request_policy(
-                effective.non_sftp_channel_request_policy_ctx,
-                &request) != SSH_OK) {
+        if (non_sftp_channel_request_allowed_by_policy(&effective, &request) != SSH_OK) {
             return SSH_ERR_UNSUPPORTED;
         }
     }
@@ -962,10 +992,7 @@ static int terminal_accept_after_open(
                     channel->client_channel,
                     effective.timeout_ms);
             }
-            if (effective.non_sftp_channel_request_policy == NULL ||
-                effective.non_sftp_channel_request_policy(
-                    effective.non_sftp_channel_request_policy_ctx,
-                    &request) != SSH_OK) {
+            if (non_sftp_channel_request_allowed_by_policy(&effective, &request) != SSH_OK) {
                 return SSH_ERR_UNSUPPORTED;
             }
             continue;
@@ -1177,10 +1204,7 @@ static int terminal_accept_after_open(
                 channel->client_channel,
                 effective.timeout_ms);
         }
-        if (effective.non_sftp_channel_request_policy == NULL ||
-            effective.non_sftp_channel_request_policy(
-                effective.non_sftp_channel_request_policy_ctx,
-                &request) != SSH_OK) {
+        if (non_sftp_channel_request_allowed_by_policy(&effective, &request) != SSH_OK) {
             return SSH_ERR_UNSUPPORTED;
         }
     }
@@ -1785,10 +1809,7 @@ int ssh_server_run_auto_session(
                 open.sender_channel,
                 effective.timeout_ms);
         }
-        if (effective.non_sftp_channel_request_policy == NULL ||
-            effective.non_sftp_channel_request_policy(
-                effective.non_sftp_channel_request_policy_ctx,
-                &request) != SSH_OK) {
+        if (non_sftp_channel_request_allowed_by_policy(&effective, &request) != SSH_OK) {
             update_server_diag_from_transport(server, &transport);
             return SSH_ERR_UNSUPPORTED;
         }

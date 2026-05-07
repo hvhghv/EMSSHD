@@ -232,7 +232,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "sshd_config load failed: %s\n", ssh_status_string(status));
             goto cleanup;
         }
-        status = ssh_sshd_config_file_apply(&sshd_config, &config, &options, &algorithms, &port);
+        status = ssh_sshd_config_file_apply(&sshd_config, &config, &options, &algorithms, &port, NULL, NULL);
         if (status != SSH_OK) {
             fprintf(stderr, "sshd_config apply failed: %s\n", ssh_status_string(status));
             goto cleanup;

@@ -37,6 +37,12 @@ typedef struct ssh_sshd_config_file {
     int has_authorized_keys_file;
     char authorized_keys_file[EMSSH_SSHD_CONFIG_VALUE_MAX];
 
+    int has_chroot_directory;
+    char chroot_directory[EMSSH_SSHD_CONFIG_VALUE_MAX];
+
+    int has_host_key;
+    char host_key_file[EMSSH_SSHD_CONFIG_VALUE_MAX];
+
     int has_kex_algorithms;
     char kex_algorithms[EMSSH_SSHD_CONFIG_VALUE_MAX];
 
@@ -53,6 +59,16 @@ typedef struct ssh_sshd_config_file {
     char compression_algorithms[EMSSH_SSHD_CONFIG_VALUE_MAX];
 } ssh_sshd_config_file_t;
 
+typedef struct ssh_sshd_match_context {
+    const char *user;
+    const char *group;
+    const char *host;
+    const char *address;
+    const char *local_address;
+    uint16_t local_port;
+    const char *rdomain;
+} ssh_sshd_match_context_t;
+
 void ssh_sshd_config_file_defaults(ssh_sshd_config_file_t *config);
 
 int ssh_sshd_config_file_load(
@@ -60,11 +76,19 @@ int ssh_sshd_config_file_load(
     const char *path,
     ssh_sshd_config_file_t *config);
 
+int ssh_sshd_config_file_load_with_match_context(
+    const ssh_fs_api_t *fs,
+    const char *path,
+    const ssh_sshd_match_context_t *match_context,
+    ssh_sshd_config_file_t *config);
+
 int ssh_sshd_config_file_apply(
     const ssh_sshd_config_file_t *config,
     ssh_server_config_t *server_config,
     ssh_server_session_options_t *session_options,
     ssh_kexinit_algorithm_set_t *algorithms,
-    uint16_t *port);
+    uint16_t *port,
+    const char **chroot_directory,
+    const char **host_key_file);
 
 #endif

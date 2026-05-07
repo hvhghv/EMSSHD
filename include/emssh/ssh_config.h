@@ -32,7 +32,7 @@
 #endif
 
 #ifndef EMSSH_MAX_AUTH_TRIES
-#define EMSSH_MAX_AUTH_TRIES 3u
+#define EMSSH_MAX_AUTH_TRIES 6u
 #endif
 
 #ifndef EMSSH_SFTP_MAX_HANDLES

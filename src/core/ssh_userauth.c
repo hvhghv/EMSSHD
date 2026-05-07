@@ -140,7 +140,7 @@ static int request_allowed_by_server_policy(const ssh_server_t *server, const ss
     if (username_is_root(request->username)) {
         int mode = server->config.permit_root_login;
         if (mode == EMSSH_PERMIT_ROOT_LOGIN_DEFAULT) {
-            mode = EMSSH_PERMIT_ROOT_LOGIN_YES;
+            mode = EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD;
         }
         if (mode == EMSSH_PERMIT_ROOT_LOGIN_NO) {
             return 0;

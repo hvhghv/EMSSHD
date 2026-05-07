@@ -76,8 +76,10 @@ int main(void)
         "PubkeyAuthentication no\n"
         "PermitRootLogin prohibit-password\n"
         "AllowUsers alice bob\n"
+        "ChrootDirectory /mnt/host\n"
         "Subsystem sftp /usr/lib/openssh/sftp-server\n"
         "AuthorizedKeysFile .ssh/authorized_keys\n"
+        "HostKey /etc/emssh/hostkey.p256.raw\n"
         "KexAlgorithms curve25519-sha256\n"
         "HostKeyAlgorithms ecdsa-sha2-nistp256\n"
         "Ciphers aes128-ctr\n"
@@ -86,13 +88,33 @@ int main(void)
     const char *config_text_with_bracket_port =
         "ListenAddress [::1]:2200\n"
         "PermitRootLogin no\n";
+    const char *config_text_compression_yes =
+        "Compression yes\n";
+    const char *config_text_match_blocks =
+        "Port 2201\n"
+        "Match User root\n"
+        "Port 2202\n"
+        "MaxAuthTries 9\n"
+        "Match all\n"
+        "ListenAddress 127.0.0.2\n"
+        "MaxAuthTries 6\n";
+    const char *config_text_match_full =
+        "Port 2200\n"
+        "Match User root Address 192.168.* LocalPort 2200\n"
+        "MaxAuthTries 10\n"
+        "PermitRootLogin no\n"
+        "Match User !root\n"
+        "MaxAuthTries 3\n";
     mock_file_ctx_t mock;
     ssh_fs_api_t fs;
     ssh_sshd_config_file_t parsed;
     ssh_server_config_t server_config;
     ssh_server_session_options_t session_options;
     ssh_kexinit_algorithm_set_t algorithms;
+    const char *chroot_directory;
+    const char *hostkey_file;
     uint16_t port;
+    ssh_sshd_match_context_t match_ctx;
 
     memset(&mock, 0, sizeof(mock));
     mock.text = config_text;
@@ -115,10 +137,14 @@ int main(void)
     CHECK(parsed.has_permit_root_login && parsed.permit_root_login == EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD);
     CHECK(parsed.has_allow_users);
     CHECK(strcmp(parsed.allow_users, "alice bob") == 0);
+    CHECK(parsed.has_chroot_directory);
+    CHECK(strcmp(parsed.chroot_directory, "/mnt/host") == 0);
     CHECK(parsed.has_subsystem);
     CHECK(strcmp(parsed.subsystem_name, "sftp") == 0);
     CHECK(parsed.has_authorized_keys_file);
     CHECK(strcmp(parsed.authorized_keys_file, ".ssh/authorized_keys") == 0);
+    CHECK(parsed.has_host_key);
+    CHECK(strcmp(parsed.host_key_file, "/etc/emssh/hostkey.p256.raw") == 0);
     CHECK(parsed.has_kex_algorithms);
     CHECK(strcmp(parsed.kex_algorithms, "curve25519-sha256") == 0);
     CHECK(parsed.has_hostkey_algorithms);
@@ -135,10 +161,23 @@ int main(void)
     ssh_kexinit_algorithm_set_defaults(&algorithms);
     server_config.password_auth = (ssh_password_auth_fn)1;
     server_config.publickey_auth = (ssh_publickey_auth_fn)1;
+    chroot_directory = NULL;
+    hostkey_file = NULL;
     port = 22u;
 
-    CHECK(ssh_sshd_config_file_apply(&parsed, &server_config, &session_options, &algorithms, &port) == SSH_OK);
+    CHECK(ssh_sshd_config_file_apply(
+        &parsed,
+        &server_config,
+        &session_options,
+        &algorithms,
+        &port,
+        &chroot_directory,
+        &hostkey_file) == SSH_OK);
     CHECK(port == 2222u);
+    CHECK(chroot_directory != NULL);
+    CHECK(strcmp(chroot_directory, "/mnt/host") == 0);
+    CHECK(hostkey_file != NULL);
+    CHECK(strcmp(hostkey_file, "/etc/emssh/hostkey.p256.raw") == 0);
     CHECK(server_config.listen_address != NULL);
     CHECK(strcmp(server_config.listen_address, "127.0.0.1") == 0);
     CHECK(server_config.max_auth_tries == 5u);
@@ -162,10 +201,45 @@ int main(void)
     ssh_sshd_config_file_defaults(&parsed);
     CHECK(ssh_sshd_config_file_load(&fs, "/etc/ssh/sshd_config", &parsed) == SSH_OK);
     CHECK(parsed.has_listen_address);
-    CHECK(strcmp(parsed.listen_address, "[::1]:2200") == 0);
+    CHECK(strcmp(parsed.listen_address, "::1") == 0);
     CHECK(parsed.has_port && parsed.port == 2200u);
     CHECK(parsed.has_permit_root_login);
     CHECK(parsed.permit_root_login == EMSSH_PERMIT_ROOT_LOGIN_NO);
+
+    mock.text = config_text_compression_yes;
+    mock.text_len = strlen(config_text_compression_yes);
+    ssh_sshd_config_file_defaults(&parsed);
+    CHECK(ssh_sshd_config_file_load(&fs, "/etc/ssh/sshd_config", &parsed) == SSH_ERR_UNSUPPORTED);
+
+    mock.text = config_text_match_blocks;
+    mock.text_len = strlen(config_text_match_blocks);
+    ssh_sshd_config_file_defaults(&parsed);
+    CHECK(ssh_sshd_config_file_load(&fs, "/etc/ssh/sshd_config", &parsed) == SSH_OK);
+    CHECK(parsed.has_port && parsed.port == 2201u);
+    CHECK(parsed.has_listen_address);
+    CHECK(strcmp(parsed.listen_address, "127.0.0.2") == 0);
+    CHECK(parsed.has_max_auth_tries && parsed.max_auth_tries == 6u);
+
+    mock.text = config_text_match_full;
+    mock.text_len = strlen(config_text_match_full);
+    memset(&match_ctx, 0, sizeof(match_ctx));
+    match_ctx.user = "root";
+    match_ctx.address = "192.168.1.88";
+    match_ctx.local_port = 2200u;
+    ssh_sshd_config_file_defaults(&parsed);
+    CHECK(ssh_sshd_config_file_load_with_match_context(&fs, "/etc/ssh/sshd_config", &match_ctx, &parsed) == SSH_OK);
+    CHECK(parsed.has_port && parsed.port == 2200u);
+    CHECK(parsed.has_max_auth_tries && parsed.max_auth_tries == 10u);
+    CHECK(parsed.has_permit_root_login && parsed.permit_root_login == EMSSH_PERMIT_ROOT_LOGIN_NO);
+
+    memset(&match_ctx, 0, sizeof(match_ctx));
+    match_ctx.user = "alice";
+    match_ctx.address = "192.168.1.88";
+    match_ctx.local_port = 2200u;
+    ssh_sshd_config_file_defaults(&parsed);
+    CHECK(ssh_sshd_config_file_load_with_match_context(&fs, "/etc/ssh/sshd_config", &match_ctx, &parsed) == SSH_OK);
+    CHECK(parsed.has_port && parsed.port == 2200u);
+    CHECK(parsed.has_max_auth_tries && parsed.max_auth_tries == 3u);
 
     return 0;
 }
