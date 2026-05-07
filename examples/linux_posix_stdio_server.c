@@ -257,6 +257,7 @@ typedef struct app_shared {
     uint16_t port;
     session_mode_t session_mode;
     crypto_backend_t backend;
+    int sftp_trace_enabled;
     uint8_t mbedtls_hostkey_private[LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE];
     size_t mbedtls_hostkey_private_len;
 } app_shared_t;
@@ -297,7 +298,9 @@ static void usage(const char *program)
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
         "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
         "  --session-mode <mode>    auto|sftp|terminal (default: auto)\n"
-        "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n",
+        "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n"
+        "env:\n"
+        "  EMSSH_SFTP_TRACE=1       Enable SFTP trace logs (packet type/id/len and result)\n",
         program);
 }
 
@@ -487,6 +490,24 @@ static void options_defaults(program_options_t *opts)
     opts->worker_stack_kb = LINUX_SERVER_DEFAULT_WORKER_STACK_KB;
     opts->session_mode = SESSION_MODE_AUTO;
     opts->backend = default_backend();
+}
+
+static int env_flag_enabled(const char *name)
+{
+    const char *value;
+
+    if (name == NULL || name[0] == '\0') {
+        return 0;
+    }
+    value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "on") == 0;
 }
 
 static int parse_args(int argc, char **argv, program_options_t *opts)
@@ -864,6 +885,7 @@ static int initialize_server_templates(
     if (opts->timeout_overridden) {
         shared->base_session_options.timeout_ms = opts->timeout_ms;
     }
+    shared->base_session_options.sftp_trace_enabled = shared->sftp_trace_enabled;
 
     shared->base_server_config.password_auth = ssh_posix_passwd_auth_cb;
     shared->base_server_config.auth_ctx = &shared->passwd_auth;
@@ -1150,6 +1172,7 @@ int main(int argc, char **argv)
     initialized_pool = 0;
     shared.backend = opts.backend;
     shared.session_mode = opts.session_mode;
+    shared.sftp_trace_enabled = env_flag_enabled("EMSSH_SFTP_TRACE");
     if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
         fprintf(stderr, "invalid --worker-stack-kb value: overflow\n");
         return 2;
@@ -1278,6 +1301,9 @@ int main(int argc, char **argv)
         opts.max_workers,
         (unsigned long)(worker_stack_size_bytes / 1024u));
     printf("note: command line overrides sshd_config for overlapping parameters.\n");
+    if (shared.sftp_trace_enabled) {
+        printf("note: EMSSH_SFTP_TRACE enabled (SFTP request/response trace is on).\n");
+    }
     fflush(stdout);
     set_linux_server_stage(LINUX_STAGE_MAIN_LISTEN);
 

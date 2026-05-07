@@ -80,6 +80,7 @@ typedef struct ssh_server_session_options {
     ssh_non_sftp_channel_request_policy_fn non_sftp_channel_request_policy;
     void *non_sftp_channel_request_policy_ctx;
     const char *sftp_subsystem_name;
+    int sftp_trace_enabled;
 } ssh_server_session_options_t;
 
 typedef struct ssh_server_sftp_channel {

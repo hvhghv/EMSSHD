@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "emssh/sftp.h"
 #include "emssh/sftp_server.h"
 #include "emssh/ssh_buffer.h"
 #include "emssh/ssh_config.h"
@@ -75,6 +76,143 @@ static int view_to_cstring(ssh_string_view_t view, char *out, size_t out_capacit
     memcpy(out, view.data, view.len);
     out[view.len] = '\0';
     return SSH_OK;
+}
+
+static void append_lit_local(char *buf, size_t capacity, size_t *used, const char *text)
+{
+    size_t i;
+
+    if (buf == NULL || used == NULL || text == NULL || *used >= capacity) {
+        return;
+    }
+    for (i = 0u; text[i] != '\0' && *used + 1u < capacity; ++i) {
+        buf[*used] = text[i];
+        *used += 1u;
+    }
+}
+
+static void append_u32_local(char *buf, size_t capacity, size_t *used, uint32_t value)
+{
+    char tmp[16];
+    size_t pos;
+    size_t i;
+
+    if (buf == NULL || used == NULL || *used >= capacity) {
+        return;
+    }
+    if (value == 0u) {
+        if (*used + 1u < capacity) {
+            buf[*used] = '0';
+            *used += 1u;
+        }
+        return;
+    }
+
+    pos = 0u;
+    while (value != 0u && pos < sizeof(tmp)) {
+        tmp[pos++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    for (i = 0u; i < pos && *used + 1u < capacity; ++i) {
+        buf[*used] = tmp[pos - 1u - i];
+        *used += 1u;
+    }
+}
+
+static void append_size_local(char *buf, size_t capacity, size_t *used, size_t value)
+{
+    if (value > 0xffffffffu) {
+        append_lit_local(buf, capacity, used, "4294967295+");
+        return;
+    }
+    append_u32_local(buf, capacity, used, (uint32_t)value);
+}
+
+static void append_i32_local(char *buf, size_t capacity, size_t *used, int value)
+{
+    if (value < 0) {
+        append_lit_local(buf, capacity, used, "-");
+        append_u32_local(buf, capacity, used, (uint32_t)(-(value + 1) + 1));
+        return;
+    }
+    append_u32_local(buf, capacity, used, (uint32_t)value);
+}
+
+static const char *sftp_type_name_local(uint8_t type)
+{
+    switch (type) {
+    case SSH_FXP_INIT:
+        return "INIT";
+    case SSH_FXP_VERSION:
+        return "VERSION";
+    case SSH_FXP_OPEN:
+        return "OPEN";
+    case SSH_FXP_CLOSE:
+        return "CLOSE";
+    case SSH_FXP_READ:
+        return "READ";
+    case SSH_FXP_WRITE:
+        return "WRITE";
+    case SSH_FXP_LSTAT:
+        return "LSTAT";
+    case SSH_FXP_FSTAT:
+        return "FSTAT";
+    case SSH_FXP_SETSTAT:
+        return "SETSTAT";
+    case SSH_FXP_FSETSTAT:
+        return "FSETSTAT";
+    case SSH_FXP_OPENDIR:
+        return "OPENDIR";
+    case SSH_FXP_READDIR:
+        return "READDIR";
+    case SSH_FXP_REMOVE:
+        return "REMOVE";
+    case SSH_FXP_MKDIR:
+        return "MKDIR";
+    case SSH_FXP_RMDIR:
+        return "RMDIR";
+    case SSH_FXP_REALPATH:
+        return "REALPATH";
+    case SSH_FXP_STAT:
+        return "STAT";
+    case SSH_FXP_RENAME:
+        return "RENAME";
+    case SSH_FXP_STATUS:
+        return "STATUS";
+    case SSH_FXP_HANDLE:
+        return "HANDLE";
+    case SSH_FXP_DATA:
+        return "DATA";
+    case SSH_FXP_NAME:
+        return "NAME";
+    case SSH_FXP_ATTRS:
+        return "ATTRS";
+    case SSH_FXP_EXTENDED:
+        return "EXTENDED";
+    case SSH_FXP_EXTENDED_REPLY:
+        return "EXTENDED_REPLY";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static void sftp_trace_log_line(
+    const struct ssh_transport_session *transport,
+    int trace_enabled,
+    const char *line)
+{
+    const ssh_log_api_t *log;
+
+    if (!trace_enabled || transport == NULL || transport->server == NULL || line == NULL) {
+        return;
+    }
+
+    log = transport->server->platform.log;
+    if (log == NULL || log->write == NULL) {
+        return;
+    }
+
+    log->write(log->ctx, SSH_LOG_INFO, line);
 }
 
 static int should_tolerate_pre_request_malformed(
@@ -196,6 +334,7 @@ static void effective_session_options(
         if (options->sftp_subsystem_name != NULL) {
             effective->sftp_subsystem_name = options->sftp_subsystem_name;
         }
+        effective->sftp_trace_enabled = options->sftp_trace_enabled;
     }
 }
 
@@ -365,6 +504,7 @@ void ssh_server_session_options_defaults(ssh_server_session_options_t *options)
     options->non_sftp_channel_request_policy = NULL;
     options->non_sftp_channel_request_policy_ctx = NULL;
     options->sftp_subsystem_name = SSH_SUBSYSTEM_SFTP;
+    options->sftp_trace_enabled = 0;
 }
 
 int ssh_server_run_transport_setup(
@@ -975,6 +1115,7 @@ int ssh_server_process_sftp_channel_data(
     uint8_t response[EMSSH_SFTP_MAX_IO + 256u];
     ssh_channel_message_t message;
     size_t channel_data_len;
+    int trace_enabled;
     size_t response_len;
     int status;
 
@@ -983,6 +1124,7 @@ int ssh_server_process_sftp_channel_data(
     }
 
     effective_session_options(options, &effective);
+    trace_enabled = effective.sftp_trace_enabled;
     status = ssh_transport_receive_channel_message(
         transport,
         conn,
@@ -992,7 +1134,29 @@ int ssh_server_process_sftp_channel_data(
         &channel_data_len,
         effective.timeout_ms);
     if (status != SSH_OK) {
+        if (status != SSH_ERR_NOT_FOUND) {
+            char line[128];
+            size_t used = 0u;
+
+            append_lit_local(line, sizeof(line), &used, "sftp-trace: channel receive status=");
+            append_i32_local(line, sizeof(line), &used, status);
+            line[used] = '\0';
+            sftp_trace_log_line(transport, trace_enabled, line);
+        }
         return status;
+    }
+    {
+        char line[192];
+        size_t used = 0u;
+
+        append_lit_local(line, sizeof(line), &used, "sftp-trace: channel msg=");
+        append_u32_local(line, sizeof(line), &used, (uint32_t)message.message_id);
+        append_lit_local(line, sizeof(line), &used, " data_len=");
+        append_size_local(line, sizeof(line), &used, channel_data_len);
+        append_lit_local(line, sizeof(line), &used, " rx_buf=");
+        append_size_local(line, sizeof(line), &used, channel->sftp_rx_len);
+        line[used] = '\0';
+        sftp_trace_log_line(transport, trace_enabled, line);
     }
     if (message.recipient_channel != channel->server_channel) {
         return SSH_ERR_SECURITY;
@@ -1067,14 +1231,55 @@ int ssh_server_process_sftp_channel_data(
         uint32_t sftp_packet_length = read_u32_be_local(channel->sftp_rx);
         size_t sftp_wire_len;
         size_t remaining_len;
+        uint8_t request_type;
+        uint32_t request_id;
+        int has_request_id;
 
         if (sftp_packet_length == 0u || sftp_packet_length > EMSSH_MAX_PACKET_SIZE - 4u) {
+            char line[192];
+            size_t used = 0u;
+
+            append_lit_local(line, sizeof(line), &used, "sftp-trace: malformed sftp length=");
+            append_u32_local(line, sizeof(line), &used, sftp_packet_length);
+            append_lit_local(line, sizeof(line), &used, " rx_buf=");
+            append_size_local(line, sizeof(line), &used, channel->sftp_rx_len);
+            line[used] = '\0';
+            sftp_trace_log_line(transport, trace_enabled, line);
             return SSH_ERR_MALFORMED_PACKET;
         }
 
         sftp_wire_len = (size_t)sftp_packet_length + 4u;
         if (channel->sftp_rx_len < sftp_wire_len) {
             break;
+        }
+
+        request_type = sftp_packet_length >= 1u ? channel->sftp_rx[4] : 0u;
+        request_id = 0u;
+        has_request_id = 0;
+        if (sftp_packet_length >= 5u &&
+            request_type != SSH_FXP_INIT &&
+            request_type != SSH_FXP_VERSION) {
+            request_id = read_u32_be_local(channel->sftp_rx + 5u);
+            has_request_id = 1;
+        }
+        {
+            char line[224];
+            size_t used = 0u;
+
+            append_lit_local(line, sizeof(line), &used, "sftp-trace: in type=");
+            append_lit_local(line, sizeof(line), &used, sftp_type_name_local(request_type));
+            append_lit_local(line, sizeof(line), &used, "(");
+            append_u32_local(line, sizeof(line), &used, (uint32_t)request_type);
+            append_lit_local(line, sizeof(line), &used, ") len=");
+            append_u32_local(line, sizeof(line), &used, sftp_packet_length);
+            append_lit_local(line, sizeof(line), &used, " wire=");
+            append_size_local(line, sizeof(line), &used, sftp_wire_len);
+            if (has_request_id) {
+                append_lit_local(line, sizeof(line), &used, " id=");
+                append_u32_local(line, sizeof(line), &used, request_id);
+            }
+            line[used] = '\0';
+            sftp_trace_log_line(transport, trace_enabled, line);
         }
 
         status = sftp_server_handle_packet(
@@ -1085,7 +1290,46 @@ int ssh_server_process_sftp_channel_data(
             sizeof(response),
             &response_len);
         if (status != SSH_OK) {
+            char line[192];
+            size_t used = 0u;
+
+            append_lit_local(line, sizeof(line), &used, "sftp-trace: handle error status=");
+            append_i32_local(line, sizeof(line), &used, status);
+            append_lit_local(line, sizeof(line), &used, " type=");
+            append_lit_local(line, sizeof(line), &used, sftp_type_name_local(request_type));
+            if (has_request_id) {
+                append_lit_local(line, sizeof(line), &used, " id=");
+                append_u32_local(line, sizeof(line), &used, request_id);
+            }
+            line[used] = '\0';
+            sftp_trace_log_line(transport, trace_enabled, line);
             return status;
+        }
+        {
+            uint8_t response_type = response_len >= 5u ? response[4] : 0u;
+            uint32_t response_id = 0u;
+            int has_response_id = 0;
+            char line[224];
+            size_t used = 0u;
+
+            if (response_len >= 9u &&
+                response_type != SSH_FXP_VERSION &&
+                response_type != SSH_FXP_INIT) {
+                response_id = read_u32_be_local(response + 5u);
+                has_response_id = 1;
+            }
+            append_lit_local(line, sizeof(line), &used, "sftp-trace: out type=");
+            append_lit_local(line, sizeof(line), &used, sftp_type_name_local(response_type));
+            append_lit_local(line, sizeof(line), &used, "(");
+            append_u32_local(line, sizeof(line), &used, (uint32_t)response_type);
+            append_lit_local(line, sizeof(line), &used, ") wire=");
+            append_size_local(line, sizeof(line), &used, response_len);
+            if (has_response_id) {
+                append_lit_local(line, sizeof(line), &used, " id=");
+                append_u32_local(line, sizeof(line), &used, response_id);
+            }
+            line[used] = '\0';
+            sftp_trace_log_line(transport, trace_enabled, line);
         }
 
         if (channel->peer_max_packet_size != 0u && response_len > channel->peer_max_packet_size) {

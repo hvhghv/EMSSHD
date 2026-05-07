@@ -20,7 +20,11 @@
 #endif
 
 #ifndef EMSSH_MAX_PACKET_SIZE
-#define EMSSH_MAX_PACKET_SIZE 32768u
+/*
+ * RFC 4253 recommends supporting packet lengths at least up to 35000 bytes.
+ * Keep payload size configurable separately via EMSSH_MAX_PAYLOAD_SIZE.
+ */
+#define EMSSH_MAX_PACKET_SIZE 35000u
 #endif
 
 #ifndef EMSSH_MAX_PAYLOAD_SIZE
@@ -43,4 +47,3 @@
 #define EMSSH_IDENTIFICATION_LINE EMSSH_IDENTIFICATION_PREFIX EMSSH_SOFTWARE_NAME
 
 #endif
-
