@@ -9,6 +9,7 @@
 #include "emssh/platform_posix_net.h"
 #include "emssh/platform_posix_passwd_auth.h"
 #include "emssh/platform_posix_runtime.h"
+#include "emssh/platform_posix_term.h"
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/sshd_config_file.h"
 #include "emssh/ssh_error.h"
@@ -210,6 +211,11 @@ typedef enum crypto_backend {
     CRYPTO_BACKEND_WOLFSSL
 } crypto_backend_t;
 
+typedef enum session_mode {
+    SESSION_MODE_SFTP = 0,
+    SESSION_MODE_TERMINAL = 1
+} session_mode_t;
+
 typedef struct worker_pool {
     pthread_mutex_t lock;
     pthread_cond_t cv;
@@ -227,6 +233,7 @@ typedef struct program_options {
     uint32_t timeout_ms;
     unsigned max_workers;
     unsigned worker_stack_kb;
+    session_mode_t session_mode;
     crypto_backend_t backend;
     int port_overridden;
     int listen_overridden;
@@ -238,12 +245,16 @@ typedef struct app_shared {
     ssh_posix_runtime_t runtime;
     ssh_stdio_fs_t sftp_fs;
     ssh_stdio_fs_t host_fs;
+#if defined(EMSSH_BUILD_POSIX_TERM)
+    ssh_posix_term_platform_t term;
+#endif
     ssh_posix_passwd_auth_t passwd_auth;
     ssh_sshd_config_file_t sshd_config;
     ssh_server_config_t base_server_config;
     ssh_server_session_options_t base_session_options;
     ssh_kexinit_algorithm_set_t base_algorithms;
     uint16_t port;
+    session_mode_t session_mode;
     crypto_backend_t backend;
     uint8_t mbedtls_hostkey_private[LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE];
     size_t mbedtls_hostkey_private_len;
@@ -284,6 +295,7 @@ static void usage(const char *program)
         "  --timeout-ms <ms>        Session timeout (default: 30000)\n"
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
         "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
+        "  --session-mode <mode>    sftp|terminal (default: sftp)\n"
         "  --backend <name>         mbedtls|openssl|wolfssl (compiled backends only)\n",
         program);
 }
@@ -369,6 +381,27 @@ static const char *backend_name(crypto_backend_t backend)
     }
 }
 
+static const char *session_mode_name(session_mode_t mode)
+{
+    return mode == SESSION_MODE_TERMINAL ? "terminal" : "sftp";
+}
+
+static int parse_session_mode(const char *text, session_mode_t *mode)
+{
+    if (text == NULL || mode == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (strcmp(text, "sftp") == 0) {
+        *mode = SESSION_MODE_SFTP;
+        return SSH_OK;
+    }
+    if (strcmp(text, "terminal") == 0) {
+        *mode = SESSION_MODE_TERMINAL;
+        return SSH_OK;
+    }
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
 static int parse_backend(const char *text, crypto_backend_t *backend)
 {
     if (text == NULL || backend == NULL) {
@@ -441,6 +474,7 @@ static void options_defaults(program_options_t *opts)
     opts->timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
     opts->max_workers = LINUX_SERVER_DEFAULT_MAX_WORKERS;
     opts->worker_stack_kb = LINUX_SERVER_DEFAULT_WORKER_STACK_KB;
+    opts->session_mode = SESSION_MODE_SFTP;
     opts->backend = default_backend();
 }
 
@@ -540,6 +574,16 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
                 return SSH_ERR_INVALID_ARGUMENT;
             }
             status = parse_backend(argv[++i], &opts->backend);
+            if (status != SSH_OK) {
+                return status;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--session-mode") == 0) {
+            if (i + 1 >= argc) {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+            status = parse_session_mode(argv[++i], &opts->session_mode);
             if (status != SSH_OK) {
                 return status;
             }
@@ -650,7 +694,11 @@ static int backend_instance_init(backend_instance_t *backend, const app_shared_t
     backend->platform.mem = ssh_posix_mem_api((ssh_posix_runtime_t *)&shared->runtime);
     backend->platform.time = ssh_posix_time_api((ssh_posix_runtime_t *)&shared->runtime);
     backend->platform.log = ssh_posix_log_api((ssh_posix_runtime_t *)&shared->runtime);
+#if defined(EMSSH_BUILD_POSIX_TERM)
+    backend->platform.term = shared->session_mode == SESSION_MODE_TERMINAL ? ssh_posix_term_api((ssh_posix_term_platform_t *)&shared->term) : NULL;
+#else
     backend->platform.term = NULL;
+#endif
 
     switch (backend->type) {
 #if EMSSH_LINUX_SERVER_ENABLE_MBEDTLS
@@ -977,8 +1025,10 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 
     config = shared->base_server_config;
     options = shared->base_session_options;
-    options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
-    options.non_sftp_channel_request_policy_ctx = conn;
+    if (shared->session_mode == SESSION_MODE_SFTP) {
+        options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
+        options.non_sftp_channel_request_policy_ctx = conn;
+    }
     status = ssh_server_init(&server, &backend.platform, &config);
     if (status != SSH_OK) {
         backend_instance_deinit(&backend);
@@ -988,12 +1038,18 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     initialized_server = 1;
 
     set_linux_server_stage(LINUX_STAGE_WORKER_RUN_SFTP);
-    status = ssh_server_run_sftp_session(&server, conn, &options);
+    if (shared->session_mode == SESSION_MODE_TERMINAL) {
+        status = ssh_server_run_terminal_session(&server, conn, &options);
+    } else {
+        status = ssh_server_run_sftp_session(&server, conn, &options);
+    }
     if (status != SSH_OK) {
         const char *peer = ssh_posix_conn_peer_address(conn);
         fprintf(stderr, "session %s ended: %s\n", peer != NULL ? peer : "unknown", ssh_status_string(status));
-        if (status == SSH_ERR_UNSUPPORTED) {
+        if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_SFTP) {
             fprintf(stderr, "hint: this example serves SFTP subsystem only; use an SFTP client/session.\n");
+        } else if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_TERMINAL) {
+            fprintf(stderr, "hint: terminal mode expects shell/exec channel requests.\n");
         }
     }
 
@@ -1034,6 +1090,7 @@ int main(int argc, char **argv)
     int initialized_net;
     int initialized_sftp_fs;
     int initialized_host_fs;
+    int initialized_term;
     int initialized_passwd_auth;
     int initialized_pool;
     size_t worker_stack_size_bytes;
@@ -1066,9 +1123,11 @@ int main(int argc, char **argv)
     initialized_net = 0;
     initialized_sftp_fs = 0;
     initialized_host_fs = 0;
+    initialized_term = 0;
     initialized_passwd_auth = 0;
     initialized_pool = 0;
     shared.backend = opts.backend;
+    shared.session_mode = opts.session_mode;
     if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
         fprintf(stderr, "invalid --worker-stack-kb value: overflow\n");
         return 2;
@@ -1132,6 +1191,21 @@ int main(int argc, char **argv)
     }
     initialized_host_fs = 1;
 
+    if (opts.session_mode == SESSION_MODE_TERMINAL) {
+#if defined(EMSSH_BUILD_POSIX_TERM)
+        status = ssh_posix_term_platform_init(&shared.term);
+        if (status != SSH_OK) {
+            fprintf(stderr, "posix term init failed: %s\n", ssh_status_string(status));
+            goto cleanup;
+        }
+        initialized_term = 1;
+#else
+        fprintf(stderr, "terminal mode not compiled: enable EMSSH_BUILD_POSIX_TERM=ON\n");
+        status = SSH_ERR_UNSUPPORTED;
+        goto cleanup;
+#endif
+    }
+
     status = ssh_posix_passwd_auth_init(
         &shared.passwd_auth,
         ssh_stdio_fs_api(&shared.host_fs),
@@ -1174,10 +1248,11 @@ int main(int argc, char **argv)
     }
 
     printf(
-        "linux posix+stdio sftp server listening on %s:%u, backend=%s, max-workers=%u, worker-stack=%luKB\n",
+        "linux posix+stdio server listening on %s:%u, backend=%s, mode=%s, max-workers=%u, worker-stack=%luKB\n",
         shared.base_server_config.listen_address != NULL ? shared.base_server_config.listen_address : "0.0.0.0",
         (unsigned)shared.port,
         backend_name(shared.backend),
+        session_mode_name(shared.session_mode),
         opts.max_workers,
         (unsigned long)(worker_stack_size_bytes / 1024u));
     printf("note: command line overrides sshd_config for overlapping parameters.\n");
@@ -1258,6 +1333,11 @@ cleanup:
     }
     if (initialized_host_fs) {
         ssh_stdio_fs_deinit(&shared.host_fs);
+    }
+    if (initialized_term) {
+#if defined(EMSSH_BUILD_POSIX_TERM)
+        ssh_posix_term_platform_deinit(&shared.term);
+#endif
     }
     if (initialized_sftp_fs) {
         ssh_stdio_fs_deinit(&shared.sftp_fs);
