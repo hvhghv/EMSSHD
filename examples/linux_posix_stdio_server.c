@@ -1059,6 +1059,13 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     if (status != SSH_OK) {
         const char *peer = ssh_posix_conn_peer_address(conn);
         fprintf(stderr, "session %s ended: %s\n", peer != NULL ? peer : "unknown", ssh_status_string(status));
+        if (server.diag_last_received_message_id_valid) {
+            fprintf(
+                stderr,
+                "diag: last received ssh msg id=%u (0x%02x)\n",
+                (unsigned)server.diag_last_received_message_id,
+                (unsigned)server.diag_last_received_message_id);
+        }
         if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_SFTP) {
             fprintf(stderr, "hint: this example serves SFTP subsystem only; use an SFTP client/session.\n");
         } else if (status == SSH_ERR_UNSUPPORTED && shared->session_mode == SESSION_MODE_TERMINAL) {

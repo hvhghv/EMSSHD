@@ -185,6 +185,24 @@ static void effective_session_options(
     }
 }
 
+static void update_server_diag_from_transport(
+    ssh_server_t *server,
+    const ssh_transport_session_t *transport)
+{
+    if (server == NULL) {
+        return;
+    }
+    server->diag_last_received_message_id = 0u;
+    server->diag_last_received_message_id_valid = 0;
+    if (transport == NULL) {
+        return;
+    }
+    if (transport->last_received_message_id_valid) {
+        server->diag_last_received_message_id = transport->last_received_message_id;
+        server->diag_last_received_message_id_valid = 1;
+    }
+}
+
 const char *ssh_status_string(int status)
 {
     switch (status) {
@@ -255,6 +273,8 @@ int ssh_server_init(ssh_server_t *server, const ssh_platform_t *platform, const 
     ssh_server_config_defaults(&defaults);
     server->config = config != NULL ? *config : defaults;
     server->platform = *platform;
+    server->diag_last_received_message_id = 0u;
+    server->diag_last_received_message_id_valid = 0;
 
     if (server->config.software_name == NULL ||
         server->config.max_packet_size == 0u ||
@@ -1113,6 +1133,7 @@ int ssh_server_run_sftp_session(
         status = ssh_server_accept_sftp_channel(&transport, conn, &channel, &effective);
     }
     if (status != SSH_OK) {
+        update_server_diag_from_transport(server, &transport);
         ssh_server_sftp_channel_deinit(&channel);
         return status;
     }
@@ -1135,9 +1156,11 @@ int ssh_server_run_sftp_session(
 
     ssh_server_sftp_channel_deinit(&channel);
     if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+        update_server_diag_from_transport(server, &transport);
         return SSH_OK;
     }
 
+    update_server_diag_from_transport(server, &transport);
     return status;
 }
 
@@ -1167,6 +1190,7 @@ int ssh_server_run_terminal_session(
         status = ssh_server_accept_terminal_channel(&transport, conn, &channel, &effective);
     }
     if (status != SSH_OK) {
+        update_server_diag_from_transport(server, &transport);
         ssh_server_terminal_channel_deinit(&transport, &channel);
         return status;
     }
@@ -1189,8 +1213,10 @@ int ssh_server_run_terminal_session(
 
     ssh_server_terminal_channel_deinit(&transport, &channel);
     if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+        update_server_diag_from_transport(server, &transport);
         return SSH_OK;
     }
+    update_server_diag_from_transport(server, &transport);
     return status;
 }
 
@@ -1224,11 +1250,13 @@ int ssh_server_run_auto_session(
         status = ssh_server_run_userauth(&transport, conn, &effective);
     }
     if (status != SSH_OK) {
+        update_server_diag_from_transport(server, &transport);
         return status;
     }
 
     status = ssh_transport_receive_channel_open_skip_global_requests(&transport, conn, &open, effective.timeout_ms);
     if (status != SSH_OK) {
+        update_server_diag_from_transport(server, &transport);
         return status;
     }
     if (!ssh_channel_type_is_session(open.channel_type)) {
@@ -1239,6 +1267,7 @@ int ssh_server_run_auto_session(
             SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
             "unsupported channel type",
             effective.timeout_ms);
+        update_server_diag_from_transport(server, &transport);
         return SSH_ERR_UNSUPPORTED;
     }
 
@@ -1251,15 +1280,18 @@ int ssh_server_run_auto_session(
         effective.channel_max_packet_size,
         effective.timeout_ms);
     if (status != SSH_OK) {
+        update_server_diag_from_transport(server, &transport);
         return status;
     }
 
     for (attempts = 0u; attempts < 16u; ++attempts) {
         status = ssh_transport_receive_channel_request(&transport, conn, &request, effective.timeout_ms);
         if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            update_server_diag_from_transport(server, &transport);
             return status;
         }
         if (status == SSH_OK && request.recipient_channel != effective.server_channel) {
+            update_server_diag_from_transport(server, &transport);
             return SSH_ERR_SECURITY;
         }
 
@@ -1270,6 +1302,7 @@ int ssh_server_run_auto_session(
             status = sftp_accept_after_open(&transport, conn, &sftp_channel, &effective, &open, &request, 1);
             if (status != SSH_OK) {
                 ssh_server_sftp_channel_deinit(&sftp_channel);
+                update_server_diag_from_transport(server, &transport);
                 return status;
             }
             processed = 0u;
@@ -1289,8 +1322,10 @@ int ssh_server_run_auto_session(
             }
             ssh_server_sftp_channel_deinit(&sftp_channel);
             if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+                update_server_diag_from_transport(server, &transport);
                 return SSH_OK;
             }
+            update_server_diag_from_transport(server, &transport);
             return status;
         }
 
@@ -1298,6 +1333,7 @@ int ssh_server_run_auto_session(
             status = terminal_accept_after_open(&transport, conn, &term_channel, &effective, &open, &request, 1);
             if (status != SSH_OK) {
                 ssh_server_terminal_channel_deinit(&transport, &term_channel);
+                update_server_diag_from_transport(server, &transport);
                 return status;
             }
             processed = 0u;
@@ -1317,8 +1353,10 @@ int ssh_server_run_auto_session(
             }
             ssh_server_terminal_channel_deinit(&transport, &term_channel);
             if (effective.max_sftp_packets != 0u && processed == effective.max_sftp_packets) {
+                update_server_diag_from_transport(server, &transport);
                 return SSH_OK;
             }
+            update_server_diag_from_transport(server, &transport);
             return status;
         }
 
@@ -1333,10 +1371,12 @@ int ssh_server_run_auto_session(
             effective.non_sftp_channel_request_policy(
                 effective.non_sftp_channel_request_policy_ctx,
                 &request) != SSH_OK) {
+            update_server_diag_from_transport(server, &transport);
             return SSH_ERR_UNSUPPORTED;
         }
     }
 
+    update_server_diag_from_transport(server, &transport);
     return SSH_ERR_UNSUPPORTED;
 }
 

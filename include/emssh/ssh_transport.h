@@ -146,6 +146,8 @@ typedef struct ssh_transport_session {
     size_t userauth_payload_len;
     char authenticated_username[EMSSH_MAX_USERAUTH_PAYLOAD];
     size_t authenticated_username_len;
+    uint8_t last_received_message_id;
+    int last_received_message_id_valid;
 } ssh_transport_session_t;
 
 int ssh_identification_parse_line(const uint8_t *line, size_t len, ssh_identification_t *ident);

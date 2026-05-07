@@ -62,6 +62,8 @@ typedef struct ssh_server {
     ssh_platform_t platform;
     ssh_server_config_t config;
     int initialized;
+    uint8_t diag_last_received_message_id;
+    int diag_last_received_message_id_valid;
 } ssh_server_t;
 
 typedef struct ssh_server_session_options {

@@ -620,6 +620,8 @@ int ssh_transport_session_init(
     memset(session, 0, sizeof(*session));
     session->server = server;
     session->state = SSH_TRANSPORT_STATE_INIT;
+    session->last_received_message_id = 0u;
+    session->last_received_message_id_valid = 0;
     transport_copy_algorithms(&session->server_algorithms, server_algorithms);
     ssh_packet_protection_init(&session->inbound);
     ssh_packet_protection_init(&session->outbound);
@@ -1369,6 +1371,10 @@ static int receive_protected_payload_skip_ignorable(
         if (status != SSH_OK) {
             return status;
         }
+        if (*payload_len != 0u) {
+            session->last_received_message_id = payload_out[0];
+            session->last_received_message_id_valid = 1;
+        }
         if (transport_payload_is_disconnect(payload_out, *payload_len)) {
             return SSH_ERR_CLOSED;
         }
@@ -1873,6 +1879,45 @@ int ssh_transport_receive_channel_request(
             return SSH_ERR_CLOSED;
         }
 
+        if (message_id == SSH_MSG_GLOBAL_REQUEST) {
+            ssh_global_request_t global_request;
+
+            ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
+            status = ssh_global_request_decode(&buf, &global_request);
+            if (status != SSH_OK) {
+                return status;
+            }
+            session->state = SSH_TRANSPORT_STATE_GLOBAL_REQUEST_RECEIVED;
+            if (global_request.want_reply) {
+                status = ssh_transport_send_global_request_failure(session, conn, timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (message_id == SSH_MSG_CHANNEL_OPEN) {
+            ssh_channel_open_t open;
+
+            ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
+            status = ssh_channel_open_decode(&buf, &open);
+            if (status != SSH_OK) {
+                return status;
+            }
+            status = ssh_transport_send_channel_open_failure(
+                session,
+                conn,
+                open.sender_channel,
+                SSH_OPEN_RESOURCE_SHORTAGE,
+                "additional channels are not supported in this session",
+                timeout_ms);
+            if (status != SSH_OK) {
+                return status;
+            }
+            continue;
+        }
+
         if (message_id == SSH_MSG_CHANNEL_SUCCESS || message_id == SSH_MSG_CHANNEL_FAILURE) {
             ssh_buffer_wrap(&buf, session->channel_request_payload, payload_len);
             status = ssh_buffer_get_u8(&buf, &message_id);
@@ -1885,11 +1930,17 @@ int ssh_transport_receive_channel_request(
             continue;
         }
 
-        if (message_id == SSH_MSG_CHANNEL_WINDOW_ADJUST || message_id == SSH_MSG_CHANNEL_DATA) {
+        if (message_id == SSH_MSG_CHANNEL_WINDOW_ADJUST ||
+            message_id == SSH_MSG_CHANNEL_DATA ||
+            message_id == SSH_MSG_CHANNEL_EXTENDED_DATA ||
+            message_id == SSH_MSG_REQUEST_SUCCESS ||
+            message_id == SSH_MSG_REQUEST_FAILURE ||
+            message_id == SSH_MSG_CHANNEL_OPEN_CONFIRMATION ||
+            message_id == SSH_MSG_CHANNEL_OPEN_FAILURE) {
             continue;
         }
 
-        return SSH_ERR_MALFORMED_PACKET;
+        return SSH_ERR_UNSUPPORTED;
     }
 
     return SSH_ERR_UNSUPPORTED;
@@ -2030,7 +2081,51 @@ int ssh_transport_receive_channel_message(
         }
 
         if (session->channel_message_payload[0] == SSH_MSG_CHANNEL_SUCCESS ||
-            session->channel_message_payload[0] == SSH_MSG_CHANNEL_FAILURE) {
+            session->channel_message_payload[0] == SSH_MSG_CHANNEL_FAILURE ||
+            session->channel_message_payload[0] == SSH_MSG_REQUEST_SUCCESS ||
+            session->channel_message_payload[0] == SSH_MSG_REQUEST_FAILURE ||
+            session->channel_message_payload[0] == SSH_MSG_CHANNEL_OPEN_CONFIRMATION ||
+            session->channel_message_payload[0] == SSH_MSG_CHANNEL_OPEN_FAILURE ||
+            session->channel_message_payload[0] == SSH_MSG_CHANNEL_EXTENDED_DATA) {
+            continue;
+        }
+
+        if (session->channel_message_payload[0] == SSH_MSG_GLOBAL_REQUEST) {
+            ssh_global_request_t global_request;
+
+            ssh_buffer_wrap(&buf, session->channel_message_payload, payload_len);
+            status = ssh_global_request_decode(&buf, &global_request);
+            if (status != SSH_OK) {
+                return status;
+            }
+            session->state = SSH_TRANSPORT_STATE_GLOBAL_REQUEST_RECEIVED;
+            if (global_request.want_reply) {
+                status = ssh_transport_send_global_request_failure(session, conn, timeout_ms);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            continue;
+        }
+
+        if (session->channel_message_payload[0] == SSH_MSG_CHANNEL_OPEN) {
+            ssh_channel_open_t open;
+
+            ssh_buffer_wrap(&buf, session->channel_message_payload, payload_len);
+            status = ssh_channel_open_decode(&buf, &open);
+            if (status != SSH_OK) {
+                return status;
+            }
+            status = ssh_transport_send_channel_open_failure(
+                session,
+                conn,
+                open.sender_channel,
+                SSH_OPEN_RESOURCE_SHORTAGE,
+                "additional channels are not supported in this session",
+                timeout_ms);
+            if (status != SSH_OK) {
+                return status;
+            }
             continue;
         }
 
