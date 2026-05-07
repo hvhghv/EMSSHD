@@ -68,48 +68,100 @@ static const char *status_message_from_error(int status, const char *fallback)
     }
 }
 
-static int path_is_safe(ssh_string_view_t path)
+static int normalize_path_view(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_PATH])
 {
     size_t i;
-    int segment_start;
+    size_t out_pos;
+    int absolute;
+    int has_segment;
 
-    if (path.data == NULL || path.len == 0u) {
-        return 0;
+    if (path.data == NULL || path.len == 0u || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    segment_start = 1;
-    for (i = 0u; i < path.len; ++i) {
-        uint8_t c = path.data[i];
-        if (c == '\\' || c == ':') {
-            return 0;
+    absolute = path.data[0] == '/';
+    out_pos = 0u;
+    has_segment = 0;
+    if (absolute) {
+        if (out_pos + 1u >= EMSSH_SFTP_MAX_PATH) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
         }
-
-        if (segment_start &&
-            c == '.' &&
-            i + 1u < path.len &&
-            path.data[i + 1u] == '.' &&
-            (i + 2u == path.len || path.data[i + 2u] == '/')) {
-            return 0;
-        }
-
-        segment_start = c == '/';
+        out[out_pos++] = '/';
     }
 
-    return 1;
+    i = 0u;
+    while (i < path.len) {
+        size_t seg_start;
+        size_t seg_len;
+        const uint8_t *seg;
+        size_t j;
+
+        while (i < path.len && path.data[i] == '/') {
+            ++i;
+        }
+        if (i >= path.len) {
+            break;
+        }
+
+        seg_start = i;
+        while (i < path.len && path.data[i] != '/') {
+            ++i;
+        }
+        seg_len = i - seg_start;
+        seg = path.data + seg_start;
+        if (seg_len == 0u) {
+            continue;
+        }
+
+        if (seg_len == 1u && seg[0] == '.') {
+            continue;
+        }
+        if (seg_len == 2u && seg[0] == '.' && seg[1] == '.') {
+            return SSH_ERR_SECURITY;
+        }
+
+        for (j = 0u; j < seg_len; ++j) {
+            uint8_t c = seg[j];
+            if (c == '\0' || c == '\\' || c == ':') {
+                return SSH_ERR_SECURITY;
+            }
+        }
+
+        if (has_segment || absolute) {
+            if (out_pos > 0u && out[out_pos - 1u] != '/') {
+                if (out_pos + 1u >= EMSSH_SFTP_MAX_PATH) {
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                out[out_pos++] = '/';
+            }
+        }
+
+        if (out_pos + seg_len >= EMSSH_SFTP_MAX_PATH) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        memcpy(out + out_pos, seg, seg_len);
+        out_pos += seg_len;
+        has_segment = 1;
+    }
+
+    if (!has_segment) {
+        if (absolute) {
+            out[0] = '/';
+            out[1] = '\0';
+        } else {
+            out[0] = '.';
+            out[1] = '\0';
+        }
+        return SSH_OK;
+    }
+
+    out[out_pos] = '\0';
+    return SSH_OK;
 }
 
 static int copy_path(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_PATH])
 {
-    if (path.data == NULL || path.len == 0u || path.len >= EMSSH_SFTP_MAX_PATH) {
-        return SSH_ERR_INVALID_ARGUMENT;
-    }
-    if (!path_is_safe(path)) {
-        return SSH_ERR_SECURITY;
-    }
-
-    memcpy(out, path.data, path.len);
-    out[path.len] = '\0';
-    return SSH_OK;
+    return normalize_path_view(path, out);
 }
 
 static int open_pflags_are_valid(uint32_t pflags)
