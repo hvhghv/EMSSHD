@@ -14,6 +14,7 @@
 #include "emssh/platform_posix_runtime.h"
 #include "emssh/platform_posix_term.h"
 #include "emssh/platform_stdio_fs.h"
+#include "emssh/sftp.h"
 #include "emssh/sshd_config_file.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
