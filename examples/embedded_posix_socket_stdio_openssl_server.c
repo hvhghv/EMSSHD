@@ -117,7 +117,6 @@ int main(int argc, char **argv)
     memset(&server, 0, sizeof(server));
     memset(&config, 0, sizeof(config));
     memset(&options, 0, sizeof(options));
-    memset(&algorithms, 0, sizeof(algorithms));
     memset(&sshd_config, 0, sizeof(sshd_config));
     memset(&passwd_auth, 0, sizeof(passwd_auth));
     passwd_path = NULL;
@@ -244,7 +243,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "sshd_config load failed: %s\n", ssh_status_string(status));
             goto cleanup;
         }
-        status = ssh_sshd_config_file_apply(&sshd_config, &config, &options, &algorithms, &port, NULL, NULL);
+        status = ssh_sshd_config_file_apply(&sshd_config, &config, &options, &port, NULL, NULL);
         if (status != SSH_OK) {
             fprintf(stderr, "sshd_config apply failed: %s\n", ssh_status_string(status));
             goto cleanup;

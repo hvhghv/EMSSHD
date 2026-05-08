@@ -923,7 +923,6 @@ int ssh_sshd_config_file_apply(
     const ssh_sshd_config_file_t *config,
     ssh_server_config_t *server_config,
     ssh_server_session_options_t *session_options,
-    ssh_kexinit_algorithm_set_t *algorithms,
     uint16_t *port,
     const char **chroot_directory,
     const char **host_key_file)
@@ -971,8 +970,6 @@ int ssh_sshd_config_file_apply(
             session_options->sftp_subsystem_name = config->subsystem_name;
         }
     }
-
-    (void)algorithms;
 
     return SSH_OK;
 }

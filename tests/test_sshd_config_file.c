@@ -164,7 +164,6 @@ int main(void)
         &parsed,
         &server_config,
         &session_options,
-        &algorithms,
         &port,
         &chroot_directory,
         &hostkey_file) == SSH_OK);

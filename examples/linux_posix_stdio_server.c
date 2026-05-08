@@ -999,7 +999,6 @@ static int load_runtime_policy_for_user(
         NULL,
         NULL,
         NULL,
-        NULL,
         NULL);
 }
 
@@ -1637,7 +1636,6 @@ static int initialize_server_templates(
             &shared->sshd_config,
             &shared->base_server_config,
             &shared->base_session_options,
-            NULL,
             &shared->port,
             &shared->chroot_dir_from_config,
             &shared->hostkey_path_from_config);
@@ -1861,7 +1859,6 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
             &matched_config,
             &config,
             &options,
-            NULL,
             NULL,
             NULL,
             NULL);
