@@ -19,6 +19,7 @@
 
 typedef struct ssh_rng_api ssh_rng_api_t;
 typedef struct ssh_kexinit_algorithm_set ssh_kexinit_algorithm_set_t;
+typedef struct ssh_crypto_context ssh_crypto_context_t;
 
 typedef enum ssh_cipher_direction {
     SSH_CIPHER_ENCRYPT = 0,
@@ -147,12 +148,6 @@ typedef struct ssh_crypto_api {
 
     void *ctx;
 } ssh_crypto_api_t;
-
-#define EMSSH_CRYPTO_OPAQUE_WORDS 640u
-
-typedef struct ssh_crypto_context {
-    uintptr_t opaque_words[EMSSH_CRYPTO_OPAQUE_WORDS];
-} ssh_crypto_context_t;
 
 const char *ssh_crypto_name(void);
 const char *ssh_crypto_publickey_signature_algorithms(void);

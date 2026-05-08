@@ -9,6 +9,26 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
+#if defined(EMSSH_USE_MBEDTLS)
+#include "emssh/crypto_mbedtls.h"
+#if defined(EMSSH_MBEDTLS_USE_PSA)
+typedef ssh_crypto_context_mbedtls_t freertos_fatfs_crypto_context_t;
+#else
+typedef ssh_crypto_context_mbedtls_legacy_t freertos_fatfs_crypto_context_t;
+#endif
+#elif defined(EMSSH_USE_OPENSSL)
+#include "emssh/crypto_openssl.h"
+typedef ssh_crypto_context_openssl_t freertos_fatfs_crypto_context_t;
+#elif defined(EMSSH_USE_WOLFSSL)
+#include "emssh/crypto_wolfssl.h"
+typedef ssh_crypto_context_wolfssl_t freertos_fatfs_crypto_context_t;
+#else
+#error "embedded_freertos_lwip_fatfs_mbedtls_server requires one crypto backend"
+#endif
+
+#define FREERTOS_FATFS_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
+#define FREERTOS_FATFS_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
+
 #ifndef EMSSH_FREERTOS_LWIP_FATFS_PORT
 #define EMSSH_FREERTOS_LWIP_FATFS_PORT 2222u
 #endif
@@ -177,7 +197,7 @@ int main(void)
     ssh_lwip_listener_t listener;
     ssh_lwip_conn_t conn;
     ssh_fatfs_adapter_t fatfs;
-    ssh_crypto_context_t crypto_ctx;
+    freertos_fatfs_crypto_context_t crypto_ctx;
     ssh_platform_t platform;
     ssh_server_t server;
     ssh_server_config_t config;
@@ -237,14 +257,14 @@ int main(void)
     }
     initialized_fs = 1;
 
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(FREERTOS_FATFS_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         printf("crypto context init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
 
-    status = configure_hostkey(&crypto_ctx);
+    status = configure_hostkey(FREERTOS_FATFS_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         printf("hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -255,8 +275,8 @@ int main(void)
     platform.log = ssh_freertos_log_api(&runtime);
     platform.net = ssh_lwip_net_api(&net);
     platform.fs = ssh_fatfs_adapter_api(&fatfs);
-    platform.crypto = ssh_crypto_api(&crypto_ctx);
-    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
+    platform.crypto = ssh_crypto_api(FREERTOS_FATFS_CTX_CONST_PTR(&crypto_ctx));
+    platform.rng = ssh_crypto_rng_api(FREERTOS_FATFS_CTX_CONST_PTR(&crypto_ctx));
 
     auth.username = EMSSH_FREERTOS_LWIP_FATFS_USERNAME;
     auth.password = EMSSH_FREERTOS_LWIP_FATFS_PASSWORD;
@@ -312,7 +332,7 @@ cleanup:
         ssh_server_deinit(&server);
     }
     if (initialized_crypto) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(FREERTOS_FATFS_CTX_PTR(&crypto_ctx));
     }
     if (initialized_fs) {
         ssh_fatfs_adapter_deinit(&fatfs);

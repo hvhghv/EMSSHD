@@ -13,6 +13,12 @@ typedef struct ssh_wolfssl_crypto {
     int initialized;
 } ssh_wolfssl_crypto_t;
 
+typedef struct ssh_crypto_context_wolfssl {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_wolfssl_crypto_t wolfssl;
+} ssh_crypto_context_wolfssl_t;
+
 int ssh_wolfssl_crypto_init(ssh_wolfssl_crypto_t *ctx);
 void ssh_wolfssl_crypto_free(ssh_wolfssl_crypto_t *ctx);
 

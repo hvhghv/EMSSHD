@@ -12,6 +12,26 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
+#if defined(EMSSH_USE_MBEDTLS)
+#include "emssh/crypto_mbedtls.h"
+#if defined(EMSSH_MBEDTLS_USE_PSA)
+typedef ssh_crypto_context_mbedtls_t minimal_crypto_context_t;
+#else
+typedef ssh_crypto_context_mbedtls_legacy_t minimal_crypto_context_t;
+#endif
+#elif defined(EMSSH_USE_OPENSSL)
+#include "emssh/crypto_openssl.h"
+typedef ssh_crypto_context_openssl_t minimal_crypto_context_t;
+#elif defined(EMSSH_USE_WOLFSSL)
+#include "emssh/crypto_wolfssl.h"
+typedef ssh_crypto_context_wolfssl_t minimal_crypto_context_t;
+#else
+#error "minimal_server requires one crypto backend"
+#endif
+
+#define MINIMAL_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
+#define MINIMAL_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
+
 #define MINIMAL_SERVER_MAX_AUTHORIZED_KEYS 8u
 #define MINIMAL_SERVER_MAX_FROM_PATTERNS 128u
 #define MINIMAL_SERVER_MAX_PATH_PREFIX EMSSH_SFTP_MAX_PATH
@@ -1513,30 +1533,30 @@ static int has_authorized_ed25519_key(const password_auth_ctx_t *auth)
 
 static int detect_ed25519_hostkey_support(void)
 {
-    ssh_crypto_context_t crypto_ctx;
+    minimal_crypto_context_t crypto_ctx;
     const ssh_crypto_api_t *crypto;
     int status;
 
     memset(&crypto_ctx, 0, sizeof(crypto_ctx));
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(MINIMAL_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         return 0;
     }
-    crypto = ssh_crypto_api(&crypto_ctx);
+    crypto = ssh_crypto_api(MINIMAL_CTX_CONST_PTR(&crypto_ctx));
     if (crypto == NULL || crypto->hostkey_generate == NULL) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
         return 0;
     }
     status = crypto->hostkey_generate(
         crypto->ctx,
         hostkey_algorithm_view(HOSTKEY_ALGORITHM_ED25519));
-    ssh_crypto_close(&crypto_ctx);
+    ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
     return status == SSH_OK;
 }
 
 static int detect_ed25519_publickey_verify_support(void)
 {
-    ssh_crypto_context_t crypto_ctx;
+    minimal_crypto_context_t crypto_ctx;
     const ssh_crypto_api_t *crypto;
     ssh_string_view_t algorithm;
     uint8_t hostkey_blob[EMSSH_MAX_HOST_KEY_BLOB];
@@ -1547,20 +1567,20 @@ static int detect_ed25519_publickey_verify_support(void)
     int status;
 
     memset(&crypto_ctx, 0, sizeof(crypto_ctx));
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(MINIMAL_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         return 0;
     }
-    crypto = ssh_crypto_api(&crypto_ctx);
+    crypto = ssh_crypto_api(MINIMAL_CTX_CONST_PTR(&crypto_ctx));
     if (crypto == NULL || crypto->hostkey_generate == NULL || crypto->hostkey_public == NULL ||
         crypto->hostkey_sign == NULL || crypto->publickey_verify == NULL) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
         return 0;
     }
     algorithm = hostkey_algorithm_view(HOSTKEY_ALGORITHM_ED25519);
     status = crypto->hostkey_generate(crypto->ctx, algorithm);
     if (status != SSH_OK) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
         return 0;
     }
 
@@ -1594,7 +1614,7 @@ static int detect_ed25519_publickey_verify_support(void)
             signature,
             signature_len);
     }
-    ssh_crypto_close(&crypto_ctx);
+    ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
     return status == SSH_OK;
 }
 
@@ -1607,7 +1627,7 @@ int main(int argc, char **argv)
     unsigned connection_count;
     int positional_argc;
     hostkey_algorithm_t hostkey_algorithm;
-    ssh_crypto_context_t crypto_ctx;
+    minimal_crypto_context_t crypto_ctx;
     ssh_tcp_platform_t tcp;
     ssh_tcp_listener_t listener;
     ssh_tcp_conn_t conn;
@@ -1699,14 +1719,14 @@ int main(int argc, char **argv)
     initialized_fs = 0;
     initialized_server = 0;
 
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(MINIMAL_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         fprintf(stderr, "crypto init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
 
-    status = configure_hostkey(&crypto_ctx, hostkey_path, hostkey_algorithm);
+    status = configure_hostkey(MINIMAL_CTX_PTR(&crypto_ctx), hostkey_path, hostkey_algorithm);
     if (status != SSH_OK) {
         fprintf(stderr, "hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -1749,8 +1769,8 @@ int main(int argc, char **argv)
 
     platform.net = ssh_tcp_net_api(&tcp);
     platform.fs = ssh_stdio_fs_api(&fs);
-    platform.crypto = ssh_crypto_api(&crypto_ctx);
-    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
+    platform.crypto = ssh_crypto_api(MINIMAL_CTX_CONST_PTR(&crypto_ctx));
+    platform.rng = ssh_crypto_rng_api(MINIMAL_CTX_CONST_PTR(&crypto_ctx));
 
     ssh_server_config_defaults(&config);
     config.password_auth = password_auth;
@@ -1821,7 +1841,7 @@ cleanup:
         ssh_tcp_platform_deinit(&tcp);
     }
     if (initialized_crypto) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(MINIMAL_CTX_PTR(&crypto_ctx));
     }
 
     return status == SSH_OK ? 0 : 1;

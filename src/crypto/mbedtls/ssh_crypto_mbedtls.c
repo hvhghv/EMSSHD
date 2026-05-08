@@ -1692,26 +1692,20 @@ void ssh_mbedtls_kexinit_algorithm_set_defaults(ssh_kexinit_algorithm_set_t *alg
     algorithms->compression_algorithms_server_to_client = "none";
 }
 
-typedef struct ssh_crypto_impl {
-    const ssh_crypto_api_t *crypto;
-    const ssh_rng_api_t *rng;
-    ssh_mbedtls_crypto_t mbedtls;
-} ssh_crypto_impl_t;
-
-static ssh_crypto_impl_t *crypto_impl_mut(ssh_crypto_context_t *crypto_ctx)
+static ssh_crypto_context_mbedtls_t *crypto_context_mbedtls_mut(ssh_crypto_context_t *crypto_ctx)
 {
     if (crypto_ctx == NULL) {
         return NULL;
     }
-    return (ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+    return (ssh_crypto_context_mbedtls_t *)crypto_ctx;
 }
 
-static const ssh_crypto_impl_t *crypto_impl(const ssh_crypto_context_t *crypto_ctx)
+static const ssh_crypto_context_mbedtls_t *crypto_context_mbedtls(const ssh_crypto_context_t *crypto_ctx)
 {
     if (crypto_ctx == NULL) {
         return NULL;
     }
-    return (const ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+    return (const ssh_crypto_context_mbedtls_t *)crypto_ctx;
 }
 
 const char *ssh_crypto_name(void)
@@ -1729,29 +1723,26 @@ const char *ssh_crypto_publickey_signature_algorithms(void)
 
 int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx)
 {
-    ssh_crypto_impl_t *impl;
-    typedef char emssh_crypto_impl_fits[
-        (sizeof(ssh_crypto_impl_t) <= sizeof(((ssh_crypto_context_t *)0)->opaque_words)) ? 1 : -1];
+    ssh_crypto_context_mbedtls_t *impl;
     int status;
 
     if (crypto_ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    (void)sizeof(emssh_crypto_impl_fits);
-    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
-    impl = crypto_impl_mut(crypto_ctx);
+    impl = crypto_context_mbedtls_mut(crypto_ctx);
+    memset(impl, 0, sizeof(*impl));
 
     status = ssh_mbedtls_crypto_init(&impl->mbedtls);
     if (status != SSH_OK) {
-        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        memset(impl, 0, sizeof(*impl));
         return status;
     }
     impl->crypto = ssh_mbedtls_crypto_api(&impl->mbedtls);
     impl->rng = ssh_mbedtls_rng_api(&impl->mbedtls);
     if (impl->crypto == NULL || impl->rng == NULL) {
         ssh_mbedtls_crypto_free(&impl->mbedtls);
-        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        memset(impl, 0, sizeof(*impl));
         return SSH_ERR_PLATFORM;
     }
     return SSH_OK;
@@ -1759,23 +1750,23 @@ int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx)
 
 void ssh_crypto_close(ssh_crypto_context_t *crypto_ctx)
 {
-    ssh_crypto_impl_t *impl = crypto_impl_mut(crypto_ctx);
+    ssh_crypto_context_mbedtls_t *impl = crypto_context_mbedtls_mut(crypto_ctx);
 
     if (impl == NULL) {
         return;
     }
     ssh_mbedtls_crypto_free(&impl->mbedtls);
-    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+    memset(impl, 0, sizeof(*impl));
 }
 
 const ssh_crypto_api_t *ssh_crypto_api(const ssh_crypto_context_t *crypto_ctx)
 {
-    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    const ssh_crypto_context_mbedtls_t *impl = crypto_context_mbedtls(crypto_ctx);
     return impl != NULL ? impl->crypto : NULL;
 }
 
 const ssh_rng_api_t *ssh_crypto_rng_api(const ssh_crypto_context_t *crypto_ctx)
 {
-    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    const ssh_crypto_context_mbedtls_t *impl = crypto_context_mbedtls(crypto_ctx);
     return impl != NULL ? impl->rng : NULL;
 }

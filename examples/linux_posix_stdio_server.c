@@ -16,6 +16,7 @@
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/sftp.h"
 #include "emssh/sshd_config_file.h"
+#include "emssh/crypto_mbedtls.h"
 #include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
@@ -23,6 +24,10 @@
 #if !defined(EMSSH_USE_MBEDTLS)
 #error "linux_posix_stdio_server requires mbedtls legacy backend"
 #endif
+
+typedef ssh_crypto_context_mbedtls_legacy_t linux_crypto_context_t;
+#define LINUX_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
+#define LINUX_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
 
 #define LINUX_SERVER_DEFAULT_PORT 22u
 #define LINUX_SERVER_DEFAULT_TIMEOUT_MS 30000u
@@ -239,7 +244,7 @@ typedef struct auth_runtime_context {
 typedef struct crypto_instance {
     crypto_provider_t type;
     ssh_platform_t platform;
-    ssh_crypto_context_t crypto_ctx;
+    linux_crypto_context_t crypto_ctx;
     int initialized;
 } crypto_instance_t;
 
@@ -1345,7 +1350,7 @@ static void crypto_instance_deinit(crypto_instance_t *crypto_instance)
     if (crypto_instance == NULL || !crypto_instance->initialized) {
         return;
     }
-    ssh_crypto_close(&crypto_instance->crypto_ctx);
+    ssh_crypto_close(LINUX_CTX_PTR(&crypto_instance->crypto_ctx));
 
     memset(crypto_instance, 0, sizeof(*crypto_instance));
 }
@@ -1495,19 +1500,19 @@ static int crypto_instance_init(crypto_instance_t *crypto_instance, const app_sh
     {
         ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
 
-        status = ssh_crypto_open(&crypto_instance->crypto_ctx);
+        status = ssh_crypto_open(LINUX_CTX_PTR(&crypto_instance->crypto_ctx));
         if (status != SSH_OK) {
             return status;
         }
-        crypto_instance->platform.crypto = ssh_crypto_api(&crypto_instance->crypto_ctx);
-        crypto_instance->platform.rng = ssh_crypto_rng_api(&crypto_instance->crypto_ctx);
+        crypto_instance->platform.crypto = ssh_crypto_api(LINUX_CTX_CONST_PTR(&crypto_instance->crypto_ctx));
+        crypto_instance->platform.rng = ssh_crypto_rng_api(LINUX_CTX_CONST_PTR(&crypto_instance->crypto_ctx));
         status = crypto_hostkey_import_private_auto(
             crypto_instance->platform.crypto,
             hostkey_alg,
             shared->mbedtls_hostkey_private,
             shared->mbedtls_hostkey_private_len);
         if (status != SSH_OK) {
-            ssh_crypto_close(&crypto_instance->crypto_ctx);
+            ssh_crypto_close(LINUX_CTX_PTR(&crypto_instance->crypto_ctx));
             return status;
         }
         break;
@@ -1522,7 +1527,7 @@ static int crypto_instance_init(crypto_instance_t *crypto_instance, const app_sh
 
 static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
 {
-    ssh_crypto_context_t bootstrap_crypto_ctx;
+    linux_crypto_context_t bootstrap_crypto_ctx;
     ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
     const ssh_crypto_api_t *crypto;
     const ssh_fs_api_t *host_fs_api;
@@ -1554,11 +1559,11 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             return SSH_ERR_INVALID_ARGUMENT;
         }
         memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
-        status = ssh_crypto_open(&bootstrap_crypto_ctx);
+        status = ssh_crypto_open(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
         if (status != SSH_OK) {
             return status;
         }
-        crypto = ssh_crypto_api(&bootstrap_crypto_ctx);
+        crypto = ssh_crypto_api(LINUX_CTX_CONST_PTR(&bootstrap_crypto_ctx));
         status = crypto_hostkey_import_private_auto(
             crypto,
             hostkey_alg,
@@ -1572,16 +1577,16 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
                 sizeof(shared->mbedtls_hostkey_private),
                 &shared->mbedtls_hostkey_private_len);
         }
-        ssh_crypto_close(&bootstrap_crypto_ctx);
+        ssh_crypto_close(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
         return status;
     }
 
     memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
-    status = ssh_crypto_open(&bootstrap_crypto_ctx);
+    status = ssh_crypto_open(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
     if (status != SSH_OK) {
         return status;
     }
-    crypto = ssh_crypto_api(&bootstrap_crypto_ctx);
+    crypto = ssh_crypto_api(LINUX_CTX_CONST_PTR(&bootstrap_crypto_ctx));
     status = crypto_hostkey_generate(crypto, hostkey_alg);
     if (status == SSH_OK) {
         status = crypto_hostkey_export_private(
@@ -1591,7 +1596,7 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             sizeof(shared->mbedtls_hostkey_private),
             &shared->mbedtls_hostkey_private_len);
     }
-    ssh_crypto_close(&bootstrap_crypto_ctx);
+    ssh_crypto_close(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
     return status;
 }
 

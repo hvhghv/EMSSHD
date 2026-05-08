@@ -19,6 +19,18 @@ typedef struct ssh_mbedtls_crypto {
     int initialized;
 } ssh_mbedtls_crypto_t;
 
+typedef struct ssh_crypto_context_mbedtls_legacy {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_mbedtls_crypto_t mbedtls;
+} ssh_crypto_context_mbedtls_legacy_t;
+
+typedef struct ssh_crypto_context_mbedtls {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_mbedtls_crypto_t mbedtls;
+} ssh_crypto_context_mbedtls_t;
+
 int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx);
 void ssh_mbedtls_crypto_free(ssh_mbedtls_crypto_t *ctx);
 

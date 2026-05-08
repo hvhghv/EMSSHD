@@ -13,6 +13,26 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
+#if defined(EMSSH_USE_MBEDTLS)
+#include "emssh/crypto_mbedtls.h"
+#if defined(EMSSH_MBEDTLS_USE_PSA)
+typedef ssh_crypto_context_mbedtls_t embedded_posix_crypto_context_t;
+#else
+typedef ssh_crypto_context_mbedtls_legacy_t embedded_posix_crypto_context_t;
+#endif
+#elif defined(EMSSH_USE_OPENSSL)
+#include "emssh/crypto_openssl.h"
+typedef ssh_crypto_context_openssl_t embedded_posix_crypto_context_t;
+#elif defined(EMSSH_USE_WOLFSSL)
+#include "emssh/crypto_wolfssl.h"
+typedef ssh_crypto_context_wolfssl_t embedded_posix_crypto_context_t;
+#else
+#error "embedded_posix_socket_stdio_openssl_server requires one crypto backend"
+#endif
+
+#define EMBEDDED_POSIX_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
+#define EMBEDDED_POSIX_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
+
 #define POSIX_OPENSSL_DEFAULT_PORT 2222u
 #define POSIX_OPENSSL_DEFAULT_TIMEOUT_MS 30000u
 
@@ -55,7 +75,7 @@ int main(int argc, char **argv)
     ssh_posix_conn_t conn;
     ssh_posix_term_platform_t term;
     ssh_stdio_fs_t fs;
-    ssh_crypto_context_t crypto_ctx;
+    embedded_posix_crypto_context_t crypto_ctx;
     ssh_platform_t platform;
     ssh_server_t server;
     ssh_server_config_t config;
@@ -188,7 +208,7 @@ int main(int argc, char **argv)
 #endif
     }
 
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(EMBEDDED_POSIX_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         fprintf(stderr, "crypto context init failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -201,8 +221,8 @@ int main(int argc, char **argv)
     platform.net = ssh_posix_net_api(&net);
     platform.fs = ssh_stdio_fs_api(&fs);
     platform.term = run_terminal_mode ? ssh_posix_term_api(&term) : NULL;
-    platform.crypto = ssh_crypto_api(&crypto_ctx);
-    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
+    platform.crypto = ssh_crypto_api(EMBEDDED_POSIX_CTX_CONST_PTR(&crypto_ctx));
+    platform.rng = ssh_crypto_rng_api(EMBEDDED_POSIX_CTX_CONST_PTR(&crypto_ctx));
 
     ssh_server_config_defaults(&config);
     ssh_server_session_options_defaults(&options);
@@ -277,7 +297,7 @@ cleanup:
         ssh_server_deinit(&server);
     }
     if (initialized_crypto) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(EMBEDDED_POSIX_CTX_PTR(&crypto_ctx));
     }
     if (initialized_fs) {
         ssh_stdio_fs_deinit(&fs);

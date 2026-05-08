@@ -13,6 +13,12 @@ typedef struct ssh_openssl_crypto {
     int initialized;
 } ssh_openssl_crypto_t;
 
+typedef struct ssh_crypto_context_openssl {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_openssl_crypto_t openssl;
+} ssh_crypto_context_openssl_t;
+
 int ssh_openssl_crypto_init(ssh_openssl_crypto_t *ctx);
 void ssh_openssl_crypto_free(ssh_openssl_crypto_t *ctx);
 

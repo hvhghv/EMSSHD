@@ -20,6 +20,26 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
+#if defined(EMSSH_USE_MBEDTLS)
+#include "emssh/crypto_mbedtls.h"
+#if defined(EMSSH_MBEDTLS_USE_PSA)
+typedef ssh_crypto_context_mbedtls_t concurrent_crypto_context_t;
+#else
+typedef ssh_crypto_context_mbedtls_legacy_t concurrent_crypto_context_t;
+#endif
+#elif defined(EMSSH_USE_OPENSSL)
+#include "emssh/crypto_openssl.h"
+typedef ssh_crypto_context_openssl_t concurrent_crypto_context_t;
+#elif defined(EMSSH_USE_WOLFSSL)
+#include "emssh/crypto_wolfssl.h"
+typedef ssh_crypto_context_wolfssl_t concurrent_crypto_context_t;
+#else
+#error "concurrent_server requires one crypto backend"
+#endif
+
+#define CONCURRENT_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
+#define CONCURRENT_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
+
 #define CONCURRENT_SERVER_MAX_TEXT 512u
 #define CONCURRENT_SERVER_MAX_HOSTKEY_PRIVATE 128u
 
@@ -346,7 +366,7 @@ static void worker_pool_wait_idle(worker_pool_sync_t *pool)
 
 static int run_worker_session(worker_context_t *ctx)
 {
-    ssh_crypto_context_t crypto_ctx;
+    concurrent_crypto_context_t crypto_ctx;
     const ssh_crypto_api_t *crypto;
     ssh_stdio_fs_t fs;
     ssh_platform_t platform;
@@ -371,13 +391,13 @@ static int run_worker_session(worker_context_t *ctx)
     initialized_fs = 0;
     initialized_server = 0;
 
-    status = ssh_crypto_open(&crypto_ctx);
+    status = ssh_crypto_open(CONCURRENT_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
         return status;
     }
     initialized_crypto = 1;
 
-    crypto = ssh_crypto_api(&crypto_ctx);
+    crypto = ssh_crypto_api(CONCURRENT_CTX_CONST_PTR(&crypto_ctx));
     if (crypto == NULL || crypto->hostkey_import_private_auto == NULL) {
         status = SSH_ERR_UNSUPPORTED;
         goto cleanup;
@@ -399,8 +419,8 @@ static int run_worker_session(worker_context_t *ctx)
 
     platform.net = ssh_tcp_net_api(ctx->tcp);
     platform.fs = ssh_stdio_fs_api(&fs);
-    platform.crypto = ssh_crypto_api(&crypto_ctx);
-    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
+    platform.crypto = ssh_crypto_api(CONCURRENT_CTX_CONST_PTR(&crypto_ctx));
+    platform.rng = ssh_crypto_rng_api(CONCURRENT_CTX_CONST_PTR(&crypto_ctx));
 
     auth.username = ctx->username;
     auth.password = ctx->password;
@@ -429,7 +449,7 @@ cleanup:
         ssh_stdio_fs_deinit(&fs);
     }
     if (initialized_crypto) {
-        ssh_crypto_close(&crypto_ctx);
+        ssh_crypto_close(CONCURRENT_CTX_PTR(&crypto_ctx));
     }
     return status;
 }
@@ -499,7 +519,7 @@ int main(int argc, char **argv)
     const char *hostkey_algorithm;
     unsigned accepted_count;
     int positional_argc;
-    ssh_crypto_context_t bootstrap_crypto_ctx;
+    concurrent_crypto_context_t bootstrap_crypto_ctx;
     const ssh_crypto_api_t *bootstrap_crypto_api;
     ssh_tcp_platform_t tcp;
     ssh_tcp_listener_t listener;
@@ -581,20 +601,20 @@ int main(int argc, char **argv)
     initialized_tcp = 0;
     initialized_pool = 0;
 
-    status = ssh_crypto_open(&bootstrap_crypto_ctx);
+    status = ssh_crypto_open(CONCURRENT_CTX_PTR(&bootstrap_crypto_ctx));
     if (status != SSH_OK) {
         fprintf(stderr, "bootstrap crypto init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_bootstrap_crypto = 1;
 
-    status = configure_bootstrap_hostkey(&bootstrap_crypto_ctx, hostkey_path);
+    status = configure_bootstrap_hostkey(CONCURRENT_CTX_PTR(&bootstrap_crypto_ctx), hostkey_path);
     if (status != SSH_OK) {
         fprintf(stderr, "hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
 
-    bootstrap_crypto_api = ssh_crypto_api(&bootstrap_crypto_ctx);
+    bootstrap_crypto_api = ssh_crypto_api(CONCURRENT_CTX_CONST_PTR(&bootstrap_crypto_ctx));
     if (bootstrap_crypto_api == NULL || bootstrap_crypto_api->hostkey_export_private == NULL) {
         status = SSH_ERR_UNSUPPORTED;
         fprintf(stderr, "hostkey export failed: %s\n", ssh_status_string(status));
@@ -610,7 +630,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "hostkey export failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
-    ssh_crypto_close(&bootstrap_crypto_ctx);
+    ssh_crypto_close(CONCURRENT_CTX_PTR(&bootstrap_crypto_ctx));
     initialized_bootstrap_crypto = 0;
 
     status = ssh_tcp_platform_init(&tcp);
@@ -701,7 +721,7 @@ cleanup:
         ssh_tcp_platform_deinit(&tcp);
     }
     if (initialized_bootstrap_crypto) {
-        ssh_crypto_close(&bootstrap_crypto_ctx);
+        ssh_crypto_close(CONCURRENT_CTX_PTR(&bootstrap_crypto_ctx));
     }
     memset(hostkey_private, 0, sizeof(hostkey_private));
 
