@@ -2,10 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "emssh/crypto_mbedtls.h"
 #include "emssh/platform_fatfs_adapter.h"
 #include "emssh/platform_freertos.h"
 #include "emssh/platform_lwip.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
@@ -35,6 +35,15 @@ typedef struct auth_ctx {
     const char *username;
     const char *password;
 } auth_ctx_t;
+
+static ssh_string_view_t hostkey_algorithm_view_ecdsa(void)
+{
+    static const char k_alg[] = "ecdsa-sha2-nistp256";
+    ssh_string_view_t view;
+    view.data = (const uint8_t *)k_alg;
+    view.len = sizeof(k_alg) - 1u;
+    return view;
+}
 
 static void board_log_sink(void *ctx, ssh_log_level_t level, const char *message)
 {
@@ -97,22 +106,37 @@ static int password_auth_cb(void *ctx, const ssh_password_auth_request_t *reques
            string_view_matches(auth->password, request->password, request->password_len);
 }
 
-static int configure_hostkey(ssh_mbedtls_crypto_t *crypto)
+static int configure_hostkey(ssh_crypto_context_t *crypto_ctx)
 {
+    const ssh_crypto_api_t *crypto;
+    ssh_string_view_t hostkey_alg;
     uint8_t private_key[EMSSH_FREERTOS_LWIP_FATFS_HOSTKEY_MAX];
     size_t private_key_len;
     int status;
 
-    if (crypto == NULL) {
+    if (crypto_ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    crypto = ssh_crypto_api(crypto_ctx);
+    if (crypto == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+    hostkey_alg = hostkey_algorithm_view_ecdsa();
 
     memset(private_key, 0, sizeof(private_key));
     private_key_len = 0u;
 
     status = board_load_hostkey_private(private_key, sizeof(private_key), &private_key_len);
     if (status == SSH_OK) {
-        status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(crypto, private_key, private_key_len);
+        if (crypto->hostkey_import_private_auto == NULL) {
+            memset(private_key, 0, sizeof(private_key));
+            return SSH_ERR_UNSUPPORTED;
+        }
+        status = crypto->hostkey_import_private_auto(
+            crypto->ctx,
+            hostkey_alg,
+            private_key,
+            private_key_len);
         memset(private_key, 0, sizeof(private_key));
         return status;
     }
@@ -121,13 +145,20 @@ static int configure_hostkey(ssh_mbedtls_crypto_t *crypto)
         return status;
     }
 
-    status = ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    if (crypto->hostkey_generate == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_generate(crypto->ctx, hostkey_alg);
     if (status != SSH_OK) {
         return status;
     }
 
-    status = ssh_mbedtls_crypto_export_hostkey_private(
-        crypto,
+    if (crypto->hostkey_export_private == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_export_private(
+        crypto->ctx,
+        hostkey_alg,
         private_key,
         sizeof(private_key),
         &private_key_len);
@@ -146,12 +177,11 @@ int main(void)
     ssh_lwip_listener_t listener;
     ssh_lwip_conn_t conn;
     ssh_fatfs_adapter_t fatfs;
-    ssh_mbedtls_crypto_t crypto;
+    ssh_crypto_context_t crypto_ctx;
     ssh_platform_t platform;
     ssh_server_t server;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     auth_ctx_t auth;
     int status;
     int initialized_runtime;
@@ -165,7 +195,7 @@ int main(void)
     memset(&listener, 0, sizeof(listener));
     memset(&conn, 0, sizeof(conn));
     memset(&fatfs, 0, sizeof(fatfs));
-    memset(&crypto, 0, sizeof(crypto));
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
     memset(&platform, 0, sizeof(platform));
     memset(&server, 0, sizeof(server));
     memset(&config, 0, sizeof(config));
@@ -207,14 +237,14 @@ int main(void)
     }
     initialized_fs = 1;
 
-    status = ssh_mbedtls_crypto_init(&crypto);
+    status = ssh_crypto_open(&crypto_ctx);
     if (status != SSH_OK) {
-        printf("mbedtls init failed: %s\n", ssh_status_string(status));
+        printf("crypto context init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
 
-    status = configure_hostkey(&crypto);
+    status = configure_hostkey(&crypto_ctx);
     if (status != SSH_OK) {
         printf("hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -225,8 +255,8 @@ int main(void)
     platform.log = ssh_freertos_log_api(&runtime);
     platform.net = ssh_lwip_net_api(&net);
     platform.fs = ssh_fatfs_adapter_api(&fatfs);
-    platform.crypto = ssh_mbedtls_crypto_api(&crypto);
-    platform.rng = ssh_mbedtls_rng_api(&crypto);
+    platform.crypto = ssh_crypto_api(&crypto_ctx);
+    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
 
     auth.username = EMSSH_FREERTOS_LWIP_FATFS_USERNAME;
     auth.password = EMSSH_FREERTOS_LWIP_FATFS_PASSWORD;
@@ -254,8 +284,6 @@ int main(void)
     }
 
     ssh_server_session_options_defaults(&options);
-    ssh_mbedtls_kexinit_algorithm_set_defaults(&algorithms);
-    options.algorithms = &algorithms;
     options.timeout_ms = EMSSH_FREERTOS_LWIP_FATFS_TIMEOUT_MS;
     options.max_sftp_packets = 0u;
 
@@ -284,7 +312,7 @@ cleanup:
         ssh_server_deinit(&server);
     }
     if (initialized_crypto) {
-        ssh_mbedtls_crypto_free(&crypto);
+        ssh_crypto_close(&crypto_ctx);
     }
     if (initialized_fs) {
         ssh_fatfs_adapter_deinit(&fatfs);

@@ -23,6 +23,7 @@
 
 #define SSH_CHANNEL_TYPE_SESSION "session"
 #define SSH_CHANNEL_REQUEST_SUBSYSTEM "subsystem"
+#define SSH_CHANNEL_REQUEST_X11_REQ "x11-req"
 #define SSH_CHANNEL_REQUEST_PTY_REQ "pty-req"
 #define SSH_CHANNEL_REQUEST_SHELL "shell"
 #define SSH_CHANNEL_REQUEST_EXEC "exec"

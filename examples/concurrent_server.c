@@ -14,9 +14,9 @@
 #include <pthread.h>
 #endif
 
-#include "emssh/crypto_mbedtls.h"
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/platform_tcp.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
@@ -51,6 +51,15 @@ typedef struct worker_context {
     size_t hostkey_private_len;
     uint32_t timeout_ms;
 } worker_context_t;
+
+static ssh_string_view_t hostkey_algorithm_view_ecdsa(void)
+{
+    static const char k_alg[] = "ecdsa-sha2-nistp256";
+    ssh_string_view_t view;
+    view.data = (const uint8_t *)k_alg;
+    view.len = sizeof(k_alg) - 1u;
+    return view;
+}
 
 static uint16_t parse_port(const char *text)
 {
@@ -160,20 +169,35 @@ static int save_file(const char *path, const uint8_t *data, size_t data_len)
     return fclose(file) == 0 ? SSH_OK : SSH_ERR_PLATFORM;
 }
 
-static int configure_bootstrap_hostkey(ssh_mbedtls_crypto_t *crypto, const char *hostkey_path)
+static int configure_bootstrap_hostkey(ssh_crypto_context_t *crypto_ctx, const char *hostkey_path)
 {
+    const ssh_crypto_api_t *crypto;
+    ssh_string_view_t hostkey_alg;
     uint8_t private_key[CONCURRENT_SERVER_MAX_HOSTKEY_PRIVATE];
     size_t private_key_len;
     int status;
 
-    if (crypto == NULL) {
+    if (crypto_ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    crypto = ssh_crypto_api(crypto_ctx);
+    if (crypto == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+    hostkey_alg = hostkey_algorithm_view_ecdsa();
 
     if (hostkey_path != NULL) {
         status = load_file(hostkey_path, private_key, sizeof(private_key), &private_key_len);
         if (status == SSH_OK) {
-            status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(crypto, private_key, private_key_len);
+            if (crypto->hostkey_import_private_auto == NULL) {
+                memset(private_key, 0, sizeof(private_key));
+                return SSH_ERR_UNSUPPORTED;
+            }
+            status = crypto->hostkey_import_private_auto(
+                crypto->ctx,
+                hostkey_alg,
+                private_key,
+                private_key_len);
             memset(private_key, 0, sizeof(private_key));
             return status;
         }
@@ -182,13 +206,20 @@ static int configure_bootstrap_hostkey(ssh_mbedtls_crypto_t *crypto, const char 
         }
     }
 
-    status = ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    if (crypto->hostkey_generate == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_generate(crypto->ctx, hostkey_alg);
     if (status != SSH_OK || hostkey_path == NULL) {
         return status;
     }
 
-    status = ssh_mbedtls_crypto_export_hostkey_private(
-        crypto,
+    if (crypto->hostkey_export_private == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_export_private(
+        crypto->ctx,
+        hostkey_alg,
         private_key,
         sizeof(private_key),
         &private_key_len);
@@ -315,12 +346,12 @@ static void worker_pool_wait_idle(worker_pool_sync_t *pool)
 
 static int run_worker_session(worker_context_t *ctx)
 {
-    ssh_mbedtls_crypto_t crypto;
+    ssh_crypto_context_t crypto_ctx;
+    const ssh_crypto_api_t *crypto;
     ssh_stdio_fs_t fs;
     ssh_platform_t platform;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     ssh_server_t server;
     password_auth_ctx_t auth;
     int status;
@@ -332,7 +363,7 @@ static int run_worker_session(worker_context_t *ctx)
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    memset(&crypto, 0, sizeof(crypto));
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
     memset(&fs, 0, sizeof(fs));
     memset(&platform, 0, sizeof(platform));
     memset(&server, 0, sizeof(server));
@@ -340,13 +371,22 @@ static int run_worker_session(worker_context_t *ctx)
     initialized_fs = 0;
     initialized_server = 0;
 
-    status = ssh_mbedtls_crypto_init(&crypto);
+    status = ssh_crypto_open(&crypto_ctx);
     if (status != SSH_OK) {
         return status;
     }
     initialized_crypto = 1;
 
-    status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(&crypto, ctx->hostkey_private, ctx->hostkey_private_len);
+    crypto = ssh_crypto_api(&crypto_ctx);
+    if (crypto == NULL || crypto->hostkey_import_private_auto == NULL) {
+        status = SSH_ERR_UNSUPPORTED;
+        goto cleanup;
+    }
+    status = crypto->hostkey_import_private_auto(
+        crypto->ctx,
+        hostkey_algorithm_view_ecdsa(),
+        ctx->hostkey_private,
+        ctx->hostkey_private_len);
     if (status != SSH_OK) {
         goto cleanup;
     }
@@ -359,8 +399,8 @@ static int run_worker_session(worker_context_t *ctx)
 
     platform.net = ssh_tcp_net_api(ctx->tcp);
     platform.fs = ssh_stdio_fs_api(&fs);
-    platform.crypto = ssh_mbedtls_crypto_api(&crypto);
-    platform.rng = ssh_mbedtls_rng_api(&crypto);
+    platform.crypto = ssh_crypto_api(&crypto_ctx);
+    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
 
     auth.username = ctx->username;
     auth.password = ctx->password;
@@ -375,9 +415,6 @@ static int run_worker_session(worker_context_t *ctx)
     initialized_server = 1;
 
     ssh_server_session_options_defaults(&options);
-    ssh_mbedtls_kexinit_algorithm_set_defaults(&algorithms);
-    algorithms.server_host_key_algorithms = "ecdsa-sha2-nistp256";
-    options.algorithms = &algorithms;
     options.timeout_ms = ctx->timeout_ms;
     options.max_sftp_packets = 0u;
 
@@ -392,7 +429,7 @@ cleanup:
         ssh_stdio_fs_deinit(&fs);
     }
     if (initialized_crypto) {
-        ssh_mbedtls_crypto_free(&crypto);
+        ssh_crypto_close(&crypto_ctx);
     }
     return status;
 }
@@ -462,7 +499,8 @@ int main(int argc, char **argv)
     const char *hostkey_algorithm;
     unsigned accepted_count;
     int positional_argc;
-    ssh_mbedtls_crypto_t bootstrap_crypto;
+    ssh_crypto_context_t bootstrap_crypto_ctx;
+    const ssh_crypto_api_t *bootstrap_crypto_api;
     ssh_tcp_platform_t tcp;
     ssh_tcp_listener_t listener;
     worker_pool_sync_t pool;
@@ -533,7 +571,7 @@ int main(int argc, char **argv)
     }
     hostkey_path = positional_argc >= 6 ? argv[5] : NULL;
 
-    memset(&bootstrap_crypto, 0, sizeof(bootstrap_crypto));
+    memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
     memset(&tcp, 0, sizeof(tcp));
     memset(&listener, 0, sizeof(listener));
     memset(&pool, 0, sizeof(pool));
@@ -543,21 +581,28 @@ int main(int argc, char **argv)
     initialized_tcp = 0;
     initialized_pool = 0;
 
-    status = ssh_mbedtls_crypto_init(&bootstrap_crypto);
+    status = ssh_crypto_open(&bootstrap_crypto_ctx);
     if (status != SSH_OK) {
         fprintf(stderr, "bootstrap crypto init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_bootstrap_crypto = 1;
 
-    status = configure_bootstrap_hostkey(&bootstrap_crypto, hostkey_path);
+    status = configure_bootstrap_hostkey(&bootstrap_crypto_ctx, hostkey_path);
     if (status != SSH_OK) {
         fprintf(stderr, "hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
 
-    status = ssh_mbedtls_crypto_export_hostkey_private(
-        &bootstrap_crypto,
+    bootstrap_crypto_api = ssh_crypto_api(&bootstrap_crypto_ctx);
+    if (bootstrap_crypto_api == NULL || bootstrap_crypto_api->hostkey_export_private == NULL) {
+        status = SSH_ERR_UNSUPPORTED;
+        fprintf(stderr, "hostkey export failed: %s\n", ssh_status_string(status));
+        goto cleanup;
+    }
+    status = bootstrap_crypto_api->hostkey_export_private(
+        bootstrap_crypto_api->ctx,
+        hostkey_algorithm_view_ecdsa(),
         hostkey_private,
         sizeof(hostkey_private),
         &hostkey_private_len);
@@ -565,7 +610,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "hostkey export failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
-    ssh_mbedtls_crypto_free(&bootstrap_crypto);
+    ssh_crypto_close(&bootstrap_crypto_ctx);
     initialized_bootstrap_crypto = 0;
 
     status = ssh_tcp_platform_init(&tcp);
@@ -656,7 +701,7 @@ cleanup:
         ssh_tcp_platform_deinit(&tcp);
     }
     if (initialized_bootstrap_crypto) {
-        ssh_mbedtls_crypto_free(&bootstrap_crypto);
+        ssh_crypto_close(&bootstrap_crypto_ctx);
     }
     memset(hostkey_private, 0, sizeof(hostkey_private));
 

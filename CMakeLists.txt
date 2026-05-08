@@ -41,6 +41,20 @@ option(EMSSH_LIBFUZZER "Build emssh_fuzz_decode with LLVM libFuzzer entrypoint" 
 option(EMSSH_ENABLE_OPENSSH_INTEROP_TESTS "Enable optional OpenSSH SFTP interoperability tests" OFF)
 option(EMSSH_ENABLE_OPENSSH_TERM_INTEROP_TESTS "Enable optional OpenSSH terminal interoperability tests" OFF)
 
+set(EMSSH_ENABLED_BACKEND_COUNT 0)
+if(EMSSH_USE_MBEDTLS)
+    math(EXPR EMSSH_ENABLED_BACKEND_COUNT "${EMSSH_ENABLED_BACKEND_COUNT}+1")
+endif()
+if(EMSSH_USE_OPENSSL)
+    math(EXPR EMSSH_ENABLED_BACKEND_COUNT "${EMSSH_ENABLED_BACKEND_COUNT}+1")
+endif()
+if(EMSSH_USE_WOLFSSL)
+    math(EXPR EMSSH_ENABLED_BACKEND_COUNT "${EMSSH_ENABLED_BACKEND_COUNT}+1")
+endif()
+if(NOT EMSSH_ENABLED_BACKEND_COUNT EQUAL 1)
+    message(FATAL_ERROR "Exactly one crypto backend must be enabled (set one of EMSSH_USE_MBEDTLS/EMSSH_USE_OPENSSL/EMSSH_USE_WOLFSSL to ON, others OFF).")
+endif()
+
 set(_emssh_default_mbedtls_classic_source "")
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/library" AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Libs/external/mbedtls/include/mbedtls")
@@ -426,7 +440,7 @@ if(EMSSH_BUILD_EXAMPLES)
     endif()
 
     if(EMSSH_BUILD_FREERTOS_RUNTIME AND EMSSH_BUILD_LWIP_NET AND (EMSSH_BUILD_LITTLEFS_ADAPTER OR EMSSH_BUILD_FATFS_ADAPTER))
-        if(EMSSH_USE_MBEDTLS OR (EMSSH_BUILD_OPENSSL_PLATFORM AND EMSSH_USE_OPENSSL))
+        if(EMSSH_USE_MBEDTLS OR EMSSH_USE_OPENSSL OR EMSSH_USE_WOLFSSL)
             add_executable(emssh_embedded_porting_server examples/embedded_porting_server.c)
             target_link_libraries(emssh_embedded_porting_server PRIVATE emssh)
 
@@ -434,10 +448,6 @@ if(EMSSH_BUILD_EXAMPLES)
                 target_compile_definitions(emssh_embedded_porting_server PRIVATE EMSSH_TEMPLATE_FS_BACKEND_LITTLEFS=1)
             else()
                 target_compile_definitions(emssh_embedded_porting_server PRIVATE EMSSH_TEMPLATE_FS_BACKEND_LITTLEFS=0)
-            endif()
-
-            if(NOT EMSSH_USE_MBEDTLS AND EMSSH_BUILD_OPENSSL_PLATFORM AND EMSSH_USE_OPENSSL)
-                target_compile_definitions(emssh_embedded_porting_server PRIVATE EMSSH_TEMPLATE_USE_OPENSSL=1)
             endif()
         endif()
     endif()
@@ -450,7 +460,7 @@ if(EMSSH_BUILD_EXAMPLES)
         target_link_libraries(emssh_embedded_freertos_lwip_fatfs_mbedtls_server PRIVATE emssh)
     endif()
 
-    if(EMSSH_BUILD_POSIX_RUNTIME AND EMSSH_BUILD_POSIX_NET AND EMSSH_BUILD_STDIO_FS AND EMSSH_USE_OPENSSL AND EMSSH_BUILD_OPENSSL_PLATFORM AND EMSSH_BUILD_SSHD_CONFIG_FILE)
+    if(EMSSH_BUILD_POSIX_RUNTIME AND EMSSH_BUILD_POSIX_NET AND EMSSH_BUILD_STDIO_FS AND (EMSSH_USE_MBEDTLS OR EMSSH_USE_OPENSSL OR EMSSH_USE_WOLFSSL) AND EMSSH_BUILD_SSHD_CONFIG_FILE)
         add_executable(
             emssh_embedded_posix_socket_stdio_openssl_server
             examples/embedded_posix_socket_stdio_openssl_server.c

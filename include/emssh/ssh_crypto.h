@@ -17,6 +17,9 @@
 #define EMSSH_MAX_MAC_KEY 64u
 #define EMSSH_MAX_MAC 64u
 
+typedef struct ssh_rng_api ssh_rng_api_t;
+typedef struct ssh_kexinit_algorithm_set ssh_kexinit_algorithm_set_t;
+
 typedef enum ssh_cipher_direction {
     SSH_CIPHER_ENCRYPT = 0,
     SSH_CIPHER_DECRYPT = 1
@@ -119,9 +122,45 @@ typedef struct ssh_crypto_api {
         size_t mac_capacity,
         size_t *mac_len);
 
+    int (*hostkey_import_private_auto)(
+        void *ctx,
+        ssh_string_view_t hostkey_algorithm,
+        const uint8_t *private_key_data,
+        size_t private_key_data_len);
+
+    int (*hostkey_export_private)(
+        void *ctx,
+        ssh_string_view_t hostkey_algorithm,
+        uint8_t *private_key,
+        size_t private_key_capacity,
+        size_t *private_key_len);
+
+    int (*hostkey_generate)(
+        void *ctx,
+        ssh_string_view_t hostkey_algorithm);
+
+    void (*kexinit_defaults)(
+        void *ctx,
+        ssh_kexinit_algorithm_set_t *algorithms);
+
     void (*secure_zero)(void *ctx, void *ptr, size_t len);
 
     void *ctx;
 } ssh_crypto_api_t;
+
+#define EMSSH_CRYPTO_OPAQUE_WORDS 640u
+
+typedef struct ssh_crypto_context {
+    uintptr_t opaque_words[EMSSH_CRYPTO_OPAQUE_WORDS];
+} ssh_crypto_context_t;
+
+const char *ssh_crypto_name(void);
+const char *ssh_crypto_publickey_signature_algorithms(void);
+
+int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx);
+void ssh_crypto_close(ssh_crypto_context_t *crypto_ctx);
+
+const ssh_crypto_api_t *ssh_crypto_api(const ssh_crypto_context_t *crypto_ctx);
+const ssh_rng_api_t *ssh_crypto_rng_api(const ssh_crypto_context_t *crypto_ctx);
 
 #endif

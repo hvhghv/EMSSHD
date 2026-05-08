@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_buffer.h"
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_error.h"
@@ -1323,6 +1324,73 @@ static void mbedtls_secure_zero(void *ctx, void *ptr, size_t len)
     secure_zero_bytes(ptr, len);
 }
 
+static int mbedtls_hostkey_import_private_auto(
+    void *ctx,
+    ssh_string_view_t hostkey_algorithm,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || private_key_data == NULL || private_key_data_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256")) {
+        return ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(crypto, private_key_data, private_key_data_len);
+    }
+    if (view_eq(hostkey_algorithm, "ssh-ed25519")) {
+        return ssh_mbedtls_crypto_import_ed25519_hostkey(crypto, private_key_data, private_key_data_len);
+    }
+    return SSH_ERR_UNSUPPORTED;
+}
+
+static int mbedtls_hostkey_export_private(
+    void *ctx,
+    ssh_string_view_t hostkey_algorithm,
+    uint8_t *private_key,
+    size_t private_key_capacity,
+    size_t *private_key_len)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || private_key == NULL || private_key_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256") || view_eq(hostkey_algorithm, "ssh-ed25519")) {
+        return ssh_mbedtls_crypto_export_hostkey_private(
+            crypto,
+            private_key,
+            private_key_capacity,
+            private_key_len);
+    }
+    return SSH_ERR_UNSUPPORTED;
+}
+
+static int mbedtls_hostkey_generate(void *ctx, ssh_string_view_t hostkey_algorithm)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || hostkey_algorithm.data == NULL || hostkey_algorithm.len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256")) {
+        return ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    }
+    if (view_eq(hostkey_algorithm, "ssh-ed25519")) {
+        return ssh_mbedtls_crypto_generate_ed25519_hostkey(crypto);
+    }
+    return SSH_ERR_UNSUPPORTED;
+}
+
+static void mbedtls_kexinit_defaults(void *ctx, ssh_kexinit_algorithm_set_t *algorithms)
+{
+    (void)ctx;
+    if (algorithms == NULL) {
+        return;
+    }
+    ssh_mbedtls_kexinit_algorithm_set_defaults(algorithms);
+}
+
 int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx)
 {
     psa_status_t status;
@@ -1348,6 +1416,10 @@ int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx)
     ctx->api.derive_key = mbedtls_derive_key;
     ctx->api.cipher_crypt = mbedtls_cipher_crypt;
     ctx->api.mac_compute = mbedtls_mac_compute;
+    ctx->api.hostkey_import_private_auto = mbedtls_hostkey_import_private_auto;
+    ctx->api.hostkey_export_private = mbedtls_hostkey_export_private;
+    ctx->api.hostkey_generate = mbedtls_hostkey_generate;
+    ctx->api.kexinit_defaults = mbedtls_kexinit_defaults;
     ctx->api.secure_zero = mbedtls_secure_zero;
     ctx->api.ctx = ctx;
 
@@ -1618,4 +1690,92 @@ void ssh_mbedtls_kexinit_algorithm_set_defaults(ssh_kexinit_algorithm_set_t *alg
     algorithms->mac_algorithms_server_to_client = "hmac-sha2-256";
     algorithms->compression_algorithms_client_to_server = "none";
     algorithms->compression_algorithms_server_to_client = "none";
+}
+
+typedef struct ssh_crypto_impl {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_mbedtls_crypto_t mbedtls;
+} ssh_crypto_impl_t;
+
+static ssh_crypto_impl_t *crypto_impl_mut(ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+static const ssh_crypto_impl_t *crypto_impl(const ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (const ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+const char *ssh_crypto_name(void)
+{
+    return "mbedtls";
+}
+
+const char *ssh_crypto_publickey_signature_algorithms(void)
+{
+    if (ssh_mbedtls_probe_ed25519_publickey_verify_support() == SSH_OK) {
+        return "rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256,ssh-ed25519";
+    }
+    return "rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256";
+}
+
+int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl;
+    typedef char emssh_crypto_impl_fits[
+        (sizeof(ssh_crypto_impl_t) <= sizeof(((ssh_crypto_context_t *)0)->opaque_words)) ? 1 : -1];
+    int status;
+
+    if (crypto_ctx == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    (void)sizeof(emssh_crypto_impl_fits);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+    impl = crypto_impl_mut(crypto_ctx);
+
+    status = ssh_mbedtls_crypto_init(&impl->mbedtls);
+    if (status != SSH_OK) {
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return status;
+    }
+    impl->crypto = ssh_mbedtls_crypto_api(&impl->mbedtls);
+    impl->rng = ssh_mbedtls_rng_api(&impl->mbedtls);
+    if (impl->crypto == NULL || impl->rng == NULL) {
+        ssh_mbedtls_crypto_free(&impl->mbedtls);
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+void ssh_crypto_close(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl = crypto_impl_mut(crypto_ctx);
+
+    if (impl == NULL) {
+        return;
+    }
+    ssh_mbedtls_crypto_free(&impl->mbedtls);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+}
+
+const ssh_crypto_api_t *ssh_crypto_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->crypto : NULL;
+}
+
+const ssh_rng_api_t *ssh_crypto_rng_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->rng : NULL;
 }

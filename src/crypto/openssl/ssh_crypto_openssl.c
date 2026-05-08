@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_buffer.h"
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_error.h"
@@ -738,6 +739,19 @@ static int openssl_publickey_verify(
 }
 #endif
 
+static int openssl_hostkey_generate(void *ctx, ssh_string_view_t hostkey_algorithm)
+{
+    (void)ctx;
+    (void)hostkey_algorithm;
+    return SSH_ERR_UNSUPPORTED;
+}
+
+static void openssl_kexinit_defaults(void *ctx, ssh_kexinit_algorithm_set_t *algorithms)
+{
+    (void)ctx;
+    ssh_openssl_kexinit_algorithm_set_defaults(algorithms);
+}
+
 int ssh_openssl_crypto_init(ssh_openssl_crypto_t *ctx)
 {
     if (ctx == NULL) {
@@ -755,6 +769,8 @@ int ssh_openssl_crypto_init(ssh_openssl_crypto_t *ctx)
     ctx->api.derive_key = openssl_derive_key;
     ctx->api.cipher_crypt = openssl_cipher_crypt;
     ctx->api.mac_compute = openssl_mac_compute;
+    ctx->api.hostkey_generate = openssl_hostkey_generate;
+    ctx->api.kexinit_defaults = openssl_kexinit_defaults;
     ctx->api.secure_zero = openssl_secure_zero;
     ctx->api.ctx = ctx;
     ctx->rng.fill = openssl_rng_fill;
@@ -851,4 +867,89 @@ const ssh_platform_t *ssh_openssl_platform_api(ssh_openssl_platform_t *ctx)
         return NULL;
     }
     return &ctx->platform;
+}
+
+typedef struct ssh_crypto_impl {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_openssl_crypto_t openssl;
+} ssh_crypto_impl_t;
+
+static ssh_crypto_impl_t *crypto_impl_mut(ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+static const ssh_crypto_impl_t *crypto_impl(const ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (const ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+const char *ssh_crypto_name(void)
+{
+    return "openssl";
+}
+
+const char *ssh_crypto_publickey_signature_algorithms(void)
+{
+    return "";
+}
+
+int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl;
+    typedef char emssh_crypto_impl_fits[
+        (sizeof(ssh_crypto_impl_t) <= sizeof(((ssh_crypto_context_t *)0)->opaque_words)) ? 1 : -1];
+    int status;
+
+    if (crypto_ctx == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    (void)sizeof(emssh_crypto_impl_fits);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+    impl = crypto_impl_mut(crypto_ctx);
+
+    status = ssh_openssl_crypto_init(&impl->openssl);
+    if (status != SSH_OK) {
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return status;
+    }
+    impl->crypto = ssh_openssl_crypto_api(&impl->openssl);
+    impl->rng = ssh_openssl_rng_api(&impl->openssl);
+    if (impl->crypto == NULL || impl->rng == NULL) {
+        ssh_openssl_crypto_free(&impl->openssl);
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+void ssh_crypto_close(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl = crypto_impl_mut(crypto_ctx);
+
+    if (impl == NULL) {
+        return;
+    }
+    ssh_openssl_crypto_free(&impl->openssl);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+}
+
+const ssh_crypto_api_t *ssh_crypto_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->crypto : NULL;
+}
+
+const ssh_rng_api_t *ssh_crypto_rng_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->rng : NULL;
 }

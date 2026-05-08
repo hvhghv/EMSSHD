@@ -145,16 +145,11 @@ int main(void)
     CHECK(strcmp(parsed.authorized_keys_file, ".ssh/authorized_keys") == 0);
     CHECK(parsed.has_host_key);
     CHECK(strcmp(parsed.host_key_file, "/etc/emssh/hostkey.p256.raw") == 0);
-    CHECK(parsed.has_kex_algorithms);
-    CHECK(strcmp(parsed.kex_algorithms, "curve25519-sha256") == 0);
-    CHECK(parsed.has_hostkey_algorithms);
-    CHECK(strcmp(parsed.hostkey_algorithms, "ecdsa-sha2-nistp256") == 0);
-    CHECK(parsed.has_ciphers);
-    CHECK(strcmp(parsed.ciphers, "aes128-ctr") == 0);
-    CHECK(parsed.has_macs);
-    CHECK(strcmp(parsed.macs, "hmac-sha2-256") == 0);
-    CHECK(parsed.has_compression_algorithms);
-    CHECK(strcmp(parsed.compression_algorithms, "none") == 0);
+    CHECK(!parsed.has_kex_algorithms);
+    CHECK(!parsed.has_hostkey_algorithms);
+    CHECK(!parsed.has_ciphers);
+    CHECK(!parsed.has_macs);
+    CHECK(!parsed.has_compression_algorithms);
 
     ssh_server_config_defaults(&server_config);
     ssh_server_session_options_defaults(&session_options);
@@ -190,8 +185,8 @@ int main(void)
     CHECK(strcmp(server_config.authorized_keys_file, ".ssh/authorized_keys") == 0);
     CHECK(session_options.sftp_subsystem_name != NULL);
     CHECK(strcmp(session_options.sftp_subsystem_name, "sftp") == 0);
-    CHECK(strcmp(algorithms.kex_algorithms, "curve25519-sha256") == 0);
-    CHECK(strcmp(algorithms.server_host_key_algorithms, "ecdsa-sha2-nistp256") == 0);
+    CHECK(strcmp(algorithms.kex_algorithms, "curve25519-sha256,ecdh-sha2-nistp256") == 0);
+    CHECK(strcmp(algorithms.server_host_key_algorithms, "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-256") == 0);
     CHECK(strcmp(algorithms.encryption_algorithms_client_to_server, "aes128-ctr") == 0);
     CHECK(strcmp(algorithms.mac_algorithms_client_to_server, "hmac-sha2-256") == 0);
     CHECK(strcmp(algorithms.compression_algorithms_client_to_server, "none") == 0);
@@ -209,7 +204,7 @@ int main(void)
     mock.text = config_text_compression_yes;
     mock.text_len = strlen(config_text_compression_yes);
     ssh_sshd_config_file_defaults(&parsed);
-    CHECK(ssh_sshd_config_file_load(&fs, "/etc/ssh/sshd_config", &parsed) == SSH_ERR_UNSUPPORTED);
+    CHECK(ssh_sshd_config_file_load(&fs, "/etc/ssh/sshd_config", &parsed) == SSH_OK);
 
     mock.text = config_text_match_blocks;
     mock.text_len = strlen(config_text_match_blocks);

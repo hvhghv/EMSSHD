@@ -285,27 +285,11 @@ cmake-build\Debug\emssh_minimal_server.exe 2222 sftp_root alice secret hostkey_p
 - 示例默认 accept 1 个连接；可用 `--max-connections N` 顺序处理多个连接；可。`--hostkey-algorithm ecdsa-p256|ed25519` 选择服务。host key 算法。更高并发仍由应用层线程/任务模型扩展。
 ## 8. 下一阶段任务
 
-优先级 P0：终端子系统（PTY/Shell/Exec）
-- [x] N1：新增 `ssh_term_api_t` 抽象（`spawn/read/write/resize/signal/close/wait_exit`），并接入 `ssh_platform`。
-- [x] N2：在 `ssh_server` 增加终端通道状态机，支持 `pty-req`、`shell`、`exec`、`window-change`、`signal`、`eof`、`close`。
-- [x] N3：已落地 POSIX PTY 适配层（`forkpty` + `/bin/sh` / `sh -c`），嵌入式仍可按模板返回 `SSH_ERR_UNSUPPORTED`。
-- [x] N4：已提供 POSIX OpenSSL 终端示例（`embedded_posix_socket_stdio_openssl_server --mode term`）；mixed-mode 仍待实现。
-- [~] N5：测试进行中：已补 `test_posix_term`、`test_connection`/`test_transport` 终端请求覆盖，以及 OpenSSH term interop（shell/exec/exit-status）；非法顺序与更细粒度状态迁移单测继续补齐。
-- [x] N6：当前终端改动未破坏既有回归；SFTP/通用 CTest 与新增 term interop 在本地验证通过。
-
-P0 增量记录（2026-05-06）：
-- 补齐 `running` 阶段 `SSH_MSG_CHANNEL_REQUEST` 处理路径（`window-change/signal/env`），避免误判 unsupported。
-- transport 状态机新增对 `CHANNEL_REQUEST` 的接收状态落点（`SSH_TRANSPORT_STATE_CHANNEL_REQUEST_RECEIVED`）。
-- 新增 `EMSSH_ENABLE_OPENSSH_TERM_INTEROP_TESTS`，可独立启用终端互操作测试（shell + exec）。
-
 优先级 P1：
 - 持续扩展 authorized_keys option 字段（当前已覆盖 `from=`、`emssh-readonly`、`emssh-path-prefix`、`emssh-max-read-end`、`emssh-max-write-end`、`emssh-deny-non-sftp-channel`、`emssh-deny-rename`、`emssh-deny-delete`、`emssh-deny-remove`、`emssh-deny-rmdir`、`emssh-deny-mkdir`、`emssh-deny-open-create`、`emssh-deny-open-trunc`、`emssh-deny-open-append`、`emssh-deny-open-write`、`emssh-deny-open-read`、`emssh-deny-read`、`emssh-deny-realpath`、`emssh-deny-stat`、`emssh-deny-fstat`、`emssh-deny-fsetstat`、`emssh-deny-fsync`、`emssh-deny-statvfs`、`emssh-deny-fstatvfs`、`emssh-deny-opendir`、`emssh-deny-readdir`、`emssh-deny-write`、`emssh-deny-setstat`、`emssh-deny-create`、`emssh-deny-hardlink`）到更多可执行的细粒度权限策略。
 
 优先级 P2：
-- 增加 wolfSSL/OpenSSL crypto backend。
-- 增加 FATFS/LittleFS 示例适配器。
 - 增加 fuzz 初始语料库、字典和 CI 定时 fuzz job。
-- 增加真正并发的多连接 server 示例。
 ## 9. 安全注意事项
 
 - 默认禁用过时算法，例。`ssh-dss`、`diffie-hellman-group1-sha1`、SHA-1 `ssh-rsa`。
@@ -315,6 +299,14 @@ P0 增量记录（2026-05-06）：
 - SFTP 路径必须绑定到虚拟根目录。
 - host key 在生产环境中必须持久化并受保护。
 ## Progress Update (2026-04-30)
+
+- P0 进展（算法来源统一）：`src/core/ssh_transport.c` 的默认算法集回退路径已从 `ssh_kexinit_algorithm_set_defaults()` 切换为 `ssh_crypto_kexinit_defaults()`，当 session 未显式提供 `options.algorithms` 时，协商算法统一由 crypto 抽象层提供。
+- P0 进展（server-sig-algs 决策下沉）：新增 `ssh_crypto_publickey_signature_algorithms()` 抽象接口（`include/emssh/ssh_crypto.h`），并在 `mbedtls`/`mbedtls_legacy`/`openssl`/`wolfssl` 后端实现；`ssh_transport_send_ext_info()` 改为使用该接口，不再读取 `server_config.publickey_signature_algorithms` 覆盖值。
+- P0 进展（sshd_config 算法项忽略）：`src/platform/sshd_config_file.c` 已将 `KexAlgorithms`、`HostKeyAlgorithms`、`Ciphers`、`MACs`、`Compression` 改为“出现即忽略”，`ssh_sshd_config_file_apply()` 不再写入 `algorithms`。
+- P0 进展（示例去手工算法配置）：`examples/linux_posix_stdio_server.c`、`examples/concurrent_server.c`、`examples/minimal_server.c`、`examples/embedded_porting_server.c`、`examples/embedded_posix_socket_stdio_openssl_server.c`、`examples/embedded_freertos_lwip_fatfs_mbedtls_server.c` 已删除 `ssh_crypto_kexinit_defaults()+options.algorithms` 手工接线，改为依赖 core+crypto 默认行为。
+- 本地编译检查：`cmake --build cmake-build --config Debug --parallel` 已验证本次改动链路可编译到链接阶段；当前环境仍存在既有外部链接问题 `mbedtls_hardware_poll`（与本次改动无关），需由平台 RNG 适配继续提供。
+- P0 收尾（测试语义同步，2026-05-08）：`tests/test_sshd_config_file.c` 已更新为“算法项忽略后保持默认算法集”的断言，其中 `server_host_key_algorithms` 预期值与 `ssh_kexinit_algorithm_set_defaults()` 当前默认值保持一致（`ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-256`）。
+- P0 收尾（定向构建核对，2026-05-08）：`test_sshd_config_file`、`test_userauth`、`test_mbedtls_transport` 三个目标均完成源码编译；失败点仍是既有链接缺口 `mbedtls_hardware_poll`，未发现本轮新增编译错误。
 
 - `ssh_crypto_mbedtls.c`: Ed25519 `psa_verify_message()` returning `PSA_ERROR_NOT_SUPPORTED` is now mapped to `SSH_ERR_UNSUPPORTED`.
 - `ssh_userauth.c`: publickey verification now preserves `SSH_ERR_UNSUPPORTED` from crypto backend.
@@ -434,7 +426,4 @@ P0 增量记录（2026-05-06）：
 - P2 progress (concurrent interop automation): added dedicated concurrent-server OpenSSH interop script `tests/interop_openssh_sftp_concurrent.ps1` that starts `emssh_concurrent_server`, launches two password-auth `sftp.exe` clients in parallel, and verifies both upload+download round-trips.
 - `CMakeLists.txt`: added CTest case `interop_openssh_sftp_concurrent_server` (port `22265`, `ServerExe=$<TARGET_FILE:emssh_concurrent_server>`, `ParallelClients=2`, `ServerMaxWorkers=2`) and included it in the interop `RUN_SERIAL` set.
 - Validation (2026-04-30): `cmake -S . -B cmake-build -DEMSSH_ENABLE_OPENSSH_INTEROP_TESTS=ON`; `cmake --build cmake-build --config Debug --parallel`; `ctest --test-dir cmake-build -C Debug -R "interop_openssh_sftp_concurrent_server" --output-on-failure`; `ctest --test-dir cmake-build -C Debug -R "test_transport|test_userauth|test_mbedtls_crypto|test_mbedtls_transport|interop_openssh_sftp_ecdsa$|interop_openssh_sftp_rsa$|interop_openssh_sftp_rsa_sha1_denied$|interop_openssh_sftp_ed25519$" --output-on-failure` all passed.
-
-
-
 

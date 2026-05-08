@@ -1,8 +1,8 @@
 #include "emssh/crypto_mbedtls.h"
 
-#include <stdlib.h>
 #include <string.h>
 
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_buffer.h"
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_error.h"
@@ -14,8 +14,10 @@
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/entropy.h>
+#include <mbedtls/build_info.h>
 #include <mbedtls/rsa.h>
 #include <mbedtls/md.h>
+#include <mbedtls/pk.h>
 
 typedef struct ssh_mbedtls_legacy_state {
     mbedtls_entropy_context entropy;
@@ -28,6 +30,7 @@ typedef struct ssh_mbedtls_legacy_state {
 
 #define SSH_MBEDTLS_LEGACY_HOSTKEY_NONE 0
 #define SSH_MBEDTLS_LEGACY_HOSTKEY_ECDSA_P256 1
+#define SSH_MBEDTLS_LEGACY_PEM_PARSE_MAX_BYTES 8192u
 
 static int view_eq(ssh_string_view_t view, const char *value)
 {
@@ -1150,21 +1153,89 @@ static void mbedtls_secure_zero(void *ctx, void *ptr, size_t len)
     secure_zero_bytes(ptr, len);
 }
 
+static int mbedtls_hostkey_import_private_auto(
+    void *ctx,
+    ssh_string_view_t hostkey_algorithm,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || private_key_data == NULL || private_key_data_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256")) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return ssh_mbedtls_crypto_import_ecdsa_p256_hostkey_auto(
+        crypto,
+        private_key_data,
+        private_key_data_len);
+}
+
+static int mbedtls_hostkey_export_private(
+    void *ctx,
+    ssh_string_view_t hostkey_algorithm,
+    uint8_t *private_key,
+    size_t private_key_capacity,
+    size_t *private_key_len)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || private_key == NULL || private_key_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256")) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return ssh_mbedtls_crypto_export_hostkey_private(
+        crypto,
+        private_key,
+        private_key_capacity,
+        private_key_len);
+}
+
+static int mbedtls_hostkey_generate(void *ctx, ssh_string_view_t hostkey_algorithm)
+{
+    ssh_mbedtls_crypto_t *crypto = (ssh_mbedtls_crypto_t *)ctx;
+
+    if (crypto == NULL || hostkey_algorithm.data == NULL || hostkey_algorithm.len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256")) {
+        return ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    }
+    if (view_eq(hostkey_algorithm, "ssh-ed25519")) {
+        return ssh_mbedtls_crypto_generate_ed25519_hostkey(crypto);
+    }
+    return SSH_ERR_UNSUPPORTED;
+}
+
+static void mbedtls_kexinit_defaults(void *ctx, ssh_kexinit_algorithm_set_t *algorithms)
+{
+    (void)ctx;
+    if (algorithms == NULL) {
+        return;
+    }
+    ssh_mbedtls_kexinit_algorithm_set_defaults(algorithms);
+}
+
 int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx)
 {
     static const uint8_t pers[] = "emssh-mbedtls-legacy";
     ssh_mbedtls_legacy_state_t *state;
+    typedef char emssh_legacy_state_fits[
+        (sizeof(ssh_mbedtls_legacy_state_t) <= EMSSH_MBEDTLS_BACKEND_STORAGE_BYTES) ? 1 : -1];
     int rc;
 
     if (ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    (void)sizeof(emssh_legacy_state_fits);
     memset(ctx, 0, sizeof(*ctx));
-    state = (ssh_mbedtls_legacy_state_t *)calloc(1u, sizeof(*state));
-    if (state == NULL) {
-        return SSH_ERR_PLATFORM;
-    }
+    state = (ssh_mbedtls_legacy_state_t *)ctx->backend_storage;
+    memset(state, 0, sizeof(*state));
 
     mbedtls_entropy_init(&state->entropy);
     mbedtls_ctr_drbg_init(&state->drbg);
@@ -1177,7 +1248,6 @@ int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx)
     if (rc != 0) {
         mbedtls_ctr_drbg_free(&state->drbg);
         mbedtls_entropy_free(&state->entropy);
-        free(state);
         return SSH_ERR_PLATFORM;
     }
     state->drbg_ready = 1;
@@ -1192,6 +1262,10 @@ int ssh_mbedtls_crypto_init(ssh_mbedtls_crypto_t *ctx)
     ctx->api.derive_key = mbedtls_derive_key;
     ctx->api.cipher_crypt = legacy_cipher_crypt;
     ctx->api.mac_compute = mbedtls_mac_compute;
+    ctx->api.hostkey_import_private_auto = mbedtls_hostkey_import_private_auto;
+    ctx->api.hostkey_export_private = mbedtls_hostkey_export_private;
+    ctx->api.hostkey_generate = mbedtls_hostkey_generate;
+    ctx->api.kexinit_defaults = mbedtls_kexinit_defaults;
     ctx->api.secure_zero = mbedtls_secure_zero;
     ctx->api.ctx = ctx;
 
@@ -1217,7 +1291,6 @@ void ssh_mbedtls_crypto_free(ssh_mbedtls_crypto_t *ctx)
         mbedtls_ctr_drbg_free(&state->drbg);
         mbedtls_entropy_free(&state->entropy);
         secure_zero_bytes(state, sizeof(*state));
-        free(state);
     }
 
     secure_zero_bytes(ctx, sizeof(*ctx));
@@ -1291,6 +1364,117 @@ int ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(
     return SSH_OK;
 }
 
+int ssh_mbedtls_crypto_import_ecdsa_p256_hostkey_auto(
+    ssh_mbedtls_crypto_t *ctx,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len)
+{
+    ssh_mbedtls_legacy_state_t *state;
+    int status;
+
+    if (ctx == NULL || private_key_data == NULL || private_key_data_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    state = legacy_state(ctx);
+
+    status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(ctx, private_key_data, private_key_data_len);
+    if (status == SSH_OK) {
+        return SSH_OK;
+    }
+
+#if defined(MBEDTLS_PK_PARSE_C) && defined(MBEDTLS_PK_C) && defined(MBEDTLS_ECP_C)
+    {
+        mbedtls_pk_context pk;
+        mbedtls_ecp_keypair *ec;
+        uint8_t raw_private[32];
+        int rc;
+        int parse_ok;
+        uint8_t pem_buf[SSH_MBEDTLS_LEGACY_PEM_PARSE_MAX_BYTES + 1u];
+        size_t i;
+        int has_nul;
+
+        mbedtls_pk_init(&pk);
+        parse_ok = 0;
+        rc = mbedtls_pk_parse_key(
+            &pk,
+            private_key_data,
+            private_key_data_len,
+            NULL,
+            0u,
+            (state != NULL && state->drbg_ready) ? mbedtls_ctr_drbg_random : NULL,
+            (state != NULL && state->drbg_ready) ? &state->drbg : NULL);
+        if (rc == 0) {
+            parse_ok = 1;
+        } else {
+            has_nul = 0;
+            for (i = 0u; i < private_key_data_len; ++i) {
+                if (private_key_data[i] == 0u) {
+                    has_nul = 1;
+                    break;
+                }
+            }
+
+            if (!has_nul) {
+                if (private_key_data_len > SSH_MBEDTLS_LEGACY_PEM_PARSE_MAX_BYTES) {
+                    mbedtls_pk_free(&pk);
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                memcpy(pem_buf, private_key_data, private_key_data_len);
+                pem_buf[private_key_data_len] = '\0';
+                rc = mbedtls_pk_parse_key(
+                    &pk,
+                    pem_buf,
+                    private_key_data_len + 1u,
+                    NULL,
+                    0u,
+                    (state != NULL && state->drbg_ready) ? mbedtls_ctr_drbg_random : NULL,
+                    (state != NULL && state->drbg_ready) ? &state->drbg : NULL);
+                secure_zero_bytes(pem_buf, private_key_data_len + 1u);
+                if (rc == 0) {
+                    parse_ok = 1;
+                }
+            }
+        }
+        if (!parse_ok) {
+            mbedtls_pk_free(&pk);
+            return SSH_ERR_UNSUPPORTED;
+        }
+        if (mbedtls_pk_get_type(&pk) != MBEDTLS_PK_ECKEY) {
+            mbedtls_pk_free(&pk);
+            return SSH_ERR_UNSUPPORTED;
+        }
+
+        ec = mbedtls_pk_ec(pk);
+        if (ec == NULL) {
+            mbedtls_pk_free(&pk);
+            return SSH_ERR_PLATFORM;
+        }
+        if (ec->grp.id != MBEDTLS_ECP_DP_SECP256R1) {
+            mbedtls_pk_free(&pk);
+            return SSH_ERR_UNSUPPORTED;
+        }
+        if (mbedtls_mpi_size(&ec->d) == 0u || mbedtls_mpi_size(&ec->d) > sizeof(raw_private)) {
+            mbedtls_pk_free(&pk);
+            return SSH_ERR_UNSUPPORTED;
+        }
+
+        rc = mbedtls_mpi_write_binary(&ec->d, raw_private, sizeof(raw_private));
+        mbedtls_pk_free(&pk);
+        if (rc != 0) {
+            secure_zero_bytes(raw_private, sizeof(raw_private));
+            return SSH_ERR_PLATFORM;
+        }
+
+        status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(ctx, raw_private, sizeof(raw_private));
+        secure_zero_bytes(raw_private, sizeof(raw_private));
+        return status;
+    }
+#else
+    (void)status;
+    return SSH_ERR_UNSUPPORTED;
+#endif
+}
+
 int ssh_mbedtls_crypto_export_hostkey_private(
     ssh_mbedtls_crypto_t *ctx,
     uint8_t *private_key,
@@ -1347,7 +1531,7 @@ void ssh_mbedtls_kexinit_algorithm_set_defaults(ssh_kexinit_algorithm_set_t *alg
     }
 
     /*
-     * Keep legacy backend on the conservative ECDH-P256 path.
+     * Keep legacy crypto_ctx on the conservative ECDH-P256 path.
      * This avoids curve25519-specific interop/runtime instability on some
      * musl/embedded targets while keeping standards-compliant SSH KEX.
      */
@@ -1361,4 +1545,89 @@ void ssh_mbedtls_kexinit_algorithm_set_defaults(ssh_kexinit_algorithm_set_t *alg
     algorithms->compression_algorithms_server_to_client = "none";
     algorithms->languages_client_to_server = "";
     algorithms->languages_server_to_client = "";
+}
+
+typedef struct ssh_crypto_impl {
+    const ssh_crypto_api_t *crypto;
+    const ssh_rng_api_t *rng;
+    ssh_mbedtls_crypto_t mbedtls;
+} ssh_crypto_impl_t;
+
+static ssh_crypto_impl_t *crypto_impl_mut(ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+static const ssh_crypto_impl_t *crypto_impl(const ssh_crypto_context_t *crypto_ctx)
+{
+    if (crypto_ctx == NULL) {
+        return NULL;
+    }
+    return (const ssh_crypto_impl_t *)crypto_ctx->opaque_words;
+}
+
+const char *ssh_crypto_name(void)
+{
+    return "mbedtls";
+}
+
+const char *ssh_crypto_publickey_signature_algorithms(void)
+{
+    return "rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256";
+}
+
+int ssh_crypto_open(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl;
+    typedef char emssh_crypto_impl_fits[
+        (sizeof(ssh_crypto_impl_t) <= sizeof(((ssh_crypto_context_t *)0)->opaque_words)) ? 1 : -1];
+    int status;
+
+    if (crypto_ctx == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    (void)sizeof(emssh_crypto_impl_fits);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+    impl = crypto_impl_mut(crypto_ctx);
+
+    status = ssh_mbedtls_crypto_init(&impl->mbedtls);
+    if (status != SSH_OK) {
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return status;
+    }
+    impl->crypto = ssh_mbedtls_crypto_api(&impl->mbedtls);
+    impl->rng = ssh_mbedtls_rng_api(&impl->mbedtls);
+    if (impl->crypto == NULL || impl->rng == NULL) {
+        ssh_mbedtls_crypto_free(&impl->mbedtls);
+        memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+void ssh_crypto_close(ssh_crypto_context_t *crypto_ctx)
+{
+    ssh_crypto_impl_t *impl = crypto_impl_mut(crypto_ctx);
+
+    if (impl == NULL) {
+        return;
+    }
+    ssh_mbedtls_crypto_free(&impl->mbedtls);
+    memset(crypto_ctx, 0, sizeof(*crypto_ctx));
+}
+
+const ssh_crypto_api_t *ssh_crypto_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->crypto : NULL;
+}
+
+const ssh_rng_api_t *ssh_crypto_rng_api(const ssh_crypto_context_t *crypto_ctx)
+{
+    const ssh_crypto_impl_t *impl = crypto_impl(crypto_ctx);
+    return impl != NULL ? impl->rng : NULL;
 }

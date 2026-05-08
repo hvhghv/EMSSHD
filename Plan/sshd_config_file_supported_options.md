@@ -42,13 +42,11 @@
 - `AuthorizedKeysFile`：映射到 `server_config->authorized_keys_file`。
 - `ChrootDirectory`：映射到 `ssh_sshd_config_file_apply(..., const char **chroot_directory)` 输出参数。
 - `HostKey`：映射到 `ssh_sshd_config_file_apply(..., const char **host_key_file)` 输出参数。
-- `KexAlgorithms`：映射到 `algorithms->kex_algorithms`。
-- `HostKeyAlgorithms`：映射到 `algorithms->server_host_key_algorithms`。
-- `Ciphers`：映射到双向加密算法（C2S/S2C）。
-- `MACs`：映射到双向 MAC 算法（C2S/S2C）。
-- `Compression`：
-  - `no` -> 映射为 `"none"`；
-  - `yes` -> 返回 `SSH_ERR_UNSUPPORTED`（当前不支持压缩）。
+- `KexAlgorithms`：解析兼容，但 `apply()` 阶段忽略（不再写入算法集）。
+- `HostKeyAlgorithms`：解析兼容，但 `apply()` 阶段忽略（不再写入算法集）。
+- `Ciphers`：解析兼容，但 `apply()` 阶段忽略（不再写入算法集）。
+- `MACs`：解析兼容，但 `apply()` 阶段忽略（不再写入算法集）。
+- `Compression`：解析兼容，但当前阶段统一忽略（不再作为可配置能力项生效）。
 
 ## `Match` 支持范围
 
@@ -97,6 +95,9 @@
 - `HostKey`：
   - 当前仅在 mbedtls 路径有接线；
   - 读取的是 emssh/mbedtls 内部私钥字节格式，不是 OpenSSH PEM。
+- 算法集来源：
+  - `KexAlgorithms` / `HostKeyAlgorithms` / `Ciphers` / `MACs` / `Compression` 在 `sshd_config` 中即使出现也不生效；
+  - 最终协商算法统一来自 crypto 抽象层默认算法集（core 通过 `ssh_crypto_kexinit_defaults()` 获取）。
 
 ## 参数优先级（Linux 示例）
 
@@ -111,4 +112,3 @@
 - `ListenAddress`
 - `timeout`（`--timeout-ms` 覆盖配置/默认）
 - `SFTP root`（`--root-dir` 覆盖 `ChrootDirectory`）
-

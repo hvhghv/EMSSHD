@@ -4,6 +4,7 @@
 
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_connection.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_packet.h"
 #include "emssh/ssh_server.h"
@@ -11,10 +12,6 @@
 #include "emssh/ssh_userauth.h"
 
 #define EMSSH_NET_IO_TIMEOUT (-2)
-
-#define EMSSH_AUTO_SERVER_SIG_ALGS_ED25519_SUFFIX ",ssh-ed25519"
-#define EMSSH_AUTO_SERVER_SIG_ALGS_CAPACITY \
-    (sizeof(EMSSH_SERVER_SIG_ALGS_DEFAULT_BASE) + sizeof(EMSSH_AUTO_SERVER_SIG_ALGS_ED25519_SUFFIX) - 1u)
 
 static int is_space(uint8_t c)
 {
@@ -61,41 +58,6 @@ static int name_list_contains(ssh_string_view_t list, const char *name)
     }
 
     return 0;
-}
-
-static const char *resolve_auto_server_sig_algs(
-    const ssh_transport_session_t *session,
-    char *out,
-    size_t out_capacity)
-{
-    ssh_string_view_t hostkey_algorithms;
-    static const char ed25519_suffix[] = EMSSH_AUTO_SERVER_SIG_ALGS_ED25519_SUFFIX;
-    size_t base_len;
-    size_t suffix_len;
-
-    if (session == NULL || out == NULL || out_capacity == 0u) {
-        return "";
-    }
-
-    base_len = strlen(EMSSH_SERVER_SIG_ALGS_DEFAULT_BASE);
-    if (base_len + 1u > out_capacity) {
-        return "";
-    }
-    memcpy(out, EMSSH_SERVER_SIG_ALGS_DEFAULT_BASE, base_len + 1u);
-
-    hostkey_algorithms.data = (const uint8_t *)session->server_algorithms.server_host_key_algorithms;
-    hostkey_algorithms.len = session->server_algorithms.server_host_key_algorithms != NULL ?
-        strlen(session->server_algorithms.server_host_key_algorithms) : 0u;
-    if (!name_list_contains(hostkey_algorithms, "ssh-ed25519")) {
-        return out;
-    }
-
-    suffix_len = sizeof(ed25519_suffix) - 1u;
-    if (base_len + suffix_len + 1u > out_capacity) {
-        return out;
-    }
-    memcpy(out + base_len, ed25519_suffix, suffix_len + 1u);
-    return out;
 }
 
 static int signature_algorithms_valid(const char *value)
@@ -452,10 +414,13 @@ static int receive_plain_packet(
 
 static void transport_copy_algorithms(
     ssh_kexinit_algorithm_set_t *dst,
+    const ssh_crypto_api_t *crypto,
     const ssh_kexinit_algorithm_set_t *src)
 {
     if (src != NULL) {
         *dst = *src;
+    } else if (crypto != NULL && crypto->kexinit_defaults != NULL) {
+        crypto->kexinit_defaults(crypto->ctx, dst);
     } else {
         ssh_kexinit_algorithm_set_defaults(dst);
     }
@@ -645,7 +610,10 @@ int ssh_transport_session_init(
     session->last_channel_request_type[0] = '\0';
     session->last_channel_request_type_valid = 0;
     session->last_channel_request_want_reply = 0;
-    transport_copy_algorithms(&session->server_algorithms, server_algorithms);
+    transport_copy_algorithms(
+        &session->server_algorithms,
+        session->server->platform.crypto,
+        server_algorithms);
     ssh_packet_protection_init(&session->inbound);
     ssh_packet_protection_init(&session->outbound);
     return SSH_OK;
@@ -1180,7 +1148,6 @@ int ssh_transport_send_ext_info(
 {
     uint8_t payload_storage[EMSSH_MAX_EXT_INFO_PAYLOAD];
     ssh_buffer_t payload;
-    char auto_signature_algorithms[EMSSH_AUTO_SERVER_SIG_ALGS_CAPACITY];
     const char *signature_algorithms;
     int status;
 
@@ -1194,13 +1161,10 @@ int ssh_transport_send_ext_info(
     if (session->server->config.publickey_auth == NULL) {
         signature_algorithms = "";
     } else {
-        signature_algorithms = session->server->config.publickey_signature_algorithms;
-        if (signature_algorithms == NULL) {
-            signature_algorithms = resolve_auto_server_sig_algs(
-                session,
-                auto_signature_algorithms,
-                sizeof(auto_signature_algorithms));
-        }
+        signature_algorithms = ssh_crypto_publickey_signature_algorithms();
+    }
+    if (signature_algorithms == NULL) {
+        signature_algorithms = "";
     }
     if (!signature_algorithms_valid(signature_algorithms)) {
         return SSH_ERR_INVALID_ARGUMENT;

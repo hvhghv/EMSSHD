@@ -7,12 +7,15 @@
 #include "emssh/ssh_kex.h"
 #include "emssh/ssh_platform.h"
 
+#define EMSSH_MBEDTLS_BACKEND_STORAGE_BYTES 4096u
+
 typedef struct ssh_mbedtls_crypto {
     ssh_crypto_api_t api;
     ssh_rng_api_t rng;
     uint32_t hostkey_id;
     int owns_hostkey;
     void *backend_state;
+    uint8_t backend_storage[EMSSH_MBEDTLS_BACKEND_STORAGE_BYTES];
     int initialized;
 } ssh_mbedtls_crypto_t;
 
@@ -31,6 +34,15 @@ int ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(
     ssh_mbedtls_crypto_t *ctx,
     const uint8_t *private_key,
     size_t private_key_len);
+
+/*
+ * Import ECDSA P-256 hostkey from raw32, DER or PEM (when parser modules are enabled).
+ * This is backend-level helper and keeps PEM/DER parsing out of protocol core.
+ */
+int ssh_mbedtls_crypto_import_ecdsa_p256_hostkey_auto(
+    ssh_mbedtls_crypto_t *ctx,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len);
 
 int ssh_mbedtls_crypto_export_hostkey_private(
     ssh_mbedtls_crypto_t *ctx,

@@ -4,19 +4,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "emssh/crypto_mbedtls.h"
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/platform_tcp.h"
 #include "emssh/sftp.h"
 #include "emssh/ssh_buffer.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
 #define MINIMAL_SERVER_MAX_AUTHORIZED_KEYS 8u
 #define MINIMAL_SERVER_MAX_FROM_PATTERNS 128u
 #define MINIMAL_SERVER_MAX_PATH_PREFIX EMSSH_SFTP_MAX_PATH
-#define MINIMAL_SERVER_SERVER_SIG_ALGS_WITHOUT_ED25519 "rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"
-#define MINIMAL_SERVER_SERVER_SIG_ALGS_WITH_ED25519 "rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256,ssh-ed25519"
 
 typedef struct authorized_publickey {
     char algorithm[64];
@@ -121,6 +119,16 @@ static ssh_string_view_t sv(const char *value)
     view.data = (const uint8_t *)value;
     view.len = value != NULL ? strlen(value) : 0u;
     return view;
+}
+
+static ssh_string_view_t hostkey_algorithm_view(hostkey_algorithm_t algorithm)
+{
+    static const char k_alg_ecdsa[] = "ecdsa-sha2-nistp256";
+    static const char k_alg_ed25519[] = "ssh-ed25519";
+    if (algorithm == HOSTKEY_ALGORITHM_ED25519) {
+        return sv(k_alg_ed25519);
+    }
+    return sv(k_alg_ecdsa);
 }
 
 static int string_view_matches(const char *expected, const char *actual, size_t actual_len)
@@ -1423,26 +1431,37 @@ static int load_authorized_pubkeys(const char *path, password_auth_ctx_t *auth)
 }
 
 static int configure_hostkey(
-    ssh_mbedtls_crypto_t *crypto,
+    ssh_crypto_context_t *crypto_ctx,
     const char *hostkey_path,
     hostkey_algorithm_t hostkey_algorithm)
 {
+    const ssh_crypto_api_t *crypto;
+    ssh_string_view_t hostkey_alg;
     uint8_t private_key[128];
     size_t private_key_len;
     int status;
 
-    if (crypto == NULL) {
+    if (crypto_ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    crypto = ssh_crypto_api(crypto_ctx);
+    if (crypto == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+    hostkey_alg = hostkey_algorithm_view(hostkey_algorithm);
 
     if (hostkey_path != NULL) {
         status = load_file(hostkey_path, private_key, sizeof(private_key), &private_key_len);
         if (status == SSH_OK) {
-            if (hostkey_algorithm == HOSTKEY_ALGORITHM_ED25519) {
-                status = ssh_mbedtls_crypto_import_ed25519_hostkey(crypto, private_key, private_key_len);
-            } else {
-                status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(crypto, private_key, private_key_len);
+            if (crypto->hostkey_import_private_auto == NULL) {
+                memset(private_key, 0, sizeof(private_key));
+                return SSH_ERR_UNSUPPORTED;
             }
+            status = crypto->hostkey_import_private_auto(
+                crypto->ctx,
+                hostkey_alg,
+                private_key,
+                private_key_len);
             memset(private_key, 0, sizeof(private_key));
             return status;
         }
@@ -1451,17 +1470,20 @@ static int configure_hostkey(
         }
     }
 
-    if (hostkey_algorithm == HOSTKEY_ALGORITHM_ED25519) {
-        status = ssh_mbedtls_crypto_generate_ed25519_hostkey(crypto);
-    } else {
-        status = ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    if (crypto->hostkey_generate == NULL) {
+        return SSH_ERR_UNSUPPORTED;
     }
+    status = crypto->hostkey_generate(crypto->ctx, hostkey_alg);
     if (status != SSH_OK || hostkey_path == NULL) {
         return status;
     }
 
-    status = ssh_mbedtls_crypto_export_hostkey_private(
-        crypto,
+    if (crypto->hostkey_export_private == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_export_private(
+        crypto->ctx,
+        hostkey_alg,
         private_key,
         sizeof(private_key),
         &private_key_len);
@@ -1491,12 +1513,89 @@ static int has_authorized_ed25519_key(const password_auth_ctx_t *auth)
 
 static int detect_ed25519_hostkey_support(void)
 {
-    return ssh_mbedtls_probe_ed25519_hostkey_support() == SSH_OK;
+    ssh_crypto_context_t crypto_ctx;
+    const ssh_crypto_api_t *crypto;
+    int status;
+
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
+    status = ssh_crypto_open(&crypto_ctx);
+    if (status != SSH_OK) {
+        return 0;
+    }
+    crypto = ssh_crypto_api(&crypto_ctx);
+    if (crypto == NULL || crypto->hostkey_generate == NULL) {
+        ssh_crypto_close(&crypto_ctx);
+        return 0;
+    }
+    status = crypto->hostkey_generate(
+        crypto->ctx,
+        hostkey_algorithm_view(HOSTKEY_ALGORITHM_ED25519));
+    ssh_crypto_close(&crypto_ctx);
+    return status == SSH_OK;
 }
 
 static int detect_ed25519_publickey_verify_support(void)
 {
-    return ssh_mbedtls_probe_ed25519_publickey_verify_support() == SSH_OK;
+    ssh_crypto_context_t crypto_ctx;
+    const ssh_crypto_api_t *crypto;
+    ssh_string_view_t algorithm;
+    uint8_t hostkey_blob[EMSSH_MAX_HOST_KEY_BLOB];
+    uint8_t exchange_hash[32];
+    uint8_t signature[EMSSH_MAX_SIGNATURE];
+    size_t hostkey_blob_len;
+    size_t signature_len;
+    int status;
+
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
+    status = ssh_crypto_open(&crypto_ctx);
+    if (status != SSH_OK) {
+        return 0;
+    }
+    crypto = ssh_crypto_api(&crypto_ctx);
+    if (crypto == NULL || crypto->hostkey_generate == NULL || crypto->hostkey_public == NULL ||
+        crypto->hostkey_sign == NULL || crypto->publickey_verify == NULL) {
+        ssh_crypto_close(&crypto_ctx);
+        return 0;
+    }
+    algorithm = hostkey_algorithm_view(HOSTKEY_ALGORITHM_ED25519);
+    status = crypto->hostkey_generate(crypto->ctx, algorithm);
+    if (status != SSH_OK) {
+        ssh_crypto_close(&crypto_ctx);
+        return 0;
+    }
+
+    memset(exchange_hash, 0xA5, sizeof(exchange_hash));
+    hostkey_blob_len = 0u;
+    signature_len = 0u;
+    status = crypto->hostkey_public(
+        crypto->ctx,
+        algorithm,
+        hostkey_blob,
+        sizeof(hostkey_blob),
+        &hostkey_blob_len);
+    if (status == SSH_OK) {
+        status = crypto->hostkey_sign(
+            crypto->ctx,
+            algorithm,
+            exchange_hash,
+            sizeof(exchange_hash),
+            signature,
+            sizeof(signature),
+            &signature_len);
+    }
+    if (status == SSH_OK) {
+        status = crypto->publickey_verify(
+            crypto->ctx,
+            algorithm,
+            hostkey_blob,
+            hostkey_blob_len,
+            exchange_hash,
+            sizeof(exchange_hash),
+            signature,
+            signature_len);
+    }
+    ssh_crypto_close(&crypto_ctx);
+    return status == SSH_OK;
 }
 
 int main(int argc, char **argv)
@@ -1508,7 +1607,7 @@ int main(int argc, char **argv)
     unsigned connection_count;
     int positional_argc;
     hostkey_algorithm_t hostkey_algorithm;
-    ssh_mbedtls_crypto_t crypto;
+    ssh_crypto_context_t crypto_ctx;
     ssh_tcp_platform_t tcp;
     ssh_tcp_listener_t listener;
     ssh_tcp_conn_t conn;
@@ -1516,7 +1615,6 @@ int main(int argc, char **argv)
     ssh_platform_t platform;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     ssh_server_t server;
     password_auth_ctx_t auth;
     int status;
@@ -1589,7 +1687,7 @@ int main(int argc, char **argv)
     hostkey_path = positional_argc >= 6 ? argv[5] : NULL;
     authorized_keys_path = positional_argc >= 7 ? argv[6] : NULL;
 
-    memset(&crypto, 0, sizeof(crypto));
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
     memset(&tcp, 0, sizeof(tcp));
     memset(&listener, 0, sizeof(listener));
     memset(&conn, 0, sizeof(conn));
@@ -1601,14 +1699,14 @@ int main(int argc, char **argv)
     initialized_fs = 0;
     initialized_server = 0;
 
-    status = ssh_mbedtls_crypto_init(&crypto);
+    status = ssh_crypto_open(&crypto_ctx);
     if (status != SSH_OK) {
         fprintf(stderr, "crypto init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
 
-    status = configure_hostkey(&crypto, hostkey_path, hostkey_algorithm);
+    status = configure_hostkey(&crypto_ctx, hostkey_path, hostkey_algorithm);
     if (status != SSH_OK) {
         fprintf(stderr, "hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -1644,26 +1742,19 @@ int main(int argc, char **argv)
         if (has_authorized_ed25519_key(&auth)) {
             auth.ed25519_publickey_supported = detect_ed25519_publickey_verify_support();
             if (!auth.ed25519_publickey_supported) {
-                fprintf(stderr, "ed25519 publickey verify unsupported on this crypto backend\n");
+                fprintf(stderr, "ed25519 publickey verify unsupported on this crypto context\n");
             }
         }
     }
 
     platform.net = ssh_tcp_net_api(&tcp);
     platform.fs = ssh_stdio_fs_api(&fs);
-    platform.crypto = ssh_mbedtls_crypto_api(&crypto);
-    platform.rng = ssh_mbedtls_rng_api(&crypto);
+    platform.crypto = ssh_crypto_api(&crypto_ctx);
+    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
 
     ssh_server_config_defaults(&config);
     config.password_auth = password_auth;
     config.publickey_auth = authorized_keys_path != NULL ? publickey_auth : NULL;
-    if (config.publickey_auth == NULL) {
-        config.publickey_signature_algorithms = "";
-    } else if (auth.ed25519_publickey_supported && has_authorized_ed25519_key(&auth)) {
-        config.publickey_signature_algorithms = MINIMAL_SERVER_SERVER_SIG_ALGS_WITH_ED25519;
-    } else {
-        config.publickey_signature_algorithms = MINIMAL_SERVER_SERVER_SIG_ALGS_WITHOUT_ED25519;
-    }
     config.auth_ctx = &auth;
 
     status = ssh_server_init(&server, &platform, &config);
@@ -1688,13 +1779,6 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     ssh_server_session_options_defaults(&options);
-    ssh_mbedtls_kexinit_algorithm_set_defaults(&algorithms);
-    if (hostkey_algorithm == HOSTKEY_ALGORITHM_ED25519) {
-        algorithms.server_host_key_algorithms = "ssh-ed25519";
-    } else {
-        algorithms.server_host_key_algorithms = "ecdsa-sha2-nistp256";
-    }
-    options.algorithms = &algorithms;
     options.timeout_ms = 30000u;
     options.max_sftp_packets = 0u;
     options.sftp_policy = active_sftp_policy;
@@ -1737,7 +1821,7 @@ cleanup:
         ssh_tcp_platform_deinit(&tcp);
     }
     if (initialized_crypto) {
-        ssh_mbedtls_crypto_free(&crypto);
+        ssh_crypto_close(&crypto_ctx);
     }
 
     return status == SSH_OK ? 0 : 1;

@@ -16,13 +16,13 @@
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/sftp.h"
 #include "emssh/sshd_config_file.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
 #if !defined(EMSSH_USE_MBEDTLS)
 #error "linux_posix_stdio_server requires mbedtls legacy backend"
 #endif
-#include "emssh/crypto_mbedtls.h"
 
 #define LINUX_SERVER_DEFAULT_PORT 22u
 #define LINUX_SERVER_DEFAULT_TIMEOUT_MS 30000u
@@ -31,6 +31,7 @@
 #define LINUX_SERVER_MAX_PATH 512u
 #define LINUX_SERVER_MAX_USERNAME 128u
 #define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
+#define LINUX_SERVER_MAX_HOSTKEY_FILE_BYTES 4096u
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
 #define LINUX_STAGE_MAIN_INIT 10
@@ -170,9 +171,9 @@ static int install_linux_server_fatal_handlers(void)
 }
 
 typedef enum crypto_backend {
-    CRYPTO_BACKEND_NONE = 0,
-    CRYPTO_BACKEND_MBEDTLS
-} crypto_backend_t;
+    CRYPTO_PROVIDER_NONE = 0,
+    CRYPTO_PROVIDER_MBEDTLS
+} crypto_provider_t;
 
 typedef enum session_mode {
     SESSION_MODE_AUTO = 0,
@@ -198,7 +199,7 @@ typedef struct program_options {
     unsigned max_workers;
     unsigned worker_stack_kb;
     session_mode_t session_mode;
-    crypto_backend_t backend;
+    crypto_provider_t crypto_provider;
     int port_overridden;
     int listen_overridden;
     int timeout_overridden;
@@ -217,14 +218,13 @@ typedef struct app_shared {
     ssh_sshd_config_file_t sshd_config;
     ssh_server_config_t base_server_config;
     ssh_server_session_options_t base_session_options;
-    ssh_kexinit_algorithm_set_t base_algorithms;
     char sshd_config_path[LINUX_SERVER_MAX_PATH];
     int has_sshd_config_path;
     const char *chroot_dir_from_config;
     const char *hostkey_path_from_config;
     uint16_t port;
     session_mode_t session_mode;
-    crypto_backend_t backend;
+    crypto_provider_t crypto_provider;
     int sftp_trace_enabled;
     uint8_t mbedtls_hostkey_private[LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE];
     size_t mbedtls_hostkey_private_len;
@@ -236,12 +236,12 @@ typedef struct auth_runtime_context {
     const ssh_server_config_t *session_server_config;
 } auth_runtime_context_t;
 
-typedef struct backend_instance {
-    crypto_backend_t type;
+typedef struct crypto_instance {
+    crypto_provider_t type;
     ssh_platform_t platform;
-    ssh_mbedtls_crypto_t mbedtls;
+    ssh_crypto_context_t crypto_ctx;
     int initialized;
-} backend_instance_t;
+} crypto_instance_t;
 
 typedef struct worker_task {
     app_shared_t *shared;
@@ -264,7 +264,7 @@ static void usage(const char *program)
         "  --max-workers <n>        Parallel worker threads (default: 16)\n"
         "  --worker-stack-kb <n>    Worker thread stack size in KB (default: 1024)\n"
         "  --session-mode <mode>    auto|sftp|terminal (default: auto)\n"
-        "  --backend <name>         mbedtls|mbedtls-legacy (fixed)\n"
+        "  --backend|--crypto <name>         mbedtls|mbedtls-legacy (fixed)\n"
         "env:\n"
         "  EMSSH_SFTP_TRACE=1       Enable SFTP trace logs (packet type/id/len and result)\n",
         program);
@@ -324,19 +324,15 @@ static int parse_positive_unsigned(const char *text, unsigned *value_out)
     return SSH_OK;
 }
 
-static crypto_backend_t default_backend(void)
+static crypto_provider_t default_crypto_provider(void)
 {
-    return CRYPTO_BACKEND_MBEDTLS;
+    return CRYPTO_PROVIDER_MBEDTLS;
 }
 
-static const char *backend_name(crypto_backend_t backend)
+static const char *crypto_provider_name(crypto_provider_t crypto_provider)
 {
-    switch (backend) {
-    case CRYPTO_BACKEND_MBEDTLS:
-        return "mbedtls-legacy";
-    default:
-        return "unknown";
-    }
+    (void)crypto_provider;
+    return ssh_crypto_name();
 }
 
 static const char *session_mode_name(session_mode_t mode)
@@ -370,14 +366,14 @@ static int parse_session_mode(const char *text, session_mode_t *mode)
     return SSH_ERR_INVALID_ARGUMENT;
 }
 
-static int parse_backend(const char *text, crypto_backend_t *backend)
+static int parse_crypto_provider(const char *text, crypto_provider_t *crypto_provider)
 {
-    if (text == NULL || backend == NULL) {
+    if (text == NULL || crypto_provider == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
     if (strcmp(text, "mbedtls") == 0 || strcmp(text, "mbedtls-legacy") == 0) {
-        *backend = CRYPTO_BACKEND_MBEDTLS;
+        *crypto_provider = CRYPTO_PROVIDER_MBEDTLS;
         return SSH_OK;
     }
 
@@ -1150,7 +1146,7 @@ static void options_defaults(program_options_t *opts)
     opts->max_workers = LINUX_SERVER_DEFAULT_MAX_WORKERS;
     opts->worker_stack_kb = LINUX_SERVER_DEFAULT_WORKER_STACK_KB;
     opts->session_mode = SESSION_MODE_AUTO;
-    opts->backend = default_backend();
+    opts->crypto_provider = default_crypto_provider();
 }
 
 static int env_flag_enabled(const char *name)
@@ -1263,11 +1259,11 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
             }
             continue;
         }
-        if (strcmp(argv[i], "--backend") == 0) {
+        if (strcmp(argv[i], "--backend") == 0 || strcmp(argv[i], "--crypto") == 0) {
             if (i + 1 >= argc) {
                 return SSH_ERR_INVALID_ARGUMENT;
             }
-            status = parse_backend(argv[++i], &opts->backend);
+            status = parse_crypto_provider(argv[++i], &opts->crypto_provider);
             if (status != SSH_OK) {
                 return status;
             }
@@ -1289,7 +1285,7 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    if (opts->backend == CRYPTO_BACKEND_NONE) {
+    if (opts->crypto_provider == CRYPTO_PROVIDER_NONE) {
         return SSH_ERR_UNSUPPORTED;
     }
     return SSH_OK;
@@ -1344,167 +1340,259 @@ static void worker_pool_release_slot(worker_pool_t *pool)
     pthread_mutex_unlock(&pool->lock);
 }
 
-static void backend_instance_deinit(backend_instance_t *backend)
+static void crypto_instance_deinit(crypto_instance_t *crypto_instance)
 {
-    if (backend == NULL || !backend->initialized) {
+    if (crypto_instance == NULL || !crypto_instance->initialized) {
         return;
     }
+    ssh_crypto_close(&crypto_instance->crypto_ctx);
 
-    switch (backend->type) {
-    case CRYPTO_BACKEND_MBEDTLS:
-        ssh_mbedtls_crypto_free(&backend->mbedtls);
-        break;
-    default:
-        break;
-    }
-
-    memset(backend, 0, sizeof(*backend));
+    memset(crypto_instance, 0, sizeof(*crypto_instance));
 }
 
-static int backend_instance_init(backend_instance_t *backend, const app_shared_t *shared)
+static ssh_string_view_t mbedtls_hostkey_algorithm_view(void)
 {
+    static const char k_hostkey_alg[] = "ecdsa-sha2-nistp256";
+    ssh_string_view_t view;
+
+    view.data = (const uint8_t *)k_hostkey_alg;
+    view.len = sizeof(k_hostkey_alg) - 1u;
+    return view;
+}
+
+static int crypto_hostkey_import_private_auto(
+    const ssh_crypto_api_t *crypto,
+    ssh_string_view_t hostkey_algorithm,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len)
+{
+    if (crypto == NULL || crypto->hostkey_import_private_auto == NULL ||
+        hostkey_algorithm.data == NULL || hostkey_algorithm.len == 0u ||
+        private_key_data == NULL || private_key_data_len == 0u) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return crypto->hostkey_import_private_auto(
+        crypto->ctx,
+        hostkey_algorithm,
+        private_key_data,
+        private_key_data_len);
+}
+
+static int crypto_hostkey_export_private(
+    const ssh_crypto_api_t *crypto,
+    ssh_string_view_t hostkey_algorithm,
+    uint8_t *private_key,
+    size_t private_key_capacity,
+    size_t *private_key_len)
+{
+    if (crypto == NULL || crypto->hostkey_export_private == NULL ||
+        hostkey_algorithm.data == NULL || hostkey_algorithm.len == 0u ||
+        private_key == NULL || private_key_len == NULL || private_key_capacity == 0u) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return crypto->hostkey_export_private(
+        crypto->ctx,
+        hostkey_algorithm,
+        private_key,
+        private_key_capacity,
+        private_key_len);
+}
+
+static int crypto_hostkey_generate(
+    const ssh_crypto_api_t *crypto,
+    ssh_string_view_t hostkey_algorithm)
+{
+    if (crypto == NULL || crypto->hostkey_generate == NULL ||
+        hostkey_algorithm.data == NULL || hostkey_algorithm.len == 0u) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return crypto->hostkey_generate(crypto->ctx, hostkey_algorithm);
+}
+
+static int fs_read_all_into_buffer(
+    const ssh_fs_api_t *fs,
+    const char *path,
+    uint8_t *buf,
+    size_t buf_capacity,
+    size_t *out_len)
+{
+    void *handle;
+    size_t total_len;
+    size_t read_len;
     int status;
 
-    if (backend == NULL || shared == NULL) {
+    if (fs == NULL || fs->open == NULL || fs->read == NULL || fs->close == NULL ||
+        path == NULL || buf == NULL || out_len == NULL || buf_capacity == 0u) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    memset(backend, 0, sizeof(*backend));
-    backend->type = shared->backend;
-    backend->platform.net = ssh_posix_net_api((ssh_posix_net_platform_t *)&shared->net);
-    backend->platform.fs = ssh_stdio_fs_api((ssh_stdio_fs_t *)&shared->sftp_fs);
-    backend->platform.mem = ssh_posix_mem_api((ssh_posix_runtime_t *)&shared->runtime);
-    backend->platform.time = ssh_posix_time_api((ssh_posix_runtime_t *)&shared->runtime);
-    backend->platform.log = ssh_posix_log_api((ssh_posix_runtime_t *)&shared->runtime);
+    handle = NULL;
+    total_len = 0u;
+    status = fs->open(fs->ctx, path, SSH_FXF_READ, &handle);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    for (;;) {
+        read_len = 0u;
+        status = fs->read(
+            fs->ctx,
+            handle,
+            buf + total_len,
+            buf_capacity - total_len,
+            &read_len);
+        if (status != SSH_OK) {
+            (void)fs->close(fs->ctx, handle);
+            return status;
+        }
+        if (read_len == 0u) {
+            break;
+        }
+        total_len += read_len;
+        if (total_len == buf_capacity) {
+            size_t probe_len = 0u;
+            int probe_status = fs->read(fs->ctx, handle, buf, 1u, &probe_len);
+            if (probe_status != SSH_OK) {
+                (void)fs->close(fs->ctx, handle);
+                return probe_status;
+            }
+            if (probe_len != 0u) {
+                (void)fs->close(fs->ctx, handle);
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            break;
+        }
+    }
+
+    (void)fs->close(fs->ctx, handle);
+    *out_len = total_len;
+    return SSH_OK;
+}
+
+static int crypto_instance_init(crypto_instance_t *crypto_instance, const app_shared_t *shared)
+{
+    int status;
+
+    if (crypto_instance == NULL || shared == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    memset(crypto_instance, 0, sizeof(*crypto_instance));
+    crypto_instance->type = shared->crypto_provider;
+    crypto_instance->platform.net = ssh_posix_net_api((ssh_posix_net_platform_t *)&shared->net);
+    crypto_instance->platform.fs = ssh_stdio_fs_api((ssh_stdio_fs_t *)&shared->sftp_fs);
+    crypto_instance->platform.mem = ssh_posix_mem_api((ssh_posix_runtime_t *)&shared->runtime);
+    crypto_instance->platform.time = ssh_posix_time_api((ssh_posix_runtime_t *)&shared->runtime);
+    crypto_instance->platform.log = ssh_posix_log_api((ssh_posix_runtime_t *)&shared->runtime);
 #if defined(EMSSH_BUILD_POSIX_TERM)
-    backend->platform.term = shared->session_mode == SESSION_MODE_SFTP ? NULL : ssh_posix_term_api((ssh_posix_term_platform_t *)&shared->term);
+    crypto_instance->platform.term = shared->session_mode == SESSION_MODE_SFTP ? NULL : ssh_posix_term_api((ssh_posix_term_platform_t *)&shared->term);
 #else
-    backend->platform.term = NULL;
+    crypto_instance->platform.term = NULL;
 #endif
 
-    switch (backend->type) {
-    case CRYPTO_BACKEND_MBEDTLS:
-        status = ssh_mbedtls_crypto_init(&backend->mbedtls);
+    switch (crypto_instance->type) {
+    case CRYPTO_PROVIDER_MBEDTLS:
+    {
+        ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
+
+        status = ssh_crypto_open(&crypto_instance->crypto_ctx);
         if (status != SSH_OK) {
             return status;
         }
-        status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(
-            &backend->mbedtls,
+        crypto_instance->platform.crypto = ssh_crypto_api(&crypto_instance->crypto_ctx);
+        crypto_instance->platform.rng = ssh_crypto_rng_api(&crypto_instance->crypto_ctx);
+        status = crypto_hostkey_import_private_auto(
+            crypto_instance->platform.crypto,
+            hostkey_alg,
             shared->mbedtls_hostkey_private,
             shared->mbedtls_hostkey_private_len);
         if (status != SSH_OK) {
-            ssh_mbedtls_crypto_free(&backend->mbedtls);
+            ssh_crypto_close(&crypto_instance->crypto_ctx);
             return status;
         }
-        backend->platform.crypto = ssh_mbedtls_crypto_api(&backend->mbedtls);
-        backend->platform.rng = ssh_mbedtls_rng_api(&backend->mbedtls);
         break;
+    }
     default:
         return SSH_ERR_UNSUPPORTED;
     }
 
-    backend->initialized = 1;
+    crypto_instance->initialized = 1;
     return SSH_OK;
 }
 
 static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
 {
-    ssh_mbedtls_crypto_t bootstrap;
+    ssh_crypto_context_t bootstrap_crypto_ctx;
+    ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
+    const ssh_crypto_api_t *crypto;
     const ssh_fs_api_t *host_fs_api;
-    void *handle;
-    size_t read_len;
+    uint8_t hostkey_file_data[LINUX_SERVER_MAX_HOSTKEY_FILE_BYTES];
+    size_t hostkey_file_len;
     int status;
 
-    if (shared->backend != CRYPTO_BACKEND_MBEDTLS) {
+    if (shared->crypto_provider != CRYPTO_PROVIDER_MBEDTLS) {
         return SSH_OK;
     }
 
     if (shared->hostkey_path_from_config != NULL) {
         host_fs_api = ssh_stdio_fs_api(&shared->host_fs);
-        if (host_fs_api == NULL || host_fs_api->open == NULL || host_fs_api->read == NULL || host_fs_api->close == NULL) {
+        if (host_fs_api == NULL) {
             return SSH_ERR_PLATFORM;
         }
 
         shared->mbedtls_hostkey_private_len = 0u;
-        handle = NULL;
-        status = host_fs_api->open(host_fs_api->ctx, shared->hostkey_path_from_config, SSH_FXF_READ, &handle);
+        status = fs_read_all_into_buffer(
+            host_fs_api,
+            shared->hostkey_path_from_config,
+            hostkey_file_data,
+            sizeof(hostkey_file_data),
+            &hostkey_file_len);
         if (status != SSH_OK) {
             return status;
         }
-
-        for (;;) {
-            read_len = 0u;
-            status = host_fs_api->read(
-                host_fs_api->ctx,
-                handle,
-                shared->mbedtls_hostkey_private + shared->mbedtls_hostkey_private_len,
-                sizeof(shared->mbedtls_hostkey_private) - shared->mbedtls_hostkey_private_len,
-                &read_len);
-            if (status != SSH_OK) {
-                (void)host_fs_api->close(host_fs_api->ctx, handle);
-                return status;
-            }
-            if (read_len == 0u) {
-                break;
-            }
-            shared->mbedtls_hostkey_private_len += read_len;
-            if (shared->mbedtls_hostkey_private_len == sizeof(shared->mbedtls_hostkey_private)) {
-                size_t probe_len = 0u;
-                int probe_status = host_fs_api->read(
-                    host_fs_api->ctx,
-                    handle,
-                    shared->mbedtls_hostkey_private,
-                    1u,
-                    &probe_len);
-                if (probe_status != SSH_OK) {
-                    (void)host_fs_api->close(host_fs_api->ctx, handle);
-                    return probe_status;
-                }
-                if (probe_len != 0u) {
-                    (void)host_fs_api->close(host_fs_api->ctx, handle);
-                    return SSH_ERR_BUFFER_TOO_SMALL;
-                }
-                break;
-            }
-        }
-        (void)host_fs_api->close(host_fs_api->ctx, handle);
-        if (shared->mbedtls_hostkey_private_len == 0u) {
+        if (hostkey_file_len == 0u) {
             return SSH_ERR_INVALID_ARGUMENT;
         }
-        return SSH_OK;
+        memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
+        status = ssh_crypto_open(&bootstrap_crypto_ctx);
+        if (status != SSH_OK) {
+            return status;
+        }
+        crypto = ssh_crypto_api(&bootstrap_crypto_ctx);
+        status = crypto_hostkey_import_private_auto(
+            crypto,
+            hostkey_alg,
+            hostkey_file_data,
+            hostkey_file_len);
+        if (status == SSH_OK) {
+            status = crypto_hostkey_export_private(
+                crypto,
+                hostkey_alg,
+                shared->mbedtls_hostkey_private,
+                sizeof(shared->mbedtls_hostkey_private),
+                &shared->mbedtls_hostkey_private_len);
+        }
+        ssh_crypto_close(&bootstrap_crypto_ctx);
+        return status;
     }
 
-    memset(&bootstrap, 0, sizeof(bootstrap));
-    status = ssh_mbedtls_crypto_init(&bootstrap);
+    memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
+    status = ssh_crypto_open(&bootstrap_crypto_ctx);
     if (status != SSH_OK) {
         return status;
     }
-    status = ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(&bootstrap);
+    crypto = ssh_crypto_api(&bootstrap_crypto_ctx);
+    status = crypto_hostkey_generate(crypto, hostkey_alg);
     if (status == SSH_OK) {
-        status = ssh_mbedtls_crypto_export_hostkey_private(
-            &bootstrap,
+        status = crypto_hostkey_export_private(
+            crypto,
+            hostkey_alg,
             shared->mbedtls_hostkey_private,
             sizeof(shared->mbedtls_hostkey_private),
             &shared->mbedtls_hostkey_private_len);
     }
-    ssh_mbedtls_crypto_free(&bootstrap);
+    ssh_crypto_close(&bootstrap_crypto_ctx);
     return status;
-}
-
-static void set_backend_kex_defaults(crypto_backend_t backend, ssh_kexinit_algorithm_set_t *algorithms)
-{
-    if (algorithms == NULL) {
-        return;
-    }
-
-    switch (backend) {
-    case CRYPTO_BACKEND_MBEDTLS:
-        ssh_mbedtls_kexinit_algorithm_set_defaults(algorithms);
-        return;
-    default:
-        memset(algorithms, 0, sizeof(*algorithms));
-        return;
-    }
 }
 
 static int initialize_server_templates(
@@ -1520,8 +1608,6 @@ static int initialize_server_templates(
 
     ssh_server_config_defaults(&shared->base_server_config);
     ssh_server_session_options_defaults(&shared->base_session_options);
-    set_backend_kex_defaults(shared->backend, &shared->base_algorithms);
-    shared->base_session_options.algorithms = &shared->base_algorithms;
     shared->base_session_options.timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
     shared->port = LINUX_SERVER_DEFAULT_PORT;
     shared->has_sshd_config_path = 0;
@@ -1546,7 +1632,7 @@ static int initialize_server_templates(
             &shared->sshd_config,
             &shared->base_server_config,
             &shared->base_session_options,
-            &shared->base_algorithms,
+            NULL,
             &shared->port,
             &shared->chroot_dir_from_config,
             &shared->hostkey_path_from_config);
@@ -1635,6 +1721,7 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
     }
 
     if (request_type_is(request, SSH_CHANNEL_REQUEST_PTY_REQ) ||
+        request_type_is(request, SSH_CHANNEL_REQUEST_X11_REQ) ||
         request_type_is(request, SSH_CHANNEL_REQUEST_SHELL) ||
         request_type_is(request, SSH_CHANNEL_REQUEST_EXEC) ||
         request_type_is(request, SSH_CHANNEL_REQUEST_ENV) ||
@@ -1718,11 +1805,10 @@ static int log_non_sftp_channel_request_policy(void *ctx, const ssh_channel_requ
 
 static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 {
-    backend_instance_t backend;
+    crypto_instance_t crypto_instance;
     ssh_server_t server;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     ssh_sshd_config_file_t matched_config;
     ssh_sshd_match_context_t match_ctx;
     auth_runtime_context_t auth_ctx;
@@ -1735,11 +1821,11 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     }
     set_linux_server_stage(LINUX_STAGE_WORKER_START);
 
-    memset(&backend, 0, sizeof(backend));
+    memset(&crypto_instance, 0, sizeof(crypto_instance));
     memset(&server, 0, sizeof(server));
     initialized_server = 0;
 
-    status = backend_instance_init(&backend, shared);
+    status = crypto_instance_init(&crypto_instance, shared);
     if (status != SSH_OK) {
         return status;
     }
@@ -1747,14 +1833,12 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
 
     config = shared->base_server_config;
     options = shared->base_session_options;
-    algorithms = shared->base_algorithms;
-    options.algorithms = &algorithms;
     ssh_sshd_config_file_defaults(&matched_config);
 
     if (shared->has_sshd_config_path) {
         status = fill_match_context_local(shared, conn, NULL, &match_ctx, local_addr_buf);
         if (status != SSH_OK) {
-            backend_instance_deinit(&backend);
+            crypto_instance_deinit(&crypto_instance);
             return status;
         }
 
@@ -1764,7 +1848,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
             &match_ctx,
             &matched_config);
         if (status != SSH_OK) {
-            backend_instance_deinit(&backend);
+            crypto_instance_deinit(&crypto_instance);
             return status;
         }
 
@@ -1772,12 +1856,12 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
             &matched_config,
             &config,
             &options,
-            &algorithms,
+            NULL,
             NULL,
             NULL,
             NULL);
         if (status != SSH_OK) {
-            backend_instance_deinit(&backend);
+            crypto_instance_deinit(&crypto_instance);
             return status;
         }
     }
@@ -1791,9 +1875,9 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         options.non_sftp_channel_request_policy = log_non_sftp_channel_request_policy;
         options.non_sftp_channel_request_policy_ctx = conn;
     }
-    status = ssh_server_init(&server, &backend.platform, &config);
+    status = ssh_server_init(&server, &crypto_instance.platform, &config);
     if (status != SSH_OK) {
-        backend_instance_deinit(&backend);
+        crypto_instance_deinit(&crypto_instance);
         return status;
     }
     set_linux_server_stage(LINUX_STAGE_WORKER_SERVER_INIT);
@@ -1836,7 +1920,7 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     if (initialized_server) {
         ssh_server_deinit(&server);
     }
-    backend_instance_deinit(&backend);
+    crypto_instance_deinit(&crypto_instance);
     set_linux_server_stage(LINUX_STAGE_WORKER_DONE);
     return status;
 }
@@ -1906,7 +1990,7 @@ int main(int argc, char **argv)
     initialized_term = 0;
     initialized_passwd_auth = 0;
     initialized_pool = 0;
-    shared.backend = opts.backend;
+    shared.crypto_provider = opts.crypto_provider;
     shared.session_mode = opts.session_mode;
     shared.sftp_trace_enabled = env_flag_enabled("EMSSH_SFTP_TRACE");
     if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
@@ -1974,9 +2058,15 @@ int main(int argc, char **argv)
         }
         initialized_term = 1;
 #else
-        fprintf(stderr, "session mode '%s' needs terminal adapter; enable EMSSH_BUILD_POSIX_TERM=ON\n", session_mode_name(opts.session_mode));
-        status = SSH_ERR_UNSUPPORTED;
-        goto cleanup;
+        if (opts.session_mode == SESSION_MODE_AUTO) {
+            fprintf(stderr, "note: terminal adapter is disabled; auto mode falls back to sftp-only\n");
+            opts.session_mode = SESSION_MODE_SFTP;
+            shared.session_mode = SESSION_MODE_SFTP;
+        } else {
+            fprintf(stderr, "session mode '%s' needs terminal adapter; enable EMSSH_BUILD_POSIX_TERM=ON\n", session_mode_name(opts.session_mode));
+            status = SSH_ERR_UNSUPPORTED;
+            goto cleanup;
+        }
 #endif
     }
 
@@ -2012,7 +2102,7 @@ int main(int argc, char **argv)
 
     status = prepare_mbedtls_hostkey_if_needed(&shared);
     if (status != SSH_OK) {
-        fprintf(stderr, "backend hostkey prepare failed: %s\n", ssh_status_string(status));
+        fprintf(stderr, "crypto hostkey prepare failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
 
@@ -2035,10 +2125,10 @@ int main(int argc, char **argv)
     }
 
     printf(
-        "linux posix+stdio server listening on %s:%u, backend=%s, mode=%s, max-workers=%u, worker-stack=%luKB\n",
+        "linux posix+stdio server listening on %s:%u, crypto=%s, mode=%s, max-workers=%u, worker-stack=%luKB\n",
         shared.base_server_config.listen_address != NULL ? shared.base_server_config.listen_address : "0.0.0.0",
         (unsigned)shared.port,
-        backend_name(shared.backend),
+        crypto_provider_name(shared.crypto_provider),
         session_mode_name(shared.session_mode),
         opts.max_workers,
         (unsigned long)(worker_stack_size_bytes / 1024u));

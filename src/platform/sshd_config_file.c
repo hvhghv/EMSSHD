@@ -723,50 +723,24 @@ static int parse_one_directive(char *key, char *value, ssh_sshd_config_file_t *c
     }
 
     if (str_ieq(key, "KexAlgorithms")) {
-        return set_string_value(
-            config->kex_algorithms,
-            sizeof(config->kex_algorithms),
-            &config->has_kex_algorithms,
-            value);
+        return SSH_OK;
     }
 
     if (str_ieq(key, "HostKeyAlgorithms")) {
-        return set_string_value(
-            config->hostkey_algorithms,
-            sizeof(config->hostkey_algorithms),
-            &config->has_hostkey_algorithms,
-            value);
+        return SSH_OK;
     }
 
     if (str_ieq(key, "Ciphers")) {
-        return set_string_value(
-            config->ciphers,
-            sizeof(config->ciphers),
-            &config->has_ciphers,
-            value);
+        return SSH_OK;
     }
 
     if (str_ieq(key, "MACs")) {
-        return set_string_value(
-            config->macs,
-            sizeof(config->macs),
-            &config->has_macs,
-            value);
+        return SSH_OK;
     }
 
     if (str_ieq(key, "Compression")) {
-        rc = parse_bool_value(value, &parsed_bool);
-        if (rc != SSH_OK) {
-            return rc;
-        }
-        if (parsed_bool) {
-            return SSH_ERR_UNSUPPORTED;
-        }
-        return set_string_value(
-            config->compression_algorithms,
-            sizeof(config->compression_algorithms),
-            &config->has_compression_algorithms,
-            "none");
+        (void)parsed_bool;
+        return SSH_OK;
     }
 
     return SSH_OK;
@@ -998,26 +972,7 @@ int ssh_sshd_config_file_apply(
         }
     }
 
-    if (algorithms != NULL) {
-        if (config->has_kex_algorithms) {
-            algorithms->kex_algorithms = config->kex_algorithms;
-        }
-        if (config->has_hostkey_algorithms) {
-            algorithms->server_host_key_algorithms = config->hostkey_algorithms;
-        }
-        if (config->has_ciphers) {
-            algorithms->encryption_algorithms_client_to_server = config->ciphers;
-            algorithms->encryption_algorithms_server_to_client = config->ciphers;
-        }
-        if (config->has_macs) {
-            algorithms->mac_algorithms_client_to_server = config->macs;
-            algorithms->mac_algorithms_server_to_client = config->macs;
-        }
-        if (config->has_compression_algorithms) {
-            algorithms->compression_algorithms_client_to_server = config->compression_algorithms;
-            algorithms->compression_algorithms_server_to_client = config->compression_algorithms;
-        }
-    }
+    (void)algorithms;
 
     return SSH_OK;
 }

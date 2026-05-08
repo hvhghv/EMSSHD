@@ -47,6 +47,7 @@ static int channel_request_is_default_ignorable_non_sftp(const ssh_channel_reque
     return
         view_equals_cstr(request->request_type, "simple@putty.projects.tartarus.org") ||
         view_equals_cstr(request->request_type, "winadj@putty.projects.tartarus.org") ||
+        view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_X11_REQ) ||
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_PTY_REQ) ||
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_SHELL) ||
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_EXEC) ||
@@ -580,7 +581,6 @@ void ssh_server_config_defaults(ssh_server_config_t *config)
 int ssh_server_init(ssh_server_t *server, const ssh_platform_t *platform, const ssh_server_config_t *config)
 {
     ssh_server_config_t defaults;
-    ssh_string_view_t signature_algorithms;
 
     if (server == NULL || platform == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -607,14 +607,6 @@ int ssh_server_init(ssh_server_t *server, const ssh_platform_t *platform, const 
         server->config.permit_root_login > EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    if (server->config.publickey_signature_algorithms != NULL) {
-        signature_algorithms.data = (const uint8_t *)server->config.publickey_signature_algorithms;
-        signature_algorithms.len = strlen(server->config.publickey_signature_algorithms);
-        if (!ssh_name_list_is_valid(signature_algorithms)) {
-            return SSH_ERR_INVALID_ARGUMENT;
-        }
-    }
-
     server->initialized = 1;
     return SSH_OK;
 }

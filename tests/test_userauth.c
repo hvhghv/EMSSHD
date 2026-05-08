@@ -248,11 +248,13 @@ int main(void)
     ssh_server_deinit(&server);
     ssh_server_config_defaults(&config);
     config.publickey_signature_algorithms = "rsa-sha2-256, bad";
-    CHECK(ssh_server_init(&server, &platform, &config) == SSH_ERR_INVALID_ARGUMENT);
+    CHECK(ssh_server_init(&server, &platform, &config) == SSH_OK);
+    ssh_server_deinit(&server);
 
     ssh_server_config_defaults(&config);
     config.publickey_signature_algorithms = "rsa-sha2-256,";
-    CHECK(ssh_server_init(&server, &platform, &config) == SSH_ERR_INVALID_ARGUMENT);
+    CHECK(ssh_server_init(&server, &platform, &config) == SSH_OK);
+    ssh_server_deinit(&server);
 
     ssh_server_config_defaults(&config);
     config.publickey_signature_algorithms = "";

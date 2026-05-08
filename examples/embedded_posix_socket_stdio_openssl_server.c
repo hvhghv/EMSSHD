@@ -3,14 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "emssh/crypto_openssl.h"
-#include "emssh/platform_openssl.h"
 #include "emssh/platform_posix_net.h"
 #include "emssh/platform_posix_passwd_auth.h"
 #include "emssh/platform_posix_runtime.h"
 #include "emssh/platform_posix_term.h"
 #include "emssh/platform_stdio_fs.h"
 #include "emssh/sshd_config_file.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
@@ -56,12 +55,11 @@ int main(int argc, char **argv)
     ssh_posix_conn_t conn;
     ssh_posix_term_platform_t term;
     ssh_stdio_fs_t fs;
-    ssh_openssl_platform_t openssl_platform;
-    const ssh_platform_t *platform;
+    ssh_crypto_context_t crypto_ctx;
+    ssh_platform_t platform;
     ssh_server_t server;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     ssh_sshd_config_file_t sshd_config;
     ssh_posix_passwd_auth_t passwd_auth;
     const char *passwd_path;
@@ -94,7 +92,8 @@ int main(int argc, char **argv)
     memset(&conn, 0, sizeof(conn));
     memset(&term, 0, sizeof(term));
     memset(&fs, 0, sizeof(fs));
-    memset(&openssl_platform, 0, sizeof(openssl_platform));
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
+    memset(&platform, 0, sizeof(platform));
     memset(&server, 0, sizeof(server));
     memset(&config, 0, sizeof(config));
     memset(&options, 0, sizeof(options));
@@ -112,7 +111,6 @@ int main(int argc, char **argv)
     initialized_term = 0;
     run_terminal_mode = 0;
     argi = 3;
-    platform = NULL;
     status = SSH_OK;
 
     while (argi < argc) {
@@ -190,30 +188,24 @@ int main(int argc, char **argv)
 #endif
     }
 
-    status = ssh_openssl_platform_init(
-        &openssl_platform,
-        ssh_posix_net_api(&net),
-        ssh_stdio_fs_api(&fs),
-        run_terminal_mode ? ssh_posix_term_api(&term) : NULL,
-        ssh_posix_mem_api(&runtime),
-        ssh_posix_time_api(&runtime),
-        ssh_posix_log_api(&runtime));
+    status = ssh_crypto_open(&crypto_ctx);
     if (status != SSH_OK) {
-        fprintf(stderr, "openssl platform init failed: %s\n", ssh_status_string(status));
+        fprintf(stderr, "crypto context init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
-    platform = ssh_openssl_platform_api(&openssl_platform);
-    if (platform == NULL) {
-        status = SSH_ERR_PLATFORM;
-        fprintf(stderr, "openssl platform api unavailable\n");
-        goto cleanup;
-    }
+
+    platform.mem = ssh_posix_mem_api(&runtime);
+    platform.time = ssh_posix_time_api(&runtime);
+    platform.log = ssh_posix_log_api(&runtime);
+    platform.net = ssh_posix_net_api(&net);
+    platform.fs = ssh_stdio_fs_api(&fs);
+    platform.term = run_terminal_mode ? ssh_posix_term_api(&term) : NULL;
+    platform.crypto = ssh_crypto_api(&crypto_ctx);
+    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
 
     ssh_server_config_defaults(&config);
     ssh_server_session_options_defaults(&options);
-    ssh_openssl_kexinit_algorithm_set_defaults(&algorithms);
-    options.algorithms = &algorithms;
     options.timeout_ms = POSIX_OPENSSL_DEFAULT_TIMEOUT_MS;
 
     status = ssh_posix_passwd_auth_init(&passwd_auth, ssh_stdio_fs_api(&fs), passwd_path, NULL);
@@ -239,7 +231,7 @@ int main(int argc, char **argv)
         }
     }
 
-    status = ssh_server_init(&server, platform, &config);
+    status = ssh_server_init(&server, &platform, &config);
     if (status != SSH_OK) {
         fprintf(stderr, "server init failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -253,10 +245,10 @@ int main(int argc, char **argv)
     }
 
     printf(
-        "posix+posix-socket+stdio+openssl server listening on 0.0.0.0:%u (mode=%s)\n",
+        "posix+posix-socket+stdio+%s server listening on 0.0.0.0:%u (mode=%s)\n",
+        ssh_crypto_name(),
         (unsigned)port,
         run_terminal_mode ? "term" : "sftp");
-    printf("note: current openssl backend may be stub/partial; handshake can fail with unsupported status.\n");
     fflush(stdout);
 
     for (;;) {
@@ -285,7 +277,7 @@ cleanup:
         ssh_server_deinit(&server);
     }
     if (initialized_crypto) {
-        ssh_openssl_platform_deinit(&openssl_platform);
+        ssh_crypto_close(&crypto_ctx);
     }
     if (initialized_fs) {
         ssh_stdio_fs_deinit(&fs);

@@ -2,12 +2,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "emssh/crypto_mbedtls.h"
 #include "emssh/platform_fatfs_adapter.h"
 #include "emssh/platform_freertos.h"
 #include "emssh/platform_littlefs_adapter.h"
 #include "emssh/platform_lwip.h"
-#include "emssh/platform_openssl.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
@@ -35,10 +34,6 @@
 #define EMSSH_TEMPLATE_PASSWORD "admin123"
 #endif
 
-#ifndef EMSSH_TEMPLATE_USE_OPENSSL
-#define EMSSH_TEMPLATE_USE_OPENSSL 0
-#endif
-
 #ifndef EMSSH_TEMPLATE_FS_BACKEND_LITTLEFS
 #define EMSSH_TEMPLATE_FS_BACKEND_LITTLEFS 1
 #endif
@@ -49,6 +44,15 @@ typedef struct embedded_auth_ctx {
     const char *username;
     const char *password;
 } embedded_auth_ctx_t;
+
+static ssh_string_view_t hostkey_algorithm_view_ecdsa(void)
+{
+    static const char k_alg[] = "ecdsa-sha2-nistp256";
+    ssh_string_view_t view;
+    view.data = (const uint8_t *)k_alg;
+    view.len = sizeof(k_alg) - 1u;
+    return view;
+}
 
 static void board_log_sink(void *ctx, ssh_log_level_t level, const char *message)
 {
@@ -119,21 +123,36 @@ static int template_password_auth(void *ctx, const ssh_password_auth_request_t *
            string_view_matches(auth->password, request->password, request->password_len);
 }
 
-static int configure_mbedtls_hostkey(ssh_mbedtls_crypto_t *crypto)
+static int configure_hostkey(ssh_crypto_context_t *crypto_ctx)
 {
+    const ssh_crypto_api_t *crypto;
+    ssh_string_view_t hostkey_alg;
     uint8_t private_key[EMSSH_TEMPLATE_HOSTKEY_PRIVATE_MAX];
     size_t private_key_len;
     int status;
 
-    if (crypto == NULL) {
+    if (crypto_ctx == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    crypto = ssh_crypto_api(crypto_ctx);
+    if (crypto == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+    hostkey_alg = hostkey_algorithm_view_ecdsa();
 
     memset(private_key, 0, sizeof(private_key));
     private_key_len = 0u;
     status = board_load_hostkey_private(private_key, sizeof(private_key), &private_key_len);
     if (status == SSH_OK) {
-        status = ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(crypto, private_key, private_key_len);
+        if (crypto->hostkey_import_private_auto == NULL) {
+            memset(private_key, 0, sizeof(private_key));
+            return SSH_ERR_UNSUPPORTED;
+        }
+        status = crypto->hostkey_import_private_auto(
+            crypto->ctx,
+            hostkey_alg,
+            private_key,
+            private_key_len);
         memset(private_key, 0, sizeof(private_key));
         return status;
     }
@@ -142,13 +161,20 @@ static int configure_mbedtls_hostkey(ssh_mbedtls_crypto_t *crypto)
         return status;
     }
 
-    status = ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(crypto);
+    if (crypto->hostkey_generate == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_generate(crypto->ctx, hostkey_alg);
     if (status != SSH_OK) {
         return status;
     }
 
-    status = ssh_mbedtls_crypto_export_hostkey_private(
-        crypto,
+    if (crypto->hostkey_export_private == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = crypto->hostkey_export_private(
+        crypto->ctx,
+        hostkey_alg,
         private_key,
         sizeof(private_key),
         &private_key_len);
@@ -168,7 +194,6 @@ int main(void)
     ssh_server_t server;
     ssh_server_config_t config;
     ssh_server_session_options_t options;
-    ssh_kexinit_algorithm_set_t algorithms;
     embedded_auth_ctx_t auth;
     int status;
     int initialized_runtime;
@@ -182,13 +207,8 @@ int main(void)
 #else
     ssh_fatfs_adapter_t fatfs_adapter;
 #endif
-#if EMSSH_TEMPLATE_USE_OPENSSL
-    ssh_openssl_platform_t openssl_platform;
-    const ssh_platform_t *platform_api;
-#else
-    ssh_mbedtls_crypto_t mbedtls_crypto;
+    ssh_crypto_context_t crypto_ctx;
     ssh_platform_t platform;
-#endif
     const ssh_fs_api_t *fs_api;
 
     memset(&runtime, 0, sizeof(runtime));
@@ -210,13 +230,8 @@ int main(void)
 #else
     memset(&fatfs_adapter, 0, sizeof(fatfs_adapter));
 #endif
-#if EMSSH_TEMPLATE_USE_OPENSSL
-    memset(&openssl_platform, 0, sizeof(openssl_platform));
-    platform_api = NULL;
-#else
-    memset(&mbedtls_crypto, 0, sizeof(mbedtls_crypto));
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
     memset(&platform, 0, sizeof(platform));
-#endif
 
     status = board_network_ready();
     if (status != SSH_OK) {
@@ -265,30 +280,14 @@ int main(void)
     }
     initialized_fs = 1;
 
-#if EMSSH_TEMPLATE_USE_OPENSSL
-    status = ssh_openssl_platform_init(
-        &openssl_platform,
-        ssh_lwip_net_api(&net),
-        fs_api,
-        NULL,
-        ssh_freertos_mem_api(&runtime),
-        ssh_freertos_time_api(&runtime),
-        ssh_freertos_log_api(&runtime));
+    status = ssh_crypto_open(&crypto_ctx);
     if (status != SSH_OK) {
-        printf("openssl platform init failed: %s\n", ssh_status_string(status));
-        goto cleanup;
-    }
-    platform_api = ssh_openssl_platform_api(&openssl_platform);
-    initialized_crypto = 1;
-#else
-    status = ssh_mbedtls_crypto_init(&mbedtls_crypto);
-    if (status != SSH_OK) {
-        printf("mbedtls crypto init failed: %s\n", ssh_status_string(status));
+        printf("crypto context init failed: %s\n", ssh_status_string(status));
         goto cleanup;
     }
     initialized_crypto = 1;
 
-    status = configure_mbedtls_hostkey(&mbedtls_crypto);
+    status = configure_hostkey(&crypto_ctx);
     if (status != SSH_OK) {
         printf("hostkey setup failed: %s\n", ssh_status_string(status));
         goto cleanup;
@@ -299,9 +298,8 @@ int main(void)
     platform.log = ssh_freertos_log_api(&runtime);
     platform.net = ssh_lwip_net_api(&net);
     platform.fs = fs_api;
-    platform.crypto = ssh_mbedtls_crypto_api(&mbedtls_crypto);
-    platform.rng = ssh_mbedtls_rng_api(&mbedtls_crypto);
-#endif
+    platform.crypto = ssh_crypto_api(&crypto_ctx);
+    platform.rng = ssh_crypto_rng_api(&crypto_ctx);
 
     auth.username = EMSSH_TEMPLATE_USERNAME;
     auth.password = EMSSH_TEMPLATE_PASSWORD;
@@ -312,11 +310,7 @@ int main(void)
 
     status = ssh_server_init(
         &server,
-#if EMSSH_TEMPLATE_USE_OPENSSL
-        platform_api,
-#else
         &platform,
-#endif
         &config);
     if (status != SSH_OK) {
         printf("server init failed: %s\n", ssh_status_string(status));
@@ -331,12 +325,6 @@ int main(void)
     }
 
     ssh_server_session_options_defaults(&options);
-#if EMSSH_TEMPLATE_USE_OPENSSL
-    ssh_openssl_kexinit_algorithm_set_defaults(&algorithms);
-#else
-    ssh_mbedtls_kexinit_algorithm_set_defaults(&algorithms);
-#endif
-    options.algorithms = &algorithms;
     options.timeout_ms = EMSSH_TEMPLATE_SESSION_TIMEOUT_MS;
     options.max_sftp_packets = EMSSH_TEMPLATE_MAX_SFTP_PACKETS;
 
@@ -365,11 +353,7 @@ cleanup:
         ssh_server_deinit(&server);
     }
     if (initialized_crypto) {
-#if EMSSH_TEMPLATE_USE_OPENSSL
-        ssh_openssl_platform_deinit(&openssl_platform);
-#else
-        ssh_mbedtls_crypto_free(&mbedtls_crypto);
-#endif
+        ssh_crypto_close(&crypto_ctx);
     }
     if (initialized_fs) {
 #if EMSSH_TEMPLATE_FS_BACKEND_LITTLEFS

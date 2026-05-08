@@ -5,6 +5,7 @@
 #include "emssh/sftp.h"
 #include "emssh/sftp_server.h"
 #include "emssh/ssh_connection.h"
+#include "emssh/ssh_crypto.h"
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_packet.h"
 #include "emssh/ssh_server.h"
@@ -1022,9 +1023,13 @@ int main(void)
         size_t ext_info_len;
         ssh_string_view_t ext_name;
         ssh_string_view_t ext_value;
+        const char *expected_sig_algs;
 
         server.config.publickey_auth = publickey_auth;
-        server.config.publickey_signature_algorithms = NULL;
+        expected_sig_algs = ssh_crypto_publickey_signature_algorithms();
+        if (expected_sig_algs == NULL) {
+            expected_sig_algs = "";
+        }
         CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_OK);
 
         CHECK(protected_packet_wire_len(
@@ -1041,118 +1046,22 @@ int main(void)
         CHECK(ssh_buffer_get_u8(&service_buf, &message_id) == SSH_OK);
         CHECK(message_id == SSH_MSG_EXT_INFO);
         CHECK(ssh_buffer_get_u32(&service_buf, &value) == SSH_OK);
-        CHECK(value == 1u);
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_name) == SSH_OK);
-        CHECK(view_eq(ext_name, "server-sig-algs"));
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_value) == SSH_OK);
-        CHECK(view_eq(ext_value, EMSSH_SERVER_SIG_ALGS_DEFAULT_BASE));
+        if (expected_sig_algs[0] == '\0') {
+            CHECK(value == 0u);
+        } else {
+            CHECK(value == 1u);
+            CHECK(ssh_buffer_get_string_view(&service_buf, &ext_name) == SSH_OK);
+            CHECK(view_eq(ext_name, "server-sig-algs"));
+            CHECK(ssh_buffer_get_string_view(&service_buf, &ext_value) == SSH_OK);
+            CHECK(view_eq(ext_value, expected_sig_algs));
+        }
         CHECK(ssh_buffer_remaining_read(&service_buf) == 0u);
     }
 
     {
         size_t ext_info_offset = conn.out_len;
         size_t ext_info_len;
-        ssh_string_view_t ext_name;
-        ssh_string_view_t ext_value;
-        const char *saved_hostkey_algorithms = session.server_algorithms.server_host_key_algorithms;
-
-        session.server_algorithms.server_host_key_algorithms = "ssh-ed25519,ecdsa-sha2-nistp256";
-        server.config.publickey_signature_algorithms = NULL;
-        CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_OK);
-
-        CHECK(protected_packet_wire_len(
-            &client_receive,
-            conn.out + ext_info_offset,
-            conn.out_len - ext_info_offset,
-            &ext_info_len) == SSH_OK);
-        CHECK(ssh_packet_decode_protected(
-            &client_receive,
-            conn.out + ext_info_offset,
-            ext_info_len,
-            &protected_view) == SSH_OK);
-        ssh_buffer_wrap(&service_buf, (uint8_t *)protected_view.payload, protected_view.payload_len);
-        CHECK(ssh_buffer_get_u8(&service_buf, &message_id) == SSH_OK);
-        CHECK(message_id == SSH_MSG_EXT_INFO);
-        CHECK(ssh_buffer_get_u32(&service_buf, &value) == SSH_OK);
-        CHECK(value == 1u);
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_name) == SSH_OK);
-        CHECK(view_eq(ext_name, "server-sig-algs"));
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_value) == SSH_OK);
-        CHECK(view_eq(ext_value, EMSSH_SERVER_SIG_ALGS_DEFAULT));
-        session.server_algorithms.server_host_key_algorithms = saved_hostkey_algorithms;
-        CHECK(ssh_buffer_remaining_read(&service_buf) == 0u);
-    }
-
-    {
-        size_t ext_info_offset = conn.out_len;
-        size_t ext_info_len;
-        ssh_string_view_t ext_name;
-        ssh_string_view_t ext_value;
-
-        server.config.publickey_signature_algorithms = "rsa-sha2-256,rsa-sha2-512";
-        CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_OK);
-
-        CHECK(protected_packet_wire_len(
-            &client_receive,
-            conn.out + ext_info_offset,
-            conn.out_len - ext_info_offset,
-            &ext_info_len) == SSH_OK);
-        CHECK(ssh_packet_decode_protected(
-            &client_receive,
-            conn.out + ext_info_offset,
-            ext_info_len,
-            &protected_view) == SSH_OK);
-        ssh_buffer_wrap(&service_buf, (uint8_t *)protected_view.payload, protected_view.payload_len);
-        CHECK(ssh_buffer_get_u8(&service_buf, &message_id) == SSH_OK);
-        CHECK(message_id == SSH_MSG_EXT_INFO);
-        CHECK(ssh_buffer_get_u32(&service_buf, &value) == SSH_OK);
-        CHECK(value == 1u);
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_name) == SSH_OK);
-        CHECK(view_eq(ext_name, "server-sig-algs"));
-        CHECK(ssh_buffer_get_string_view(&service_buf, &ext_value) == SSH_OK);
-        CHECK(view_eq(ext_value, "rsa-sha2-256,rsa-sha2-512"));
-        CHECK(ssh_buffer_remaining_read(&service_buf) == 0u);
-    }
-
-    {
-        size_t out_len_before = conn.out_len;
-
-        server.config.publickey_signature_algorithms = "rsa-sha2-256, bad";
-        CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_ERR_INVALID_ARGUMENT);
-        CHECK(conn.out_len == out_len_before);
-    }
-
-    {
-        size_t ext_info_offset = conn.out_len;
-        size_t ext_info_len;
-
-        server.config.publickey_signature_algorithms = "";
-        CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_OK);
-
-        CHECK(protected_packet_wire_len(
-            &client_receive,
-            conn.out + ext_info_offset,
-            conn.out_len - ext_info_offset,
-            &ext_info_len) == SSH_OK);
-        CHECK(ssh_packet_decode_protected(
-            &client_receive,
-            conn.out + ext_info_offset,
-            ext_info_len,
-            &protected_view) == SSH_OK);
-        ssh_buffer_wrap(&service_buf, (uint8_t *)protected_view.payload, protected_view.payload_len);
-        CHECK(ssh_buffer_get_u8(&service_buf, &message_id) == SSH_OK);
-        CHECK(message_id == SSH_MSG_EXT_INFO);
-        CHECK(ssh_buffer_get_u32(&service_buf, &value) == SSH_OK);
-        CHECK(value == 0u);
-        CHECK(ssh_buffer_remaining_read(&service_buf) == 0u);
-    }
-
-    {
-        size_t ext_info_offset = conn.out_len;
-        size_t ext_info_len;
-
         server.config.publickey_auth = NULL;
-        server.config.publickey_signature_algorithms = "rsa-sha2-256, bad";
         CHECK(ssh_transport_send_ext_info(&session, &conn, server_options.timeout_ms) == SSH_OK);
 
         CHECK(protected_packet_wire_len(
@@ -1174,7 +1083,6 @@ int main(void)
     }
 
     server.config.publickey_auth = publickey_auth;
-    server.config.publickey_signature_algorithms = EMSSH_SERVER_SIG_ALGS_DEFAULT;
 
     CHECK(append_client_ignore(&conn, &client_send, rng) == SSH_OK);
 
