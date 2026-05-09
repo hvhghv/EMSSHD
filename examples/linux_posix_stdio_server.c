@@ -1467,6 +1467,13 @@ static int import_hostkey_auto_with_kind(
             candidate_alg,
             private_key_data,
             private_key_data_len);
+        if (status != SSH_OK) {
+            fprintf(
+                stderr,
+                "diag: hostkey import attempt failed: algorithm=%s status=%s\n",
+                mbedtls_hostkey_algorithm_list(order[i]),
+                ssh_status_string(status));
+        }
         if (status == SSH_OK) {
             *kind_out = order[i];
             return SSH_OK;
@@ -1476,6 +1483,9 @@ static int import_hostkey_auto_with_kind(
         }
     }
 
+    fprintf(
+        stderr,
+        "diag: hostkey import exhausted all candidate algorithms for this key data\n");
     return SSH_ERR_UNSUPPORTED;
 }
 
@@ -1649,6 +1659,9 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
     size_t hostkey_file_len;
     int status;
     mbedtls_hostkey_kind_t detected_kind;
+    int has_pem_rsa;
+    int has_pem_pkcs8;
+    int has_pem_ec;
 
     if (shared->crypto_provider != CRYPTO_PROVIDER_MBEDTLS) {
         return SSH_OK;
@@ -1674,6 +1687,9 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
         if (hostkey_file_len == 0u) {
             return SSH_ERR_INVALID_ARGUMENT;
         }
+        has_pem_rsa = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN RSA PRIVATE KEY");
+        has_pem_pkcs8 = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN PRIVATE KEY");
+        has_pem_ec = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN EC PRIVATE KEY");
         memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
         status = ssh_crypto_open(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
         if (status != SSH_OK) {
@@ -1685,6 +1701,17 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             hostkey_file_data,
             hostkey_file_len,
             &detected_kind);
+        if (status != SSH_OK) {
+            fprintf(
+                stderr,
+                "diag: hostkey import failed: path=%s bytes=%lu pem-rsa=%d pem-pkcs8=%d pem-ec=%d status=%s\n",
+                shared->hostkey_path_from_config != NULL ? shared->hostkey_path_from_config : "(null)",
+                (unsigned long)hostkey_file_len,
+                has_pem_rsa,
+                has_pem_pkcs8,
+                has_pem_ec,
+                ssh_status_string(status));
+        }
         if (status == SSH_OK) {
             hostkey_alg = mbedtls_hostkey_algorithm_view(detected_kind);
             status = crypto_hostkey_export_private(
