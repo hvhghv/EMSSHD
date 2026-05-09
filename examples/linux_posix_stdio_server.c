@@ -1714,12 +1714,21 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
         }
         if (status == SSH_OK) {
             hostkey_alg = mbedtls_hostkey_algorithm_view(detected_kind);
-            status = crypto_hostkey_export_private(
-                crypto,
-                hostkey_alg,
-                shared->mbedtls_hostkey_private,
-                sizeof(shared->mbedtls_hostkey_private),
-                &shared->mbedtls_hostkey_private_len);
+            if (detected_kind == LINUX_HOSTKEY_KIND_RSA_SHA2_256) {
+                if (hostkey_file_len > sizeof(shared->mbedtls_hostkey_private)) {
+                    status = SSH_ERR_BUFFER_TOO_SMALL;
+                } else {
+                    memcpy(shared->mbedtls_hostkey_private, hostkey_file_data, hostkey_file_len);
+                    shared->mbedtls_hostkey_private_len = hostkey_file_len;
+                }
+            } else {
+                status = crypto_hostkey_export_private(
+                    crypto,
+                    hostkey_alg,
+                    shared->mbedtls_hostkey_private,
+                    sizeof(shared->mbedtls_hostkey_private),
+                    &shared->mbedtls_hostkey_private_len);
+            }
         }
         ssh_crypto_close(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
         if (status == SSH_OK) {
