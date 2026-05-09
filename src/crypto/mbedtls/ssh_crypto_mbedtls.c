@@ -37,6 +37,104 @@ static int psa_ok_or_unsupported(psa_status_t status)
     return SSH_ERR_PLATFORM;
 }
 
+static int ascii_is_space(uint8_t ch)
+{
+    return ch == (uint8_t)' ' ||
+           ch == (uint8_t)'\t' ||
+           ch == (uint8_t)'\r' ||
+           ch == (uint8_t)'\n';
+}
+
+static int base64_value(uint8_t ch)
+{
+    if (ch >= (uint8_t)'A' && ch <= (uint8_t)'Z') {
+        return (int)(ch - (uint8_t)'A');
+    }
+    if (ch >= (uint8_t)'a' && ch <= (uint8_t)'z') {
+        return (int)(ch - (uint8_t)'a' + 26u);
+    }
+    if (ch >= (uint8_t)'0' && ch <= (uint8_t)'9') {
+        return (int)(ch - (uint8_t)'0' + 52u);
+    }
+    if (ch == (uint8_t)'+') {
+        return 62;
+    }
+    if (ch == (uint8_t)'/') {
+        return 63;
+    }
+    if (ch == (uint8_t)'=') {
+        return -2;
+    }
+    if (ascii_is_space(ch)) {
+        return -3;
+    }
+    return -1;
+}
+
+static int decode_base64_data(
+    const uint8_t *text,
+    size_t text_len,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len)
+{
+    uint32_t acc;
+    unsigned bits;
+    size_t i;
+    size_t written;
+    int saw_padding;
+
+    if (text == NULL || out == NULL || out_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    acc = 0u;
+    bits = 0u;
+    written = 0u;
+    saw_padding = 0;
+    for (i = 0u; i < text_len; ++i) {
+        int value = base64_value(text[i]);
+        if (value == -3) {
+            continue;
+        }
+        if (value == -2) {
+            saw_padding = 1;
+            continue;
+        }
+        if (value < 0) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
+        if (saw_padding) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
+        acc = (acc << 6) | (uint32_t)value;
+        bits += 6u;
+        if (bits >= 8u) {
+            bits -= 8u;
+            if (written >= out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[written++] = (uint8_t)((acc >> bits) & 0xffu);
+        }
+    }
+
+    if (bits >= 6u) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    *out_len = written;
+    return written != 0u ? SSH_OK : SSH_ERR_MALFORMED_PACKET;
+}
+
+static int import_rsa_hostkey_auto(
+    ssh_mbedtls_crypto_t *ctx,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len);
+
+static int rsa_public_der_to_ssh_blob(
+    const uint8_t *der,
+    size_t der_len,
+    ssh_buffer_t *out);
+
 static void destroy_owned_hostkey(ssh_mbedtls_crypto_t *ctx)
 {
     if (ctx != NULL && ctx->owns_hostkey && ctx->hostkey_id != 0u) {
@@ -198,7 +296,7 @@ static int mbedtls_hostkey_public(
     size_t *hostkey_blob_len)
 {
     ssh_mbedtls_crypto_t *mbed = (ssh_mbedtls_crypto_t *)ctx;
-    uint8_t raw_public[128];
+    uint8_t raw_public[EMSSH_MAX_HOST_KEY_BLOB];
     size_t raw_public_len;
     ssh_buffer_t buf;
     psa_status_t status;
@@ -229,6 +327,10 @@ static int mbedtls_hostkey_public(
         if (rc == SSH_OK) {
             rc = ssh_buffer_put_string(&buf, raw_public, raw_public_len);
         }
+    } else if (view_eq(hostkey_algorithm, "rsa-sha2-256") ||
+               view_eq(hostkey_algorithm, "rsa-sha2-512") ||
+               view_eq(hostkey_algorithm, "ssh-rsa")) {
+        rc = rsa_public_der_to_ssh_blob(raw_public, raw_public_len, &buf);
     } else {
         rc = SSH_ERR_INVALID_ARGUMENT;
     }
@@ -563,6 +665,174 @@ static int decode_rsa_signature_blob(
     return SSH_OK;
 }
 
+static int der_get_length(
+    const uint8_t *der,
+    size_t der_len,
+    size_t *offset,
+    size_t *len)
+{
+    uint8_t first;
+    size_t count;
+    size_t value;
+    size_t i;
+
+    if (der == NULL || offset == NULL || len == NULL || *offset >= der_len) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    first = der[(*offset)++];
+    if ((first & 0x80u) == 0u) {
+        *len = first;
+        return *offset + *len <= der_len ? SSH_OK : SSH_ERR_MALFORMED_PACKET;
+    }
+
+    count = first & 0x7fu;
+    if (count == 0u || count > sizeof(size_t) || count > der_len - *offset) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+
+    value = 0u;
+    for (i = 0u; i < count; ++i) {
+        value = (value << 8) | der[(*offset)++];
+    }
+
+    *len = value;
+    return *offset + *len <= der_len ? SSH_OK : SSH_ERR_MALFORMED_PACKET;
+}
+
+static int der_get_integer_view(
+    const uint8_t *der,
+    size_t der_len,
+    size_t *offset,
+    ssh_string_view_t *integer)
+{
+    size_t len;
+
+    if (der == NULL || offset == NULL || integer == NULL || *offset >= der_len || der[(*offset)++] != 0x02u) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    if (der_get_length(der, der_len, offset, &len) != SSH_OK || len == 0u) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+
+    integer->data = der + *offset;
+    integer->len = len;
+    *offset += len;
+    return SSH_OK;
+}
+
+static int rsa_public_der_to_ssh_blob(
+    const uint8_t *der,
+    size_t der_len,
+    ssh_buffer_t *out)
+{
+    ssh_string_view_t n;
+    ssh_string_view_t e;
+    size_t offset;
+    size_t sequence_len;
+    size_t sequence_end;
+    int status;
+
+    if (der == NULL || out == NULL || der_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    offset = 0u;
+    if (der[offset++] != 0x30u) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    status = der_get_length(der, der_len, &offset, &sequence_len);
+    if (status != SSH_OK) {
+        return status;
+    }
+    sequence_end = offset + sequence_len;
+    if (sequence_end > der_len) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    status = der_get_integer_view(der, sequence_end, &offset, &n);
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &e);
+    }
+    if (status != SSH_OK || offset != sequence_end) {
+        return status != SSH_OK ? status : SSH_ERR_MALFORMED_PACKET;
+    }
+
+    status = ssh_buffer_put_cstring(out, "ssh-rsa");
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_string(out, e.data, e.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_string(out, n.data, n.len);
+    }
+    return status;
+}
+
+static int decode_pem_block(
+    const uint8_t *data,
+    size_t data_len,
+    const char *begin_marker,
+    const char *end_marker,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len)
+{
+    const uint8_t *begin;
+    const uint8_t *end;
+    const uint8_t *base64_start;
+    size_t marker_len;
+    size_t tail_len;
+
+    if (data == NULL || begin_marker == NULL || end_marker == NULL ||
+        out == NULL || out_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    marker_len = strlen(begin_marker);
+    begin = NULL;
+    if (data_len >= marker_len) {
+        size_t i;
+        for (i = 0u; i + marker_len <= data_len; ++i) {
+            if (memcmp(data + i, begin_marker, marker_len) == 0) {
+                begin = data + i;
+                break;
+            }
+        }
+    }
+    if (begin == NULL) {
+        return SSH_ERR_NOT_FOUND;
+    }
+    base64_start = begin + marker_len;
+    while ((size_t)(base64_start - data) < data_len && *base64_start != (uint8_t)'\n') {
+        ++base64_start;
+    }
+    if ((size_t)(base64_start - data) < data_len && *base64_start == (uint8_t)'\n') {
+        ++base64_start;
+    }
+
+    marker_len = strlen(end_marker);
+    end = NULL;
+    tail_len = data_len - (size_t)(base64_start - data);
+    if (tail_len >= marker_len) {
+        size_t i;
+        for (i = 0u; i + marker_len <= tail_len; ++i) {
+            if (memcmp(base64_start + i, end_marker, marker_len) == 0) {
+                end = base64_start + i;
+                break;
+            }
+        }
+    }
+    if (end == NULL || end <= base64_start) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+
+    return decode_base64_data(
+        base64_start,
+        (size_t)(end - base64_start),
+        out,
+        out_capacity,
+        out_len);
+}
+
 static int der_length_size(size_t len, size_t *encoded_len)
 {
     size_t bytes;
@@ -756,7 +1026,7 @@ static int mbedtls_hostkey_sign(
     size_t *signature_len)
 {
     ssh_mbedtls_crypto_t *mbed = (ssh_mbedtls_crypto_t *)ctx;
-    uint8_t raw_signature[128];
+    uint8_t raw_signature[EMSSH_MAX_SIGNATURE];
     size_t raw_signature_len;
     ssh_buffer_t buf;
     psa_status_t status;
@@ -804,6 +1074,28 @@ static int mbedtls_hostkey_sign(
         rc = ssh_buffer_put_cstring(&buf, "ecdsa-sha2-nistp256");
         if (rc == SSH_OK) {
             rc = put_ssh_ecdsa_signature_blob(&buf, raw_signature, raw_signature_len);
+        }
+    } else if (view_eq(hostkey_algorithm, "rsa-sha2-256") ||
+               view_eq(hostkey_algorithm, "rsa-sha2-512")) {
+        psa_algorithm_t rsa_alg = rsa_signature_psa_algorithm(hostkey_algorithm);
+        if (rsa_alg == 0) {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        status = psa_sign_message(
+            (mbedtls_svc_key_id_t)mbed->hostkey_id,
+            rsa_alg,
+            exchange_hash,
+            exchange_hash_len,
+            raw_signature,
+            sizeof(raw_signature),
+            &raw_signature_len);
+        if (status != PSA_SUCCESS) {
+            return psa_ok_or_unsupported(status);
+        }
+
+        rc = ssh_buffer_put_string(&buf, hostkey_algorithm.data, hostkey_algorithm.len);
+        if (rc == SSH_OK) {
+            rc = ssh_buffer_put_string(&buf, raw_signature, raw_signature_len);
         }
     } else {
         rc = SSH_ERR_INVALID_ARGUMENT;
@@ -1341,6 +1633,11 @@ static int mbedtls_hostkey_import_private_auto(
     if (view_eq(hostkey_algorithm, "ssh-ed25519")) {
         return ssh_mbedtls_crypto_import_ed25519_hostkey(crypto, private_key_data, private_key_data_len);
     }
+    if (view_eq(hostkey_algorithm, "rsa-sha2-256") ||
+        view_eq(hostkey_algorithm, "rsa-sha2-512") ||
+        view_eq(hostkey_algorithm, "ssh-rsa")) {
+        return import_rsa_hostkey_auto(crypto, private_key_data, private_key_data_len);
+    }
     return SSH_ERR_UNSUPPORTED;
 }
 
@@ -1356,7 +1653,11 @@ static int mbedtls_hostkey_export_private(
     if (crypto == NULL || private_key == NULL || private_key_len == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256") || view_eq(hostkey_algorithm, "ssh-ed25519")) {
+    if (view_eq(hostkey_algorithm, "ecdsa-sha2-nistp256") ||
+        view_eq(hostkey_algorithm, "ssh-ed25519") ||
+        view_eq(hostkey_algorithm, "rsa-sha2-256") ||
+        view_eq(hostkey_algorithm, "rsa-sha2-512") ||
+        view_eq(hostkey_algorithm, "ssh-rsa")) {
         return ssh_mbedtls_crypto_export_hostkey_private(
             crypto,
             private_key,
@@ -1561,6 +1862,85 @@ int ssh_mbedtls_crypto_import_ecdsa_p256_hostkey(
         PSA_ALG_ECDSA(PSA_ALG_SHA_256),
         private_key,
         private_key_len);
+}
+
+static int import_rsa_hostkey_der(
+    ssh_mbedtls_crypto_t *ctx,
+    const uint8_t *private_key_der,
+    size_t private_key_der_len)
+{
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    mbedtls_svc_key_id_t key = 0;
+    psa_status_t status;
+
+    if (ctx == NULL || !ctx->initialized ||
+        private_key_der == NULL || private_key_der_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    destroy_owned_hostkey(ctx);
+
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_RSA_KEY_PAIR);
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_EXPORT);
+    psa_set_key_algorithm(&attributes, PSA_ALG_RSA_PKCS1V15_SIGN(PSA_ALG_SHA_256));
+
+    status = psa_import_key(&attributes, private_key_der, private_key_der_len, &key);
+    psa_reset_key_attributes(&attributes);
+    if (status != PSA_SUCCESS) {
+        return psa_ok_or_unsupported(status);
+    }
+
+    ctx->hostkey_id = (uint32_t)key;
+    ctx->owns_hostkey = 1;
+    return SSH_OK;
+}
+
+static int import_rsa_hostkey_auto(
+    ssh_mbedtls_crypto_t *ctx,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len)
+{
+    static const char k_begin_rsa[] = "-----BEGIN RSA PRIVATE KEY-----";
+    static const char k_end_rsa[] = "-----END RSA PRIVATE KEY-----";
+    static const char k_begin_pkcs8[] = "-----BEGIN PRIVATE KEY-----";
+    static const char k_end_pkcs8[] = "-----END PRIVATE KEY-----";
+    uint8_t der[4096];
+    size_t der_len;
+    int status;
+
+    if (ctx == NULL || private_key_data == NULL || private_key_data_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = decode_pem_block(
+        private_key_data,
+        private_key_data_len,
+        k_begin_rsa,
+        k_end_rsa,
+        der,
+        sizeof(der),
+        &der_len);
+    if (status == SSH_ERR_NOT_FOUND) {
+        status = decode_pem_block(
+            private_key_data,
+            private_key_data_len,
+            k_begin_pkcs8,
+            k_end_pkcs8,
+            der,
+            sizeof(der),
+            &der_len);
+    }
+    if (status == SSH_OK) {
+        int import_status = import_rsa_hostkey_der(ctx, der, der_len);
+        secure_zero_bytes(der, sizeof(der));
+        return import_status;
+    }
+    if (status != SSH_ERR_NOT_FOUND) {
+        secure_zero_bytes(der, sizeof(der));
+        return status;
+    }
+    secure_zero_bytes(der, sizeof(der));
+    return import_rsa_hostkey_der(ctx, private_key_data, private_key_data_len);
 }
 
 int ssh_mbedtls_crypto_export_hostkey_private(

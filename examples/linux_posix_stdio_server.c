@@ -35,7 +35,7 @@ typedef ssh_crypto_context_mbedtls_legacy_t linux_crypto_context_t;
 #define LINUX_SERVER_DEFAULT_WORKER_STACK_KB 1024u
 #define LINUX_SERVER_MAX_PATH 512u
 #define LINUX_SERVER_MAX_USERNAME 128u
-#define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 128u
+#define LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE 4096u
 #define LINUX_SERVER_MAX_HOSTKEY_FILE_BYTES 4096u
 #define LINUX_SERVER_PUTTY_REQ_SIMPLE "simple@putty.projects.tartarus.org"
 #define LINUX_SERVER_PUTTY_REQ_WINADJ "winadj@putty.projects.tartarus.org"
@@ -231,6 +231,9 @@ typedef struct app_shared {
     session_mode_t session_mode;
     crypto_provider_t crypto_provider;
     int sftp_trace_enabled;
+    ssh_kexinit_algorithm_set_t hostkey_kex_algorithms;
+    const char *selected_hostkey_algorithm_list;
+    int selected_hostkey_kind;
     uint8_t mbedtls_hostkey_private[LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE];
     size_t mbedtls_hostkey_private_len;
 } app_shared_t;
@@ -1354,14 +1357,126 @@ static void crypto_instance_deinit(crypto_instance_t *crypto_instance)
     memset(crypto_instance, 0, sizeof(*crypto_instance));
 }
 
-static ssh_string_view_t mbedtls_hostkey_algorithm_view(void)
+static int crypto_hostkey_import_private_auto(
+    const ssh_crypto_api_t *crypto,
+    ssh_string_view_t hostkey_algorithm,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len);
+
+typedef enum mbedtls_hostkey_kind {
+    LINUX_HOSTKEY_KIND_ECDSA_P256 = 0,
+    LINUX_HOSTKEY_KIND_ED25519 = 1,
+    LINUX_HOSTKEY_KIND_RSA_SHA2_256 = 2
+} mbedtls_hostkey_kind_t;
+
+static ssh_string_view_t mbedtls_hostkey_algorithm_view(mbedtls_hostkey_kind_t kind)
 {
-    static const char k_hostkey_alg[] = "ecdsa-sha2-nistp256";
+    static const char k_hostkey_alg_ecdsa[] = "ecdsa-sha2-nistp256";
+    static const char k_hostkey_alg_ed25519[] = "ssh-ed25519";
+    static const char k_hostkey_alg_rsa[] = "rsa-sha2-256";
     ssh_string_view_t view;
 
-    view.data = (const uint8_t *)k_hostkey_alg;
-    view.len = sizeof(k_hostkey_alg) - 1u;
+    if (kind == LINUX_HOSTKEY_KIND_RSA_SHA2_256) {
+        view.data = (const uint8_t *)k_hostkey_alg_rsa;
+        view.len = sizeof(k_hostkey_alg_rsa) - 1u;
+        return view;
+    }
+    if (kind == LINUX_HOSTKEY_KIND_ED25519) {
+        view.data = (const uint8_t *)k_hostkey_alg_ed25519;
+        view.len = sizeof(k_hostkey_alg_ed25519) - 1u;
+        return view;
+    }
+    view.data = (const uint8_t *)k_hostkey_alg_ecdsa;
+    view.len = sizeof(k_hostkey_alg_ecdsa) - 1u;
     return view;
+}
+
+static const char *mbedtls_hostkey_algorithm_list(mbedtls_hostkey_kind_t kind)
+{
+    if (kind == LINUX_HOSTKEY_KIND_RSA_SHA2_256) {
+        return "rsa-sha2-256";
+    }
+    if (kind == LINUX_HOSTKEY_KIND_ED25519) {
+        return "ssh-ed25519";
+    }
+    return "ecdsa-sha2-nistp256";
+}
+
+static int bytes_contain_ascii(
+    const uint8_t *data,
+    size_t data_len,
+    const char *needle)
+{
+    size_t needle_len;
+    size_t i;
+
+    if (data == NULL || needle == NULL) {
+        return 0;
+    }
+    needle_len = strlen(needle);
+    if (needle_len == 0u || needle_len > data_len) {
+        return 0;
+    }
+
+    for (i = 0u; i + needle_len <= data_len; ++i) {
+        if (memcmp(data + i, needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int import_hostkey_auto_with_kind(
+    const ssh_crypto_api_t *crypto,
+    const uint8_t *private_key_data,
+    size_t private_key_data_len,
+    mbedtls_hostkey_kind_t *kind_out)
+{
+    static const mbedtls_hostkey_kind_t rsa_first_order[] = {
+        LINUX_HOSTKEY_KIND_RSA_SHA2_256,
+        LINUX_HOSTKEY_KIND_ECDSA_P256,
+        LINUX_HOSTKEY_KIND_ED25519
+    };
+    static const mbedtls_hostkey_kind_t default_order[] = {
+        LINUX_HOSTKEY_KIND_ECDSA_P256,
+        LINUX_HOSTKEY_KIND_ED25519,
+        LINUX_HOSTKEY_KIND_RSA_SHA2_256
+    };
+    const mbedtls_hostkey_kind_t *order;
+    size_t order_len;
+    size_t i;
+    int status;
+
+    if (crypto == NULL || private_key_data == NULL || private_key_data_len == 0u || kind_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (bytes_contain_ascii(private_key_data, private_key_data_len, "BEGIN RSA PRIVATE KEY") ||
+        bytes_contain_ascii(private_key_data, private_key_data_len, "BEGIN PRIVATE KEY")) {
+        order = rsa_first_order;
+        order_len = sizeof(rsa_first_order) / sizeof(rsa_first_order[0]);
+    } else {
+        order = default_order;
+        order_len = sizeof(default_order) / sizeof(default_order[0]);
+    }
+
+    for (i = 0u; i < order_len; ++i) {
+        ssh_string_view_t candidate_alg = mbedtls_hostkey_algorithm_view(order[i]);
+        status = crypto_hostkey_import_private_auto(
+            crypto,
+            candidate_alg,
+            private_key_data,
+            private_key_data_len);
+        if (status == SSH_OK) {
+            *kind_out = order[i];
+            return SSH_OK;
+        }
+        if (status != SSH_ERR_UNSUPPORTED && status != SSH_ERR_PLATFORM) {
+            return status;
+        }
+    }
+
+    return SSH_ERR_UNSUPPORTED;
 }
 
 static int crypto_hostkey_import_private_auto(
@@ -1497,7 +1612,7 @@ static int crypto_instance_init(crypto_instance_t *crypto_instance, const app_sh
     switch (crypto_instance->type) {
     case CRYPTO_PROVIDER_MBEDTLS:
     {
-        ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
+        ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view((mbedtls_hostkey_kind_t)shared->selected_hostkey_kind);
 
         status = ssh_crypto_open(LINUX_CTX_PTR(&crypto_instance->crypto_ctx));
         if (status != SSH_OK) {
@@ -1527,17 +1642,19 @@ static int crypto_instance_init(crypto_instance_t *crypto_instance, const app_sh
 static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
 {
     linux_crypto_context_t bootstrap_crypto_ctx;
-    ssh_string_view_t hostkey_alg = mbedtls_hostkey_algorithm_view();
+    ssh_string_view_t hostkey_alg;
     const ssh_crypto_api_t *crypto;
     const ssh_fs_api_t *host_fs_api;
     uint8_t hostkey_file_data[LINUX_SERVER_MAX_HOSTKEY_FILE_BYTES];
     size_t hostkey_file_len;
     int status;
+    mbedtls_hostkey_kind_t detected_kind;
 
     if (shared->crypto_provider != CRYPTO_PROVIDER_MBEDTLS) {
         return SSH_OK;
     }
 
+    detected_kind = LINUX_HOSTKEY_KIND_ECDSA_P256;
     if (shared->hostkey_path_from_config != NULL) {
         host_fs_api = ssh_stdio_fs_api(&shared->host_fs);
         if (host_fs_api == NULL) {
@@ -1563,12 +1680,13 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             return status;
         }
         crypto = ssh_crypto_api(LINUX_CTX_CONST_PTR(&bootstrap_crypto_ctx));
-        status = crypto_hostkey_import_private_auto(
+        status = import_hostkey_auto_with_kind(
             crypto,
-            hostkey_alg,
             hostkey_file_data,
-            hostkey_file_len);
+            hostkey_file_len,
+            &detected_kind);
         if (status == SSH_OK) {
+            hostkey_alg = mbedtls_hostkey_algorithm_view(detected_kind);
             status = crypto_hostkey_export_private(
                 crypto,
                 hostkey_alg,
@@ -1577,6 +1695,12 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
                 &shared->mbedtls_hostkey_private_len);
         }
         ssh_crypto_close(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
+        if (status == SSH_OK) {
+            shared->selected_hostkey_kind = (int)detected_kind;
+            shared->selected_hostkey_algorithm_list = mbedtls_hostkey_algorithm_list(detected_kind);
+            shared->hostkey_kex_algorithms.server_host_key_algorithms = shared->selected_hostkey_algorithm_list;
+            shared->base_session_options.algorithms = &shared->hostkey_kex_algorithms;
+        }
         return status;
     }
 
@@ -1586,6 +1710,7 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
         return status;
     }
     crypto = ssh_crypto_api(LINUX_CTX_CONST_PTR(&bootstrap_crypto_ctx));
+    hostkey_alg = mbedtls_hostkey_algorithm_view(LINUX_HOSTKEY_KIND_ECDSA_P256);
     status = crypto_hostkey_generate(crypto, hostkey_alg);
     if (status == SSH_OK) {
         status = crypto_hostkey_export_private(
@@ -1596,6 +1721,12 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             &shared->mbedtls_hostkey_private_len);
     }
     ssh_crypto_close(LINUX_CTX_PTR(&bootstrap_crypto_ctx));
+    if (status == SSH_OK) {
+        shared->selected_hostkey_kind = (int)LINUX_HOSTKEY_KIND_ECDSA_P256;
+        shared->selected_hostkey_algorithm_list = mbedtls_hostkey_algorithm_list(LINUX_HOSTKEY_KIND_ECDSA_P256);
+        shared->hostkey_kex_algorithms.server_host_key_algorithms = shared->selected_hostkey_algorithm_list;
+        shared->base_session_options.algorithms = &shared->hostkey_kex_algorithms;
+    }
     return status;
 }
 
@@ -1613,6 +1744,11 @@ static int initialize_server_templates(
     ssh_server_config_defaults(&shared->base_server_config);
     ssh_server_session_options_defaults(&shared->base_session_options);
     shared->base_session_options.timeout_ms = LINUX_SERVER_DEFAULT_TIMEOUT_MS;
+    ssh_mbedtls_kexinit_algorithm_set_defaults(&shared->hostkey_kex_algorithms);
+    shared->selected_hostkey_kind = (int)LINUX_HOSTKEY_KIND_ECDSA_P256;
+    shared->selected_hostkey_algorithm_list = mbedtls_hostkey_algorithm_list(LINUX_HOSTKEY_KIND_ECDSA_P256);
+    shared->hostkey_kex_algorithms.server_host_key_algorithms = shared->selected_hostkey_algorithm_list;
+    shared->base_session_options.algorithms = &shared->hostkey_kex_algorithms;
     shared->port = LINUX_SERVER_DEFAULT_PORT;
     shared->has_sshd_config_path = 0;
     shared->sshd_config_path[0] = '\0';

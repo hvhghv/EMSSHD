@@ -1,0 +1,10 @@
+# emsshd minimal config (publickey-only)
+Port 2222
+ListenAddress 0.0.0.0
+
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile ./interop_authorized_ed25519.keys
+
+HostKey ./hostkey.p256.raw
+Subsystem sftp sftp

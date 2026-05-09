@@ -157,6 +157,71 @@ static int rsa_signature_blob_encode(
     return SSH_OK;
 }
 
+static int der_to_rsa_private_pem(
+    const uint8_t *der,
+    size_t der_len,
+    char *pem,
+    size_t pem_capacity,
+    size_t *pem_len)
+{
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const char begin[] = "-----BEGIN RSA PRIVATE KEY-----\n";
+    static const char end[] = "-----END RSA PRIVATE KEY-----\n";
+    size_t i;
+    size_t used;
+    size_t line;
+
+    if (der == NULL || pem == NULL || pem_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    used = 0u;
+    if (sizeof(begin) - 1u + sizeof(end) - 1u + 1u > pem_capacity) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    memcpy(pem + used, begin, sizeof(begin) - 1u);
+    used += sizeof(begin) - 1u;
+    line = 0u;
+
+    for (i = 0u; i < der_len; i += 3u) {
+        uint32_t triple = 0u;
+        size_t rem = der_len - i;
+        if (rem > 3u) {
+            rem = 3u;
+        }
+        triple |= ((uint32_t)der[i]) << 16;
+        if (rem > 1u) {
+            triple |= ((uint32_t)der[i + 1u]) << 8;
+        }
+        if (rem > 2u) {
+            triple |= (uint32_t)der[i + 2u];
+        }
+
+        if (used + 4u + 2u + (sizeof(end) - 1u) + 1u > pem_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+
+        pem[used++] = b64[(triple >> 18) & 0x3fu];
+        pem[used++] = b64[(triple >> 12) & 0x3fu];
+        pem[used++] = rem > 1u ? b64[(triple >> 6) & 0x3fu] : '=';
+        pem[used++] = rem > 2u ? b64[triple & 0x3fu] : '=';
+        line += 4u;
+
+        if (line >= 64u) {
+            pem[used++] = '\n';
+            line = 0u;
+        }
+    }
+    if (line != 0u) {
+        pem[used++] = '\n';
+    }
+    memcpy(pem + used, end, sizeof(end) - 1u);
+    used += sizeof(end) - 1u;
+    pem[used] = '\0';
+    *pem_len = used;
+    return SSH_OK;
+}
+
 int main(void)
 {
     ssh_mbedtls_crypto_t crypto_ctx;
@@ -180,6 +245,10 @@ int main(void)
     uint8_t rsa_raw_signature[192];
     uint8_t rsa_signature_blob[256];
     uint8_t rsa_legacy_signature_blob[256];
+    uint8_t rsa_private_der[2048];
+    char rsa_private_pem[3072];
+    uint8_t rsa_hostkey_blob[EMSSH_MAX_HOST_KEY_BLOB];
+    uint8_t rsa_hostkey_signature[EMSSH_MAX_SIGNATURE];
     uint8_t hostkey_private[128];
     uint8_t hash[EMSSH_MAX_EXCHANGE_HASH];
     uint8_t signature[EMSSH_MAX_SIGNATURE];
@@ -202,6 +271,10 @@ int main(void)
     size_t rsa_raw_signature_len;
     size_t rsa_signature_blob_len;
     size_t rsa_legacy_signature_blob_len;
+    size_t rsa_private_der_len;
+    size_t rsa_private_pem_len;
+    size_t rsa_hostkey_blob_len;
+    size_t rsa_hostkey_signature_len;
     size_t hostkey_private_len;
     size_t hash_len;
     size_t signature_len;
@@ -409,6 +482,13 @@ int main(void)
         psa_status_t rsa_status = psa_generate_key(&rsa_attributes, &rsa_key);
         psa_reset_key_attributes(&rsa_attributes);
         if (rsa_status == PSA_SUCCESS) {
+            CHECK(psa_export_key(rsa_key, rsa_private_der, sizeof(rsa_private_der), &rsa_private_der_len) == PSA_SUCCESS);
+            CHECK(der_to_rsa_private_pem(
+                rsa_private_der,
+                rsa_private_der_len,
+                rsa_private_pem,
+                sizeof(rsa_private_pem),
+                &rsa_private_pem_len) == SSH_OK);
             CHECK(psa_export_public_key(rsa_key, rsa_public_der, sizeof(rsa_public_der), &rsa_public_der_len) == PSA_SUCCESS);
             CHECK(psa_sign_message(
                 rsa_key,
@@ -457,6 +537,37 @@ int main(void)
                 rsa_legacy_signature_blob,
                 rsa_legacy_signature_blob_len);
             CHECK(status == SSH_ERR_UNSUPPORTED);
+
+            CHECK(imported_crypto->hostkey_import_private_auto(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                (const uint8_t *)rsa_private_pem,
+                rsa_private_pem_len) == SSH_OK);
+            CHECK(imported_crypto->hostkey_public(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                rsa_hostkey_blob,
+                sizeof(rsa_hostkey_blob),
+                &rsa_hostkey_blob_len) == SSH_OK);
+            CHECK(rsa_hostkey_blob_len > strlen("ssh-rsa"));
+            CHECK(imported_crypto->hostkey_sign(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                hash,
+                hash_len,
+                rsa_hostkey_signature,
+                sizeof(rsa_hostkey_signature),
+                &rsa_hostkey_signature_len) == SSH_OK);
+            CHECK(imported_crypto->publickey_verify(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                rsa_hostkey_blob,
+                rsa_hostkey_blob_len,
+                hash,
+                hash_len,
+                rsa_hostkey_signature,
+                rsa_hostkey_signature_len) == SSH_OK);
+
             CHECK(psa_destroy_key(rsa_key) == PSA_SUCCESS);
             rsa_key = 0;
         } else {
