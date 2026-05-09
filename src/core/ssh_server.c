@@ -89,6 +89,50 @@ static uint32_t read_u32_be_local(const uint8_t data[4])
            (uint32_t)data[3];
 }
 
+static void write_u32_be_local(uint8_t data[4], uint32_t value)
+{
+    data[0] = (uint8_t)(value >> 24);
+    data[1] = (uint8_t)(value >> 16);
+    data[2] = (uint8_t)(value >> 8);
+    data[3] = (uint8_t)value;
+}
+
+static int shrink_sftp_data_response_to_limit(
+    uint8_t *response,
+    size_t *response_len,
+    size_t wire_limit)
+{
+    size_t payload_len;
+    size_t max_data_len;
+
+    if (response == NULL || response_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (*response_len < 13u) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    if (response[4] != SSH_FXP_DATA) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    if (wire_limit >= *response_len) {
+        return SSH_OK;
+    }
+    if (wire_limit <= 13u) {
+        return SSH_ERR_NOT_FOUND;
+    }
+
+    max_data_len = wire_limit - 13u;
+    payload_len = 1u + 4u + 4u + max_data_len;
+    if (payload_len > 0xffffffffu || max_data_len > 0xffffffffu) {
+        return SSH_ERR_BUFFER_OVERFLOW;
+    }
+
+    write_u32_be_local(response, (uint32_t)payload_len);
+    write_u32_be_local(response + 9u, (uint32_t)max_data_len);
+    *response_len = wire_limit;
+    return SSH_OK;
+}
+
 static uint32_t min_u32_local(uint32_t lhs, uint32_t rhs)
 {
     return lhs < rhs ? lhs : rhs;
@@ -1510,11 +1554,23 @@ int ssh_server_process_sftp_channel_data(
             sftp_trace_log_line(transport, trace_enabled, line);
         }
 
-        if (channel->peer_max_packet_size != 0u && response_len > channel->peer_max_packet_size) {
-            return SSH_ERR_BUFFER_TOO_SMALL;
-        }
         if (response_len > channel->peer_window_size) {
             return SSH_ERR_NOT_FOUND;
+        }
+        if (channel->peer_max_packet_size != 0u && response_len > channel->peer_max_packet_size) {
+            status = shrink_sftp_data_response_to_limit(
+                response,
+                &response_len,
+                (size_t)channel->peer_max_packet_size);
+            if (status == SSH_ERR_UNSUPPORTED) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            if (status != SSH_OK) {
+                return status;
+            }
+            if (response_len > channel->peer_window_size) {
+                return SSH_ERR_NOT_FOUND;
+            }
         }
 
         status = ssh_transport_send_channel_data(

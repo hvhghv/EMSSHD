@@ -73,14 +73,6 @@ static int signature_algorithms_valid(const char *value)
     return ssh_name_list_is_valid(list);
 }
 
-static int channel_request_is_ignorable_for_message_loop(ssh_string_view_t request_type)
-{
-    return
-        view_equals_cstr(request_type, "simple@putty.projects.tartarus.org") ||
-        view_equals_cstr(request_type, "winadj@putty.projects.tartarus.org") ||
-        view_equals_cstr(request_type, SSH_CHANNEL_REQUEST_X11_REQ);
-}
-
 static size_t view_algorithm_size(ssh_string_view_t view, const char *algorithm, size_t value)
 {
     size_t len;
@@ -2141,8 +2133,7 @@ int ssh_transport_receive_channel_message(
                 ssh_buffer_wrap(&request_buf, session->channel_message_payload, payload_len);
                 (void)ssh_channel_request_decode(&request_buf, &request_diag);
                 record_last_channel_request_diag(session, &request_diag);
-
-                if (channel_request_is_ignorable_for_message_loop(request_diag.request_type)) {
+                if (request_diag.request_type.data != NULL) {
                     if (request_diag.want_reply) {
                         status = ssh_transport_send_channel_failure(
                             session,
