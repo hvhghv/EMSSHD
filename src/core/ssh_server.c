@@ -1596,9 +1596,6 @@ int ssh_server_process_sftp_channel_data(
             sftp_trace_log_line(transport, trace_enabled, line);
         }
 
-        if (response_len > channel->peer_window_size) {
-            return SSH_ERR_NOT_FOUND;
-        }
         if (channel->peer_max_packet_size != 0u && response_len > channel->peer_max_packet_size) {
             status = shrink_sftp_data_response_to_limit(
                 response,
@@ -1609,9 +1606,6 @@ int ssh_server_process_sftp_channel_data(
             }
             if (status != SSH_OK) {
                 return status;
-            }
-            if (response_len > channel->peer_window_size) {
-                return SSH_ERR_NOT_FOUND;
             }
         }
 
