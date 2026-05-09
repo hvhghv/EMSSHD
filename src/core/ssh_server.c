@@ -519,7 +519,16 @@ static int maybe_flush_pending_sftp_response(
         return SSH_ERR_BUFFER_TOO_SMALL;
     }
     if (channel->sftp_tx_pending_len > channel->peer_window_size) {
-        return SSH_ERR_NOT_FOUND;
+        status = shrink_sftp_data_response_to_limit(
+            channel->sftp_tx_pending,
+            &channel->sftp_tx_pending_len,
+            (size_t)channel->peer_window_size);
+        if (status == SSH_ERR_UNSUPPORTED || status == SSH_ERR_NOT_FOUND) {
+            return SSH_ERR_NOT_FOUND;
+        }
+        if (status != SSH_OK) {
+            return status;
+        }
     }
 
     status = ssh_transport_send_channel_data(
@@ -1616,12 +1625,21 @@ int ssh_server_process_sftp_channel_data(
         channel->sftp_rx_len = remaining_len;
 
         if (response_len > channel->peer_window_size) {
-            if (response_len > sizeof(channel->sftp_tx_pending)) {
-                return SSH_ERR_BUFFER_TOO_SMALL;
+            status = shrink_sftp_data_response_to_limit(
+                response,
+                &response_len,
+                (size_t)channel->peer_window_size);
+            if (status == SSH_ERR_UNSUPPORTED || status == SSH_ERR_NOT_FOUND) {
+                if (response_len > sizeof(channel->sftp_tx_pending)) {
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                memcpy(channel->sftp_tx_pending, response, response_len);
+                channel->sftp_tx_pending_len = response_len;
+                return SSH_ERR_NOT_FOUND;
             }
-            memcpy(channel->sftp_tx_pending, response, response_len);
-            channel->sftp_tx_pending_len = response_len;
-            return SSH_ERR_NOT_FOUND;
+            if (status != SSH_OK) {
+                return status;
+            }
         }
 
         status = ssh_transport_send_channel_data(
