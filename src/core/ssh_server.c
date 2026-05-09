@@ -500,6 +500,43 @@ static int maybe_replenish_receive_window(
     return SSH_OK;
 }
 
+static int maybe_flush_pending_sftp_response(
+    struct ssh_transport_session *transport,
+    void *conn,
+    ssh_server_sftp_channel_t *channel,
+    const ssh_server_session_options_t *effective)
+{
+    int status;
+
+    if (transport == NULL || conn == NULL || channel == NULL || effective == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (channel->sftp_tx_pending_len == 0u) {
+        return SSH_OK;
+    }
+    if (channel->peer_max_packet_size != 0u &&
+        channel->sftp_tx_pending_len > channel->peer_max_packet_size) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    if (channel->sftp_tx_pending_len > channel->peer_window_size) {
+        return SSH_ERR_NOT_FOUND;
+    }
+
+    status = ssh_transport_send_channel_data(
+        transport,
+        conn,
+        channel->client_channel,
+        channel->sftp_tx_pending,
+        channel->sftp_tx_pending_len,
+        effective->timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+    channel->peer_window_size -= (uint32_t)channel->sftp_tx_pending_len;
+    channel->sftp_tx_pending_len = 0u;
+    return SSH_OK;
+}
+
 static void effective_session_options(
     const ssh_server_session_options_t *options,
     ssh_server_session_options_t *effective)
@@ -1433,6 +1470,11 @@ int ssh_server_process_sftp_channel_data(
         }
     }
 
+    status = maybe_flush_pending_sftp_response(transport, conn, channel, &effective);
+    if (status != SSH_OK) {
+        return status;
+    }
+
     while (channel->sftp_rx_len >= 4u) {
         uint32_t sftp_packet_length = read_u32_be_local(channel->sftp_rx);
         size_t sftp_wire_len;
@@ -1573,6 +1615,21 @@ int ssh_server_process_sftp_channel_data(
             }
         }
 
+        remaining_len = channel->sftp_rx_len - sftp_wire_len;
+        if (remaining_len != 0u) {
+            memmove(channel->sftp_rx, channel->sftp_rx + sftp_wire_len, remaining_len);
+        }
+        channel->sftp_rx_len = remaining_len;
+
+        if (response_len > channel->peer_window_size) {
+            if (response_len > sizeof(channel->sftp_tx_pending)) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            memcpy(channel->sftp_tx_pending, response, response_len);
+            channel->sftp_tx_pending_len = response_len;
+            return SSH_ERR_NOT_FOUND;
+        }
+
         status = ssh_transport_send_channel_data(
             transport,
             conn,
@@ -1584,12 +1641,6 @@ int ssh_server_process_sftp_channel_data(
             return status;
         }
         channel->peer_window_size -= (uint32_t)response_len;
-
-        remaining_len = channel->sftp_rx_len - sftp_wire_len;
-        if (remaining_len != 0u) {
-            memmove(channel->sftp_rx, channel->sftp_rx + sftp_wire_len, remaining_len);
-        }
-        channel->sftp_rx_len = remaining_len;
     }
 
     return SSH_OK;

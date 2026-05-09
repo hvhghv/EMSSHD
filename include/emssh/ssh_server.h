@@ -99,6 +99,8 @@ typedef struct ssh_server_sftp_channel {
     int close_sent;
     uint8_t sftp_rx[EMSSH_MAX_PACKET_SIZE];
     size_t sftp_rx_len;
+    uint8_t sftp_tx_pending[EMSSH_MAX_PACKET_SIZE];
+    size_t sftp_tx_pending_len;
     sftp_server_session_t sftp;
 } ssh_server_sftp_channel_t;
 
