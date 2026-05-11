@@ -1,5 +1,6 @@
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1176,6 +1177,19 @@ static int env_flag_enabled(const char *name)
            strcmp(value, "on") == 0;
 }
 
+static void conn_trace_log(const app_shared_t *shared, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (shared == NULL || !shared->conn_trace_enabled || fmt == NULL) {
+        return;
+    }
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fflush(stderr);
+}
+
 static int parse_args(int argc, char **argv, program_options_t *opts)
 {
     int i;
@@ -1998,13 +2012,11 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         return SSH_ERR_INVALID_ARGUMENT;
     }
     peer = ssh_posix_conn_peer_address(conn);
-    if (shared->conn_trace_enabled) {
-        fprintf(
-            stderr,
-            "[emssh][INFO] conn-trace: worker start peer=%s mode=%s\n",
-            peer != NULL ? peer : "unknown",
-            session_mode_name(shared->session_mode));
-    }
+    conn_trace_log(
+        shared,
+        "[emssh][INFO] conn-trace: worker start peer=%s mode=%s\n",
+        peer != NULL ? peer : "unknown",
+        session_mode_name(shared->session_mode));
     set_linux_server_stage(LINUX_STAGE_WORKER_START);
 
     memset(&crypto_instance, 0, sizeof(crypto_instance));
@@ -2077,14 +2089,14 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         status = ssh_server_run_sftp_session(&server, conn, &options);
     }
     if (shared->conn_trace_enabled) {
-        fprintf(
-            stderr,
+        conn_trace_log(
+            shared,
             "[emssh][INFO] conn-trace: worker end peer=%s status=%s\n",
             peer != NULL ? peer : "unknown",
             ssh_status_string(status));
         if (server.diag_last_received_message_id_valid) {
-            fprintf(
-                stderr,
+            conn_trace_log(
+                shared,
                 "[emssh][INFO] conn-trace: peer=%s last-msg-id=%u (0x%02x)\n",
                 peer != NULL ? peer : "unknown",
                 (unsigned)server.diag_last_received_message_id,
@@ -2132,14 +2144,12 @@ static void *worker_main(void *arg)
         const char *peer_before_close = ssh_posix_conn_peer_address(&task->conn);
         int session_status = run_worker_session(task->shared, &task->conn);
         int close_status = ssh_posix_conn_close(&task->shared->net, &task->conn);
-        if (task->shared->conn_trace_enabled) {
-            fprintf(
-                stderr,
-                "[emssh][INFO] conn-trace: worker cleanup peer=%s session=%s close=%s\n",
-                peer_before_close != NULL ? peer_before_close : "unknown",
-                ssh_status_string(session_status),
-                ssh_status_string(close_status));
-        }
+        conn_trace_log(
+            task->shared,
+            "[emssh][INFO] conn-trace: worker cleanup peer=%s session=%s close=%s\n",
+            peer_before_close != NULL ? peer_before_close : "unknown",
+            ssh_status_string(session_status),
+            ssh_status_string(close_status));
         worker_pool_release_slot(task->pool);
         free(task);
     }
@@ -2370,8 +2380,8 @@ int main(int argc, char **argv)
         }
         if (shared.conn_trace_enabled) {
             const char *peer = ssh_posix_conn_peer_address(&conn);
-            fprintf(
-                stderr,
+            conn_trace_log(
+                &shared,
                 "[emssh][INFO] conn-trace: accepted peer=%s\n",
                 peer != NULL ? peer : "unknown");
         }
