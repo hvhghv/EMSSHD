@@ -1581,7 +1581,7 @@ int ssh_server_process_sftp_channel_data(
         uint32_t request_id;
         int has_request_id;
 
-        if (sftp_packet_length == 0u || sftp_packet_length > EMSSH_MAX_PACKET_SIZE - 4u) {
+        if (sftp_packet_length == 0u || sftp_packet_length > EMSSH_SFTP_MAX_PACKET_SIZE - 4u) {
             char line[192];
             size_t used = 0u;
 

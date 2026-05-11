@@ -31,6 +31,15 @@
 #define EMSSH_MAX_PAYLOAD_SIZE 32768u
 #endif
 
+#ifndef EMSSH_SFTP_MAX_PACKET_SIZE
+/*
+ * SFTP logical packet can be larger than one SSH channel-data frame.
+ * Keep this independent from EMSSH_MAX_PACKET_SIZE so fragmented
+ * WRITE packets (for example ~64 KiB payloads) can be reassembled.
+ */
+#define EMSSH_SFTP_MAX_PACKET_SIZE 131072u
+#endif
+
 #ifndef EMSSH_MAX_AUTH_TRIES
 #define EMSSH_MAX_AUTH_TRIES 6u
 #endif
