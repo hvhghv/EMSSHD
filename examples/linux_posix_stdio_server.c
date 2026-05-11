@@ -231,6 +231,7 @@ typedef struct app_shared {
     session_mode_t session_mode;
     crypto_provider_t crypto_provider;
     int sftp_trace_enabled;
+    int conn_trace_enabled;
     ssh_kexinit_algorithm_set_t hostkey_kex_algorithms;
     const char *selected_hostkey_algorithm_list;
     int selected_hostkey_kind;
@@ -274,7 +275,8 @@ static void usage(const char *program)
         "  --session-mode <mode>    auto|sftp|terminal (default: auto)\n"
         "  --backend|--crypto <name>         mbedtls|mbedtls-legacy (fixed)\n"
         "env:\n"
-        "  EMSSH_SFTP_TRACE=1       Enable SFTP trace logs (packet type/id/len and result)\n",
+        "  EMSSH_SFTP_TRACE=1       Enable SFTP trace logs (packet type/id/len and result)\n"
+        "  EMSSH_CONN_TRACE=1       Enable connection lifecycle trace logs (accept/run/close)\n",
         program);
 }
 
@@ -1990,9 +1992,18 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     char local_addr_buf[64];
     int status;
     int initialized_server;
+    const char *peer;
 
     if (shared == NULL || conn == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
+    }
+    peer = ssh_posix_conn_peer_address(conn);
+    if (shared->conn_trace_enabled) {
+        fprintf(
+            stderr,
+            "[emssh][INFO] conn-trace: worker start peer=%s mode=%s\n",
+            peer != NULL ? peer : "unknown",
+            session_mode_name(shared->session_mode));
     }
     set_linux_server_stage(LINUX_STAGE_WORKER_START);
 
@@ -2065,8 +2076,22 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
     } else {
         status = ssh_server_run_sftp_session(&server, conn, &options);
     }
+    if (shared->conn_trace_enabled) {
+        fprintf(
+            stderr,
+            "[emssh][INFO] conn-trace: worker end peer=%s status=%s\n",
+            peer != NULL ? peer : "unknown",
+            ssh_status_string(status));
+        if (server.diag_last_received_message_id_valid) {
+            fprintf(
+                stderr,
+                "[emssh][INFO] conn-trace: peer=%s last-msg-id=%u (0x%02x)\n",
+                peer != NULL ? peer : "unknown",
+                (unsigned)server.diag_last_received_message_id,
+                (unsigned)server.diag_last_received_message_id);
+        }
+    }
     if (status != SSH_OK) {
-        const char *peer = ssh_posix_conn_peer_address(conn);
         fprintf(stderr, "session %s ended: %s\n", peer != NULL ? peer : "unknown", ssh_status_string(status));
         if (server.diag_last_received_message_id_valid) {
             fprintf(
@@ -2104,8 +2129,17 @@ static void *worker_main(void *arg)
     worker_task_t *task = (worker_task_t *)arg;
 
     if (task != NULL) {
-        (void)run_worker_session(task->shared, &task->conn);
-        (void)ssh_posix_conn_close(&task->shared->net, &task->conn);
+        const char *peer_before_close = ssh_posix_conn_peer_address(&task->conn);
+        int session_status = run_worker_session(task->shared, &task->conn);
+        int close_status = ssh_posix_conn_close(&task->shared->net, &task->conn);
+        if (task->shared->conn_trace_enabled) {
+            fprintf(
+                stderr,
+                "[emssh][INFO] conn-trace: worker cleanup peer=%s session=%s close=%s\n",
+                peer_before_close != NULL ? peer_before_close : "unknown",
+                ssh_status_string(session_status),
+                ssh_status_string(close_status));
+        }
         worker_pool_release_slot(task->pool);
         free(task);
     }
@@ -2167,6 +2201,7 @@ int main(int argc, char **argv)
     shared.crypto_provider = opts.crypto_provider;
     shared.session_mode = opts.session_mode;
     shared.sftp_trace_enabled = env_flag_enabled("EMSSH_SFTP_TRACE");
+    shared.conn_trace_enabled = env_flag_enabled("EMSSH_CONN_TRACE");
     if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
         fprintf(stderr, "invalid --worker-stack-kb value: overflow\n");
         return 2;
@@ -2310,6 +2345,9 @@ int main(int argc, char **argv)
     if (shared.sftp_trace_enabled) {
         printf("note: EMSSH_SFTP_TRACE enabled (SFTP request/response trace is on).\n");
     }
+    if (shared.conn_trace_enabled) {
+        printf("note: EMSSH_CONN_TRACE enabled (connection lifecycle trace is on).\n");
+    }
     fflush(stdout);
     set_linux_server_stage(LINUX_STAGE_MAIN_LISTEN);
 
@@ -2329,6 +2367,13 @@ int main(int argc, char **argv)
             worker_pool_release_slot(&pool);
             fprintf(stderr, "accept failed: %s\n", ssh_status_string(status));
             continue;
+        }
+        if (shared.conn_trace_enabled) {
+            const char *peer = ssh_posix_conn_peer_address(&conn);
+            fprintf(
+                stderr,
+                "[emssh][INFO] conn-trace: accepted peer=%s\n",
+                peer != NULL ? peer : "unknown");
         }
         set_linux_server_stage(LINUX_STAGE_MAIN_ACCEPTED);
 
