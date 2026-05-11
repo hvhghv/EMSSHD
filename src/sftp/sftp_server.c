@@ -181,6 +181,39 @@ static int copy_path(ssh_string_view_t path, char out[EMSSH_SFTP_MAX_PATH])
     return normalize_path_view(path, out);
 }
 
+static int make_realpath_reply_path(const char *normalized_path, char out[EMSSH_SFTP_MAX_PATH])
+{
+    size_t len;
+
+    if (normalized_path == NULL || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (normalized_path[0] == '/') {
+        len = strlen(normalized_path);
+        if (len + 1u > EMSSH_SFTP_MAX_PATH) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        memcpy(out, normalized_path, len + 1u);
+        return SSH_OK;
+    }
+
+    if (normalized_path[0] == '.' && normalized_path[1] == '\0') {
+        out[0] = '/';
+        out[1] = '\0';
+        return SSH_OK;
+    }
+
+    len = strlen(normalized_path);
+    if (len + 2u > EMSSH_SFTP_MAX_PATH) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    out[0] = '/';
+    memcpy(out + 1u, normalized_path, len + 1u);
+    return SSH_OK;
+}
+
 static int open_pflags_are_valid(uint32_t pflags)
 {
     uint32_t known_flags = SSH_FXF_READ | SSH_FXF_WRITE | SSH_FXF_APPEND | SSH_FXF_CREAT | SSH_FXF_TRUNC | SSH_FXF_EXCL;
@@ -546,6 +579,7 @@ static int handle_realpath(
 {
     sftp_path_request_t realpath;
     char path[EMSSH_SFTP_MAX_PATH];
+    char reply_path[EMSSH_SFTP_MAX_PATH];
     int status;
 
     status = sftp_realpath_request_decode(request, request_len, &realpath);
@@ -562,7 +596,12 @@ static int handle_realpath(
         return encode_status(response, response_capacity, response_len, realpath.id, status_from_error(status), "realpath denied");
     }
 
-    return sftp_name_one_encode(response, response_capacity, response_len, realpath.id, path, path);
+    status = make_realpath_reply_path(path, reply_path);
+    if (status != SSH_OK) {
+        return encode_status(response, response_capacity, response_len, realpath.id, status_from_error(status), "realpath reply failed");
+    }
+
+    return sftp_name_one_encode(response, response_capacity, response_len, realpath.id, reply_path, reply_path);
 }
 
 static int handle_path_attrs(
