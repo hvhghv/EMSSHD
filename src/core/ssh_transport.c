@@ -1,5 +1,7 @@
 #include "emssh/ssh_transport.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "emssh/ssh_config.h"
@@ -12,6 +14,31 @@
 #include "emssh/ssh_userauth.h"
 
 #define EMSSH_NET_IO_TIMEOUT (-2)
+
+static int transport_trace_enabled_local(void)
+{
+    const char *value = getenv("EMSSH_CONN_TRACE");
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "on") == 0;
+}
+
+static void transport_trace_status_log_local(const char *stage, int status)
+{
+    if (!transport_trace_enabled_local()) {
+        return;
+    }
+    fprintf(
+        stderr,
+        "[emssh][INFO] conn-trace: kex-reply %s=%s\n",
+        stage != NULL ? stage : "(null)",
+        ssh_status_string(status));
+    fflush(stderr);
+}
 
 static int is_space(uint8_t c)
 {
@@ -752,7 +779,7 @@ int ssh_transport_send_kexinit(
 
     status = session->server->platform.rng->fill(session->server->platform.rng->ctx, cookie, sizeof(cookie));
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     ssh_buffer_init(&payload, session->server_kexinit_payload, sizeof(session->server_kexinit_payload));
@@ -956,8 +983,9 @@ int ssh_transport_send_kex_ecdh_reply(
         session->server_kex_private_key,
         sizeof(session->server_kex_private_key),
         &session->server_kex_private_key_len);
+    transport_trace_status_log_local("kex_generate_keypair", status);
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     status = crypto->kex_compute_shared_secret(
@@ -970,8 +998,9 @@ int ssh_transport_send_kex_ecdh_reply(
         session->shared_secret,
         sizeof(session->shared_secret),
         &session->shared_secret_len);
+    transport_trace_status_log_local("kex_compute_shared_secret", status);
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     status = crypto->hostkey_public(
@@ -980,8 +1009,9 @@ int ssh_transport_send_kex_ecdh_reply(
         session->server_host_key,
         sizeof(session->server_host_key),
         &session->server_host_key_len);
+    transport_trace_status_log_local("hostkey_public", status);
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     status = build_exchange_hash_input(session, exchange_input, sizeof(exchange_input), &exchange_input_len);
@@ -997,8 +1027,9 @@ int ssh_transport_send_kex_ecdh_reply(
         session->exchange_hash,
         sizeof(session->exchange_hash),
         &session->exchange_hash_len);
+    transport_trace_status_log_local("hash_exchange", status);
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     status = crypto->hostkey_sign(
@@ -1009,8 +1040,9 @@ int ssh_transport_send_kex_ecdh_reply(
         session->server_signature,
         sizeof(session->server_signature),
         &session->server_signature_len);
+    transport_trace_status_log_local("hostkey_sign", status);
     if (status != SSH_OK) {
-        return SSH_ERR_PLATFORM;
+        return status;
     }
 
     if (session->session_id_len == 0u) {

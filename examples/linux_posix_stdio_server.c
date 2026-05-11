@@ -1190,6 +1190,15 @@ static void conn_trace_log(const app_shared_t *shared, const char *fmt, ...)
     fflush(stderr);
 }
 
+static void conn_trace_status_log(const app_shared_t *shared, const char *stage, int status)
+{
+    conn_trace_log(
+        shared,
+        "[emssh][INFO] conn-trace: %s status=%s\n",
+        stage != NULL ? stage : "(null)",
+        ssh_status_string(status));
+}
+
 static int parse_args(int argc, char **argv, program_options_t *opts)
 {
     int i;

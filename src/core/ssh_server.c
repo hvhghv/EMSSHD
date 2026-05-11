@@ -1,5 +1,7 @@
 #include "emssh/ssh_server.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "emssh/sftp.h"
@@ -54,6 +56,18 @@ static int channel_request_is_default_ignorable_non_sftp(const ssh_channel_reque
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_ENV) ||
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_WINDOW_CHANGE) ||
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_SIGNAL);
+}
+
+static int transport_trace_enabled(void)
+{
+    const char *value = getenv("EMSSH_CONN_TRACE");
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "on") == 0;
 }
 
 static int non_sftp_channel_request_allowed_by_policy(
@@ -765,47 +779,93 @@ int ssh_server_run_transport_setup(
 {
     ssh_server_session_options_t effective;
     int status;
+    int trace;
 
     if (server == NULL || conn == NULL || transport == NULL || !server->initialized) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
     effective_session_options(options, &effective);
+    trace = transport_trace_enabled();
     status = ssh_transport_session_init(transport, server, effective.algorithms);
+    if (trace) {
+        fprintf(stderr, "[emssh][INFO] conn-trace: transport session_init=%s\n", ssh_status_string(status));
+        fflush(stderr);
+    }
     if (status == SSH_OK) {
         status = ssh_transport_set_rekey_limits(
             transport,
             effective.rekey_after_packets,
             effective.rekey_after_bytes);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport set_rekey_limits=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status != SSH_OK) {
         return status;
     }
 
     status = ssh_transport_send_identification(transport, conn, effective.timeout_ms);
+    if (trace) {
+        fprintf(stderr, "[emssh][INFO] conn-trace: transport send_identification=%s\n", ssh_status_string(status));
+        fflush(stderr);
+    }
     if (status == SSH_OK) {
         status = ssh_transport_receive_identification(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport recv_identification=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_send_kexinit(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport send_kexinit=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_receive_kexinit(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport recv_kexinit=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_receive_kex_ecdh_init(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport recv_kex_ecdh_init=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_send_kex_ecdh_reply(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport send_kex_ecdh_reply=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_send_newkeys(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport send_newkeys=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_send_ext_info(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport send_ext_info=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
     if (status == SSH_OK) {
         status = ssh_transport_receive_newkeys(transport, conn, effective.timeout_ms);
+        if (trace) {
+            fprintf(stderr, "[emssh][INFO] conn-trace: transport recv_newkeys=%s\n", ssh_status_string(status));
+            fflush(stderr);
+        }
     }
 
     return status;

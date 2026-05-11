@@ -1509,6 +1509,7 @@ int ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(ssh_mbedtls_crypto_t *ctx)
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    legacy_reset_hostkey_material(state);
     mbedtls_ecp_keypair_init(&key);
     rc = mbedtls_ecp_group_load(&key.grp, MBEDTLS_ECP_DP_SECP256R1);
     if (rc == 0) {
@@ -1527,7 +1528,6 @@ int ssh_mbedtls_crypto_generate_ecdsa_p256_hostkey(ssh_mbedtls_crypto_t *ctx)
         return SSH_ERR_PLATFORM;
     }
 
-    legacy_reset_hostkey_material(state);
     state->hostkey_type = SSH_MBEDTLS_LEGACY_HOSTKEY_ECDSA_P256;
     state->hostkey_private_len = 32u;
     return SSH_OK;
