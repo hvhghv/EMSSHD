@@ -62,6 +62,17 @@ static int view_equals_cstr(ssh_string_view_t view, const char *value)
     return view.len == len && memcmp(view.data, value, len) == 0;
 }
 
+static int channel_request_is_putty_extension_local(const ssh_channel_request_t *request)
+{
+    if (request == NULL) {
+        return 0;
+    }
+
+    return
+        view_equals_cstr(request->request_type, "simple@putty.projects.tartarus.org") ||
+        view_equals_cstr(request->request_type, "winadj@putty.projects.tartarus.org");
+}
+
 static int name_list_contains(ssh_string_view_t list, const char *name)
 {
     size_t name_len;
@@ -2166,7 +2177,8 @@ int ssh_transport_receive_channel_message(
                 (void)ssh_channel_request_decode(&request_buf, &request_diag);
                 record_last_channel_request_diag(session, &request_diag);
                 if (request_diag.request_type.data != NULL) {
-                    if (request_diag.want_reply) {
+                    if (request_diag.want_reply &&
+                        !channel_request_is_putty_extension_local(&request_diag)) {
                         status = ssh_transport_send_channel_failure(
                             session,
                             conn,

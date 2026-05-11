@@ -58,6 +58,35 @@ static int channel_request_is_default_ignorable_non_sftp(const ssh_channel_reque
         view_equals_cstr(request->request_type, SSH_CHANNEL_REQUEST_SIGNAL);
 }
 
+static int channel_request_is_putty_extension(const ssh_channel_request_t *request)
+{
+    if (request == NULL) {
+        return 0;
+    }
+
+    return
+        view_equals_cstr(request->request_type, "simple@putty.projects.tartarus.org") ||
+        view_equals_cstr(request->request_type, "winadj@putty.projects.tartarus.org");
+}
+
+static int should_reply_failure_for_non_sftp_request(const ssh_channel_request_t *request)
+{
+    if (request == NULL || !request->want_reply) {
+        return 0;
+    }
+
+    /*
+     * PuTTY may send optional channel extensions around channel lifecycle edges.
+     * Replying CHANNEL_FAILURE there can trigger client-side
+     * "nonexistent channel 0" warnings/disconnects.
+     */
+    if (channel_request_is_putty_extension(request)) {
+        return 0;
+    }
+
+    return 1;
+}
+
 static int transport_trace_enabled(void)
 {
     const char *value = getenv("EMSSH_CONN_TRACE");
@@ -1021,7 +1050,7 @@ static int sftp_accept_after_open(
             break;
         }
 
-        if (request.want_reply) {
+        if (should_reply_failure_for_non_sftp_request(&request)) {
             (void)ssh_transport_send_channel_failure(
                 transport,
                 conn,
@@ -1126,7 +1155,7 @@ static int terminal_accept_after_open(
         }
 
         if (status == SSH_ERR_UNSUPPORTED) {
-            if (request.want_reply) {
+            if (should_reply_failure_for_non_sftp_request(&request)) {
                 (void)ssh_transport_send_channel_failure(
                     transport,
                     conn,
@@ -1336,7 +1365,7 @@ static int terminal_accept_after_open(
             return SSH_OK;
         }
 
-        if (request.want_reply) {
+        if (should_reply_failure_for_non_sftp_request(&request)) {
             (void)ssh_transport_send_channel_failure(
                 transport,
                 conn,
@@ -1470,7 +1499,7 @@ int ssh_server_process_sftp_channel_data(
         } else if (message.message_id == SSH_MSG_CHANNEL_REQUEST) {
             const ssh_channel_request_t *request = &message.channel_request;
 
-            if (request->want_reply) {
+            if (should_reply_failure_for_non_sftp_request(request)) {
                 status = ssh_transport_send_channel_failure(
                     transport,
                     conn,
@@ -1984,7 +2013,7 @@ int ssh_server_run_auto_session(
             return status;
         }
 
-        if (request.want_reply) {
+        if (should_reply_failure_for_non_sftp_request(&request)) {
             (void)ssh_transport_send_channel_failure(
                 &transport,
                 conn,
