@@ -2199,7 +2199,7 @@ int ssh_server_process_terminal_channel_data(
     ssh_server_session_options_t effective;
     const ssh_term_api_t *term;
     ssh_channel_message_t message;
-    uint8_t channel_data[2048];
+    uint8_t channel_data[EMSSH_MAX_PACKET_SIZE];
     size_t channel_data_len;
     uint32_t receive_timeout_ms;
     size_t written_len;
@@ -2310,13 +2310,13 @@ int ssh_server_process_terminal_channel_data(
                 status = ssh_transport_send_channel_success(
                     transport,
                     conn,
-                    request->recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
             } else {
                 status = ssh_transport_send_channel_failure(
                     transport,
                     conn,
-                    request->recipient_channel,
+                    channel->client_channel,
                     effective.timeout_ms);
             }
             if (status != SSH_OK) {
@@ -2404,7 +2404,7 @@ int ssh_server_process_terminal_channel_data(
     if (status != SSH_OK) {
         return status;
     }
-    if (written_len != channel_data_len) {
+    if (written_len > channel_data_len) {
         return SSH_ERR_PLATFORM;
     }
 
