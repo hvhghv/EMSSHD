@@ -22,10 +22,6 @@
 #include "emssh/ssh_error.h"
 #include "emssh/ssh_server.h"
 
-#if !defined(EMSSH_USE_MBEDTLS)
-#error "linux_posix_stdio_server requires mbedtls legacy backend"
-#endif
-
 typedef ssh_crypto_context_mbedtls_legacy_t linux_crypto_context_t;
 #define LINUX_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
 #define LINUX_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))

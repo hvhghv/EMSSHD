@@ -481,7 +481,7 @@ if(EMSSH_BUILD_EXAMPLES)
         endif()
         add_executable(
             emssh_linux_posix_stdio_server
-            examples/linux_posix_stdio_server.c
+            APP/emsshd/Linux/linux_posix_stdio_server.c
         )
         target_link_libraries(emssh_linux_posix_stdio_server PRIVATE emssh)
         target_compile_definitions(emssh_linux_posix_stdio_server PRIVATE EMSSH_LINUX_SERVER_FIXED_BACKEND_MBEDTLS=1)

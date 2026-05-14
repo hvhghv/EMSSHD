@@ -2164,8 +2164,6 @@ static int maybe_pump_terminal_output(
 {
     const ssh_term_api_t *term;
     uint8_t outbuf[2048];
-    size_t read_len;
-    uint32_t max_send;
     int status;
 
     if (transport == NULL || transport->server == NULL || conn == NULL || channel == NULL) {
@@ -2180,42 +2178,45 @@ static int maybe_pump_terminal_output(
         return SSH_OK;
     }
 
-    if (channel->peer_window_size == 0u) {
-        return SSH_OK;
+    while (channel->peer_window_size != 0u) {
+        size_t read_len = 0u;
+        uint32_t max_send = channel->peer_window_size;
+
+        if (channel->peer_max_packet_size != 0u) {
+            max_send = min_u32_local(max_send, channel->peer_max_packet_size);
+        }
+        max_send = min_u32_local(max_send, (uint32_t)sizeof(outbuf));
+        if (max_send == 0u) {
+            return SSH_OK;
+        }
+
+        status = term->read(term->ctx, channel->term_handle, outbuf, (size_t)max_send, &read_len);
+        if (status == SSH_ERR_NOT_FOUND || status == SSH_ERR_UNSUPPORTED) {
+            return SSH_OK;
+        }
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (read_len == 0u) {
+            return SSH_OK;
+        }
+
+        status = ssh_transport_send_channel_data(
+            transport,
+            conn,
+            channel->client_channel,
+            outbuf,
+            read_len,
+            options != NULL ? options->timeout_ms : EMSSH_DEFAULT_SESSION_TIMEOUT_MS);
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (read_len > channel->peer_window_size) {
+            return SSH_ERR_SECURITY;
+        }
+        channel->peer_window_size -= (uint32_t)read_len;
     }
 
-    max_send = channel->peer_window_size;
-    if (channel->peer_max_packet_size != 0u) {
-        max_send = min_u32_local(max_send, channel->peer_max_packet_size);
-    }
-    max_send = min_u32_local(max_send, (uint32_t)sizeof(outbuf));
-    if (max_send == 0u) {
-        return SSH_OK;
-    }
-
-    read_len = 0u;
-    status = term->read(term->ctx, channel->term_handle, outbuf, (size_t)max_send, &read_len);
-    if (status == SSH_ERR_NOT_FOUND || status == SSH_ERR_UNSUPPORTED) {
-        return SSH_OK;
-    }
-    if (status != SSH_OK) {
-        return status;
-    }
-    if (read_len == 0u) {
-        return SSH_OK;
-    }
-
-    status = ssh_transport_send_channel_data(
-        transport,
-        conn,
-        channel->client_channel,
-        outbuf,
-        read_len,
-        options != NULL ? options->timeout_ms : EMSSH_DEFAULT_SESSION_TIMEOUT_MS);
-    if (status != SSH_OK) {
-        return status;
-    }
-    channel->peer_window_size -= (uint32_t)read_len;
     return SSH_OK;
 }
 

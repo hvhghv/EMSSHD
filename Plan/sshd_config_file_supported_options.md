@@ -3,7 +3,7 @@
 对应实现：
 - `src/platform/sshd_config_file.c`
 - `include/emssh/sshd_config_file.h`
-- 示例接线：`examples/linux_posix_stdio_server.c`
+- 示例接线：`APP/emsshd/Linux/linux_posix_stdio_server.c`
 
 本文档说明当前 `ssh_sshd_config_file_load*()` 与 `ssh_sshd_config_file_apply()` 的实际行为。
 
@@ -79,7 +79,7 @@
 
 ## Linux 示例中的额外生效说明
 
-在 `examples/linux_posix_stdio_server.c` 中：
+在 `APP/emsshd/Linux/linux_posix_stdio_server.c` 中：
 
 - 认证默认行为：
   - 若 `PasswordAuthentication` 未配置或为 `yes`，启用密码认证回调；
