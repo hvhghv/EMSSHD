@@ -17,6 +17,37 @@ static int view_eq(ssh_string_view_t view, const char *value)
     return view.len == len && memcmp(view.data, value, len) == 0;
 }
 
+static int name_list_contains_view(const char *name_list, ssh_string_view_t name)
+{
+    const char *p;
+
+    if (name_list == NULL || name.data == NULL || name.len == 0u) {
+        return 0;
+    }
+
+    p = name_list;
+    while (*p != '\0') {
+        const char *token_start;
+        const char *token_end;
+        size_t token_len;
+
+        token_start = p;
+        while (*p != '\0' && *p != ',') {
+            ++p;
+        }
+        token_end = p;
+        token_len = (size_t)(token_end - token_start);
+        if (token_len == name.len && memcmp(token_start, name.data, name.len) == 0) {
+            return 1;
+        }
+        if (*p == ',') {
+            ++p;
+        }
+    }
+
+    return 0;
+}
+
 static int is_separator_char(char ch)
 {
     return ch == ' ' || ch == '\t' || ch == ',';
@@ -442,6 +473,7 @@ int ssh_userauth_publickey_is_acceptable(
     const ssh_userauth_request_t *request)
 {
     ssh_publickey_auth_request_t auth_request;
+    const char *signature_algorithms;
 
     if (server == NULL || request == NULL ||
         !view_eq(request->method_name, SSH_AUTH_METHOD_PUBLICKEY) ||
@@ -455,6 +487,16 @@ int ssh_userauth_publickey_is_acceptable(
         return SSH_ERR_SECURITY;
     }
     if (!request_allowed_by_server_policy(server, request)) {
+        return SSH_ERR_SECURITY;
+    }
+
+    signature_algorithms = server->config.publickey_signature_algorithms;
+    if (signature_algorithms == NULL) {
+        signature_algorithms = ssh_crypto_publickey_signature_algorithms();
+    }
+    if (signature_algorithms != NULL &&
+        signature_algorithms[0] != '\0' &&
+        !name_list_contains_view(signature_algorithms, request->publickey_algorithm)) {
         return SSH_ERR_SECURITY;
     }
 

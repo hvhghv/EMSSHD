@@ -178,6 +178,13 @@ int main(void)
     CHECK(ssh_userauth_evaluate_request(&server, &request, session_id, sizeof(session_id), &decision) == SSH_OK);
     CHECK(decision == SSH_USERAUTH_DECISION_PK_OK);
 
+    ssh_server_deinit(&server);
+    ssh_server_config_defaults(&config);
+    config.publickey_auth = publickey_auth;
+    config.publickey_signature_algorithms = "rsa-sha2-256,rsa-sha2-512";
+    CHECK(ssh_server_init(&server, &platform, &config) == SSH_OK);
+    CHECK(ssh_userauth_publickey_is_acceptable(&server, &request) == SSH_ERR_SECURITY);
+
     ssh_buffer_init(&buf, storage, sizeof(storage));
     CHECK(ssh_userauth_pk_ok_encode(&buf, request.publickey_algorithm, request.publickey_blob) == SSH_OK);
     CHECK(storage[0] == SSH_MSG_USERAUTH_PK_OK);

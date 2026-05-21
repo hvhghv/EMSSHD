@@ -3,7 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef WINVER
+#define WINVER _WIN32_WINNT
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -12,6 +18,10 @@
 typedef SOCKET emssh_socket_t;
 #define EMSSH_INVALID_SOCKET INVALID_SOCKET
 #define emssh_close_socket closesocket
+static int emssh_socket_last_error(void)
+{
+    return WSAGetLastError();
+}
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -22,6 +32,10 @@ typedef SOCKET emssh_socket_t;
 typedef int emssh_socket_t;
 #define EMSSH_INVALID_SOCKET (-1)
 #define emssh_close_socket close
+static int emssh_socket_last_error(void)
+{
+    return errno;
+}
 #endif
 
 #include "emssh/ssh_error.h"
@@ -40,7 +54,7 @@ static uintptr_t socket_to_handle(emssh_socket_t socket_handle)
 
 static int is_peer_closed_error(void)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
     int err = WSAGetLastError();
     return err == WSAECONNRESET || err == WSAECONNABORTED ||
            err == WSAENOTCONN || err == WSAESHUTDOWN;
@@ -145,7 +159,7 @@ static int tcp_close_api(void *ctx, void *conn)
 
 int ssh_tcp_platform_init(ssh_tcp_platform_t *tcp)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
     WSADATA wsa_data;
 #endif
 
@@ -155,7 +169,7 @@ int ssh_tcp_platform_init(ssh_tcp_platform_t *tcp)
 
     memset(tcp, 0, sizeof(*tcp));
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
         return SSH_ERR_PLATFORM;
     }
@@ -175,7 +189,7 @@ void ssh_tcp_platform_deinit(ssh_tcp_platform_t *tcp)
         return;
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
     WSACleanup();
 #endif
 
@@ -205,6 +219,7 @@ int ssh_tcp_listen(
     emssh_socket_t listen_socket;
     int status;
     int yes;
+    int last_error;
 
     if (tcp == NULL || !tcp->initialized || listener == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -224,12 +239,15 @@ int ssh_tcp_listen(
 
     status = getaddrinfo((host != NULL && host[0] != '\0') ? host : NULL, port_text, &hints, &result);
     if (status != 0) {
+        fprintf(stderr, "[emssh] getaddrinfo(%s:%s) failed: %d\n", host != NULL ? host : "*", port_text, status);
         return SSH_ERR_PLATFORM;
     }
 
+    last_error = 0;
     for (it = result; it != NULL; it = it->ai_next) {
         listen_socket = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
         if (listen_socket == EMSSH_INVALID_SOCKET) {
+            last_error = emssh_socket_last_error();
             continue;
         }
 
@@ -241,12 +259,15 @@ int ssh_tcp_listen(
             break;
         }
 
+        last_error = emssh_socket_last_error();
+
         (void)emssh_close_socket(listen_socket);
         listen_socket = EMSSH_INVALID_SOCKET;
     }
 
     freeaddrinfo(result);
     if (listen_socket == EMSSH_INVALID_SOCKET) {
+        fprintf(stderr, "[emssh] listen(%s:%s) failed: socket error %d\n", host != NULL ? host : "*", port_text, last_error);
         return SSH_ERR_PLATFORM;
     }
 
@@ -284,13 +305,14 @@ int ssh_tcp_accept(
     }
 
     conn->socket_handle = socket_to_handle(accepted);
-    if (peer_addr.ss_family == AF_INET) {
-        const struct sockaddr_in *addr = (const struct sockaddr_in *)&peer_addr;
-        (void)inet_ntop(AF_INET, &addr->sin_addr, conn->peer_address, sizeof(conn->peer_address));
-    } else if (peer_addr.ss_family == AF_INET6) {
-        const struct sockaddr_in6 *addr = (const struct sockaddr_in6 *)&peer_addr;
-        (void)inet_ntop(AF_INET6, &addr->sin6_addr, conn->peer_address, sizeof(conn->peer_address));
-    }
+    (void)getnameinfo(
+        (const struct sockaddr *)&peer_addr,
+        peer_addr_len,
+        conn->peer_address,
+        (socklen_t)sizeof(conn->peer_address),
+        NULL,
+        0,
+        NI_NUMERICHOST);
     conn->open = 1;
     return SSH_OK;
 }

@@ -1,0 +1,41 @@
+# Global authentication and runtime settings
+username = emtask
+password = emtask
+# hostkey_file = emtask_hostkey_p256.raw
+# authorized_keys_file = authorized_keys
+# timeout_ms = 30000
+# max_workers = 16
+# auth_backend = internal
+# Linux only: use /etc/passwd + /etc/shadow password verification instead of password above.
+# auth_backend = passwd
+
+[task shell]
+listen_address = 0.0.0.0
+port = 2222
+command = cmd.exe /Q /K
+# restart_limit = 8
+# restart_window_sec = 60
+# TUI/reconnect recovery options are enabled by default; keep them here for easy tuning.
+# replay_on_attach = true
+# repaint_on_attach = true
+# screen_snapshot = true
+# replay_buffer_bytes = 1048576
+# use_conpty = true
+
+[task powershell]
+listen_address = 127.0.0.1
+port = 2223
+command = powershell.exe -NoLogo
+# restart_limit = 8
+# restart_window_sec = 60
+# replay_on_attach = true
+# repaint_on_attach = true
+# screen_snapshot = true
+# replay_buffer_bytes = 1048576
+# use_conpty = true
+
+# WindowMsys2 版本建议把 command 配成 MSYS2 shell / 业务命令，例如：
+# [task msys2]
+# listen_address = 127.0.0.1
+# port = 2224
+# command = bash -li

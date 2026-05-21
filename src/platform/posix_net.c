@@ -230,13 +230,14 @@ int ssh_posix_accept(
     }
 
     conn->socket_fd = accepted_fd;
-    if (peer_addr.ss_family == AF_INET) {
-        const struct sockaddr_in *addr = (const struct sockaddr_in *)&peer_addr;
-        (void)inet_ntop(AF_INET, &addr->sin_addr, conn->peer_address, sizeof(conn->peer_address));
-    } else if (peer_addr.ss_family == AF_INET6) {
-        const struct sockaddr_in6 *addr = (const struct sockaddr_in6 *)&peer_addr;
-        (void)inet_ntop(AF_INET6, &addr->sin6_addr, conn->peer_address, sizeof(conn->peer_address));
-    }
+    (void)getnameinfo(
+        (const struct sockaddr *)&peer_addr,
+        peer_addr_len,
+        conn->peer_address,
+        (socklen_t)sizeof(conn->peer_address),
+        NULL,
+        0,
+        NI_NUMERICHOST);
     conn->open = 1;
     return SSH_OK;
 }

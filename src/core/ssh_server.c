@@ -2243,14 +2243,6 @@ int ssh_server_process_terminal_channel_data(
     effective_session_options(options, &effective);
     term = transport->server->platform.term;
 
-    status = maybe_send_terminal_exit_and_close(transport, conn, channel, &effective, &closed_now);
-    if (status != SSH_OK) {
-        return status;
-    }
-    if (closed_now) {
-        return SSH_ERR_CLOSED;
-    }
-
     status = maybe_pump_terminal_output(transport, conn, channel, &effective);
     if (status != SSH_OK) {
         return status;
@@ -2299,7 +2291,15 @@ int ssh_server_process_terminal_channel_data(
 
     if (message.message_id == SSH_MSG_CHANNEL_WINDOW_ADJUST) {
         channel->peer_window_size = add_u32_saturating(channel->peer_window_size, message.window_bytes);
-        return maybe_pump_terminal_output(transport, conn, channel, &effective);
+        status = maybe_pump_terminal_output(transport, conn, channel, &effective);
+        if (status != SSH_OK) {
+            return status;
+        }
+        status = maybe_send_terminal_exit_and_close(transport, conn, channel, &effective, &closed_now);
+        if (status != SSH_OK) {
+            return status;
+        }
+        return closed_now ? SSH_ERR_CLOSED : SSH_OK;
     }
 
     if (message.message_id == SSH_MSG_CHANNEL_REQUEST) {
@@ -2370,30 +2370,15 @@ int ssh_server_process_terminal_channel_data(
     }
 
     if (message.message_id == SSH_MSG_CHANNEL_EOF) {
-        if (!channel->eof_sent) {
-            status = ssh_transport_send_channel_eof(
-                transport,
-                conn,
-                channel->client_channel,
-                effective.timeout_ms);
-            if (status != SSH_OK) {
-                return status;
-            }
-            channel->eof_sent = 1;
+        status = maybe_pump_terminal_output(transport, conn, channel, &effective);
+        if (status != SSH_OK) {
+            return status;
         }
-        if (!channel->close_sent) {
-            status = ssh_transport_send_channel_close(
-                transport,
-                conn,
-                channel->client_channel,
-                effective.timeout_ms);
-            if (status != SSH_OK) {
-                return status;
-            }
-            channel->close_sent = 1;
+        status = maybe_send_terminal_exit_and_close(transport, conn, channel, &effective, &closed_now);
+        if (status != SSH_OK) {
+            return status;
         }
-        channel->state = SSH_SERVER_TERMINAL_STATE_CLOSED;
-        return SSH_ERR_CLOSED;
+        return closed_now ? SSH_ERR_CLOSED : SSH_OK;
     }
 
     if (message.message_id == SSH_MSG_CHANNEL_CLOSE) {

@@ -1,0 +1,365 @@
+#!/bin/bash
+# need bash !!!
+
+CONF_SRC_DIR_1=(
+    src/core
+    src/sftp
+    Libs/external/mbedtls/library
+    APP/emtask/Linux
+)
+
+CONF_SRC_DIR_2=(
+)
+
+CONF_SRC_DIR_3=(
+)
+
+CONF_SRC_C_1=(
+    src/crypto/mbedtls/ssh_crypto_mbedtls_legacy.c
+    src/platform/mbedtls_legacy_rng_linux.c
+    src/platform/stdio_fs.c
+    src/platform/portable_fs.c
+    src/platform/tcp_socket.c
+    src/platform/sshd_config_file.c
+    src/platform/posix_passwd_auth.c
+    APP/emtask/emtask.c
+)
+
+CONF_SRC_C_2=(
+)
+
+CONF_SRC_C_3=(
+)
+
+CONF_SRC_CPP_1=(
+)
+
+CONF_SRC_CPP_2=(
+)
+
+CONF_SRC_CPP_3=(
+)
+
+CONF_SRC_S_1=(
+)
+
+CONF_SRC_S_2=(
+)
+
+CONF_SRC_S_3=(
+)
+
+
+rm -rf makefile
+
+echo -e "include mkenv.mk" >> makefile
+echo -e "" >> makefile
+
+echo -e "all: \$(TARGET)" >> makefile
+echo -e "" >> makefile
+
+for item in ${CONF_SRC_DIR_1[*]};
+do
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "OBJ_DIR_1 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "OBJ_DIR_1 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "OBJ_DIR_1 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+done
+
+for item in ${CONF_SRC_DIR_2[*]};
+do
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "OBJ_DIR_2 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "OBJ_DIR_2 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "OBJ_DIR_2 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+done
+
+for item in ${CONF_SRC_DIR_3[*]};
+do
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
+echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "OBJ_DIR_3 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
+echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "OBJ_DIR_3 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
+echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "OBJ_DIR_3 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+done
+
+for item in ${CONF_SRC_C_1[*]};
+do
+
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_C_1 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_C_1 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o:  \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_C_2[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_C_2 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_C_2 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o:  \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_C_3[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_C_3 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_C_3 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/ $item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_CPP_1[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_CPP_1 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_CPP_1 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_CPP_2[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_CPP_2 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_CPP_2 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_CPP_3[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_CPP_3 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_CPP_3 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_S_1[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_S_1 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_S_1 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_S_2[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_S_2 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_S_2 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+
+
+done
+
+for item in ${CONF_SRC_S_3[*]};
+do
+echo -e "SRC += \$(TOP)/$item" >> makefile
+echo -e "SRC_S_3 += \$(TOP)/$item" >> makefile
+echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
+echo -e "OBJ_S_3 += \$(BUILD)/$item.o" >> makefile
+echo -e "" >> makefile
+echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
+echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
+echo -e "" >> makefile
+done
+
+
+
+echo -e "\$(BUILD):" >> makefile
+
+for item in ${CONF_SRC_DIR_1[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
+done
+
+for item in ${CONF_SRC_DIR_2[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
+done
+
+for item in ${CONF_SRC_DIR_3[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
+done
+
+for item in ${CONF_SRC_C_1[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_C_2[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_C_3[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_CPP_1[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_CPP_2[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_CPP_3[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_S_1[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_S_2[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+for item in ${CONF_SRC_S_3[*]};
+do
+echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
+done
+
+echo -e "" >> makefile
+
+echo -e "clean:" >> makefile
+echo -e "\trm -rf \$(BUILD)" >> makefile
+echo -e "" >> makefile
+
+echo -e "totalclean: clean" >> makefile
+echo -e "\trm -rf makefile" >> makefile
+echo -e "" >> makefile
+
+echo -e "include mkrule.mk" >> makefile
