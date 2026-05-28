@@ -66,8 +66,13 @@ static int is_peer_closed_error(void)
 static int wait_for_socket(emssh_socket_t socket_handle, int for_write, uint32_t timeout_ms)
 {
     fd_set fds;
+#if defined(_WIN32) || defined(__CYGWIN__)
+    TIMEVAL tv;
+    const TIMEVAL *tv_ptr;
+#else
     struct timeval tv;
     struct timeval *tv_ptr;
+#endif
     int status;
 
     FD_ZERO(&fds);
