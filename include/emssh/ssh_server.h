@@ -135,6 +135,18 @@ typedef struct ssh_server_terminal_channel {
     void *term_handle;
 } ssh_server_terminal_channel_t;
 
+typedef enum ssh_server_channel_kind {
+    SSH_SERVER_CHANNEL_KIND_NONE = 0,
+    SSH_SERVER_CHANNEL_KIND_SFTP = 1,
+    SSH_SERVER_CHANNEL_KIND_TERMINAL = 2
+} ssh_server_channel_kind_t;
+
+typedef int (*ssh_server_channel_accept_hook_fn)(
+    void *ctx,
+    ssh_server_channel_kind_t kind,
+    struct ssh_transport_session *transport,
+    void *conn);
+
 void ssh_server_config_defaults(ssh_server_config_t *config);
 int ssh_server_init(ssh_server_t *server, const ssh_platform_t *platform, const ssh_server_config_t *config);
 void ssh_server_deinit(ssh_server_t *server);
@@ -181,6 +193,16 @@ int ssh_server_run_auto_session(
     ssh_server_t *server,
     void *conn,
     const ssh_server_session_options_t *options);
+
+int ssh_server_accept_auto_channel(
+    struct ssh_transport_session *transport,
+    void *conn,
+    ssh_server_sftp_channel_t *sftp_channel,
+    ssh_server_terminal_channel_t *terminal_channel,
+    const ssh_server_session_options_t *options,
+    ssh_server_channel_kind_t *kind_out,
+    ssh_server_channel_accept_hook_fn before_accept,
+    void *before_accept_ctx);
 
 int ssh_server_accept_terminal_channel(
     struct ssh_transport_session *transport,

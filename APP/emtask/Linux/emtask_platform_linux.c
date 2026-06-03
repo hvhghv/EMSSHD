@@ -235,6 +235,11 @@ static void emtask_linux_child_main(emtask_term_t *term)
 {
     const char *command = term != NULL ? term->command : NULL;
 
+    if (term != NULL && term->working_dir[0] != '\0') {
+        if (chdir(term->working_dir) != 0) {
+            _exit(126);
+        }
+    }
     if (term != NULL && term->term_type[0] != '\0') {
         (void)setenv("TERM", term->term_type, 1);
     }
@@ -490,6 +495,25 @@ int emtask_platform_start_listener_thread(emtask_task_t *task)
     pthread_t thread;
 
     if (pthread_create(&thread, NULL, emtask_listener_thread_entry, task) != 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    if (pthread_detach(thread) != 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+static void *emtask_panel_thread_entry(void *arg)
+{
+    emtask_panel_thread_main((emtask_app_t *)arg);
+    return NULL;
+}
+
+int emtask_platform_start_panel_thread(emtask_app_t *app)
+{
+    pthread_t thread;
+
+    if (pthread_create(&thread, NULL, emtask_panel_thread_entry, app) != 0) {
         return SSH_ERR_PLATFORM;
     }
     if (pthread_detach(thread) != 0) {

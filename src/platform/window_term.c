@@ -641,6 +641,8 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
     HANDLE process_handle = NULL;
     HANDLE pseudo_console = NULL;
     WCHAR *command_line = NULL;
+    WCHAR *working_dir = NULL;
+    WCHAR *working_dir_arg = NULL;
     COORD size;
     int status;
 
@@ -689,6 +691,14 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
         status = SSH_ERR_PLATFORM;
         goto cleanup;
     }
+    if (term->working_dir[0] != '\0') {
+        working_dir = emtask_utf8_to_wide_alloc(term->working_dir);
+        if (working_dir == NULL) {
+            status = SSH_ERR_PLATFORM;
+            goto cleanup;
+        }
+        working_dir_arg = working_dir;
+    }
 
     if (create_pseudo_console != NULL) {
         STARTUPINFOEXW si;
@@ -722,7 +732,7 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
                         FALSE,
                         EXTENDED_STARTUPINFO_PRESENT,
                         NULL,
-                        NULL,
+                        working_dir_arg,
                         &si.StartupInfo,
                         &pi)) {
                     process_handle = pi.hProcess;
@@ -764,7 +774,7 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
                 TRUE,
                 CREATE_NO_WINDOW,
                 NULL,
-                NULL,
+                working_dir_arg,
                 &si,
                 &pi)) {
             status = SSH_ERR_PLATFORM;
@@ -791,6 +801,7 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
     term->faulted = 0;
     term->started_once = 1;
     free(command_line);
+    free(working_dir);
     return SSH_OK;
 
 cleanup:
@@ -813,6 +824,7 @@ cleanup:
         (void)CloseHandle(output_write);
     }
     free(command_line);
+    free(working_dir);
     return status;
 }
 

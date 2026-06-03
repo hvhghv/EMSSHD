@@ -4,13 +4,33 @@
 #include "emssh/ssh_crypto.h"
 #include "emssh/ssh_transport.h"
 
+#if defined(EMSSH_USE_MBEDTLS) || defined(MBEDTLS_MD_C)
+#include "mbedtls/md.h"
+#endif
+
+#include <time.h>
+
 typedef ssh_crypto_context_mbedtls_legacy_t emtask_crypto_context_t;
 #define EMTASK_CTX_PTR(ctx) ((ssh_crypto_context_t *)(ctx))
 #define EMTASK_CTX_CONST_PTR(ctx) ((const ssh_crypto_context_t *)(ctx))
 
+#define EMTASK_PANEL_TOKEN_RANDOM_BYTES 24u
+#define EMTASK_PANEL_OTP_RANDOM_BYTES 20u
+#define EMTASK_QR_VERSION 10u
+#define EMTASK_QR_SIZE (17u + (4u * EMTASK_QR_VERSION))
+#define EMTASK_QR_DATA_CODEWORDS 274u
+#define EMTASK_QR_TOTAL_CODEWORDS 346u
+#define EMTASK_QR_ECC_CODEWORDS 18u
+#define EMTASK_QR_BLOCK_COUNT 4u
+#define EMTASK_QR_PAYLOAD_MAX 512u
+
 static int emtask_net_read(void *ctx, void *conn, uint8_t *buf, size_t len, uint32_t timeout_ms);
 static int emtask_net_write(void *ctx, void *conn, const uint8_t *buf, size_t len, uint32_t timeout_ms);
 static int emtask_net_close(void *ctx, void *conn);
+static int emtask_start_panel_thread(emtask_app_t *app);
+static int emtask_panel_decode_base32_secret(const char *text, uint8_t *out, size_t out_capacity, size_t *out_len);
+static int emtask_panel_materialize_auth(emtask_config_t *config);
+static int emtask_panel_materialize_qr(const emtask_config_t *config);
 
 static const ssh_net_api_t g_emtask_net_api = {
     emtask_net_read,
@@ -204,6 +224,21 @@ static void emtask_config_defaults(emtask_config_t *config)
     config->global.use_conpty = emtask_platform_default_use_conpty();
     config->global.auth_backend = EMTASK_AUTH_BACKEND_INTERNAL;
     (void)emtask_copy_text(config->global.hostkey_file, sizeof(config->global.hostkey_file), "emtask_hostkey_p256.raw");
+    (void)emtask_copy_text(
+        config->global.panel_listen_address,
+        sizeof(config->global.panel_listen_address),
+        EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS);
+    (void)emtask_copy_text(
+        config->global.panel_auth_file,
+        sizeof(config->global.panel_auth_file),
+        EMTASK_DEFAULT_PANEL_AUTH_FILE);
+    (void)emtask_copy_text(
+        config->global.panel_qr_file,
+        sizeof(config->global.panel_qr_file),
+        EMTASK_DEFAULT_PANEL_QR_FILE);
+    config->global.panel_otp_digits = EMTASK_DEFAULT_PANEL_OTP_DIGITS;
+    config->global.panel_otp_step_sec = EMTASK_DEFAULT_PANEL_OTP_STEP_SEC;
+    config->global.panel_otp_window = EMTASK_DEFAULT_PANEL_OTP_WINDOW;
 }
 
 static void emtask_extract_dirname(const char *path, char out[EMTASK_MAX_PATH])
@@ -290,6 +325,39 @@ static int emtask_parse_auth_backend(const char *value, emtask_auth_backend_t *b
     return SSH_ERR_INVALID_ARGUMENT;
 }
 
+static int emtask_parse_panel_auth(const char *value, unsigned *auth_out)
+{
+    if (value == NULL || auth_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_key_equals(value, "none") ||
+        emtask_key_equals(value, "off") ||
+        emtask_key_equals(value, "no") ||
+        emtask_key_equals(value, "false") ||
+        emtask_key_equals(value, "0")) {
+        *auth_out = 0u;
+        return SSH_OK;
+    }
+    if (emtask_key_equals(value, "token")) {
+        *auth_out = EMTASK_PANEL_AUTH_TOKEN;
+        return SSH_OK;
+    }
+    if (emtask_key_equals(value, "otp") || emtask_key_equals(value, "totp")) {
+        *auth_out = EMTASK_PANEL_AUTH_OTP;
+        return SSH_OK;
+    }
+    if (emtask_key_equals(value, "both") ||
+        emtask_key_equals(value, "all") ||
+        emtask_key_equals(value, "token+otp") ||
+        emtask_key_equals(value, "otp+token") ||
+        emtask_key_equals(value, "token,otp") ||
+        emtask_key_equals(value, "otp,token")) {
+        *auth_out = EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP;
+        return SSH_OK;
+    }
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
 static int emtask_apply_global_config_pair(
     emtask_global_config_t *global,
     const char *key,
@@ -300,6 +368,7 @@ static int emtask_apply_global_config_pair(
     int flag;
     int status;
     emtask_auth_backend_t backend;
+    unsigned panel_auth;
 
     if (global == NULL || key == NULL || value == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -319,6 +388,73 @@ static int emtask_apply_global_config_pair(
     }
     if (emtask_key_equals(key, "authorized_keys_file")) {
         return emtask_copy_text(global->authorized_keys_file, sizeof(global->authorized_keys_file), value);
+    }
+    if (emtask_key_equals(key, "panel_enabled")) {
+        status = emtask_parse_bool(value, &flag);
+        if (status == SSH_OK) {
+            global->panel_enabled = flag;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "panel_listen_address")) {
+        return emtask_copy_text(global->panel_listen_address, sizeof(global->panel_listen_address), value);
+    }
+    if (emtask_key_equals(key, "panel_port")) {
+        uint16_t panel_port;
+
+        status = emtask_parse_port(value, &panel_port);
+        if (status == SSH_OK) {
+            global->panel_port = panel_port;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "panel_auth")) {
+        status = emtask_parse_panel_auth(value, &panel_auth);
+        if (status == SSH_OK) {
+            global->panel_auth = panel_auth;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "panel_auth_file") || emtask_key_equals(key, "panel_auth_key_file")) {
+        return emtask_copy_text(global->panel_auth_file, sizeof(global->panel_auth_file), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_file") ||
+        emtask_key_equals(key, "panel_qrcode_file") ||
+        emtask_key_equals(key, "panel_qr_code_file")) {
+        return emtask_copy_text(global->panel_qr_file, sizeof(global->panel_qr_file), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_host") || emtask_key_equals(key, "panel_qrcode_host")) {
+        return emtask_copy_text(global->panel_qr_host, sizeof(global->panel_qr_host), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_start_command") || emtask_key_equals(key, "panel_start_command")) {
+        return emtask_copy_text(global->panel_qr_start_command, sizeof(global->panel_qr_start_command), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_stop_command") || emtask_key_equals(key, "panel_stop_command")) {
+        return emtask_copy_text(global->panel_qr_stop_command, sizeof(global->panel_qr_stop_command), value);
+    }
+    if (emtask_key_equals(key, "panel_otp_digits")) {
+        status = emtask_parse_unsigned(value, &u);
+        if (status == SSH_OK && (u == 6u || u == 7u || u == 8u)) {
+            global->panel_otp_digits = u;
+            return SSH_OK;
+        }
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_key_equals(key, "panel_otp_step_sec")) {
+        status = emtask_parse_unsigned(value, &u);
+        if (status == SSH_OK && u != 0u && u <= 3600u) {
+            global->panel_otp_step_sec = u;
+            return SSH_OK;
+        }
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_key_equals(key, "panel_otp_window")) {
+        status = emtask_parse_unsigned(value, &u);
+        if (status == SSH_OK && u <= 10u) {
+            global->panel_otp_window = u;
+            return SSH_OK;
+        }
+        return SSH_ERR_INVALID_ARGUMENT;
     }
     if (emtask_key_equals(key, "timeout_ms")) {
         status = emtask_parse_u32(value, &u32);
@@ -386,6 +522,9 @@ static int emtask_apply_task_config_pair(
     if (emtask_key_equals(key, "command")) {
         return emtask_copy_text(task->command, sizeof(task->command), value);
     }
+    if (emtask_key_equals(key, "working_dir") || emtask_key_equals(key, "workdir") || emtask_key_equals(key, "cwd")) {
+        return emtask_copy_text(task->working_dir, sizeof(task->working_dir), value);
+    }
     if (emtask_key_equals(key, "restart_limit")) {
         status = emtask_parse_unsigned(value, &u);
         if (status == SSH_OK) {
@@ -411,6 +550,13 @@ static int emtask_apply_task_config_pair(
         status = emtask_parse_bool(value, &flag);
         if (status == SSH_OK) {
             task->use_conpty = flag;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "use_sftp")) {
+        status = emtask_parse_bool(value, &flag);
+        if (status == SSH_OK) {
+            task->use_sftp = flag;
         }
         return status;
     }
@@ -559,9 +705,13 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
                 (emtask_key_equals(key, "listen_address") ||
                  emtask_key_equals(key, "port") ||
                  emtask_key_equals(key, "command") ||
+                 emtask_key_equals(key, "working_dir") ||
+                 emtask_key_equals(key, "workdir") ||
+                 emtask_key_equals(key, "cwd") ||
                  emtask_key_equals(key, "restart_limit") ||
                  emtask_key_equals(key, "restart_window_sec") ||
                  emtask_key_equals(key, "replay_buffer_bytes") ||
+                 emtask_key_equals(key, "use_sftp") ||
                  emtask_key_equals(key, "replay_on_attach") ||
                  emtask_key_equals(key, "repaint_on_attach") ||
                  emtask_key_equals(key, "screen_snapshot"))) {
@@ -600,6 +750,25 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
     if (status != SSH_OK) {
         return status;
     }
+    status = emtask_resolve_path(config->global.config_dir, config->global.panel_auth_file, config->global.panel_auth_file);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_resolve_path(config->global.config_dir, config->global.panel_qr_file, config->global.panel_qr_file);
+    if (status != SSH_OK) {
+        return status;
+    }
+    for (size_t i = 0u; i < config->task_count; ++i) {
+        status = emtask_resolve_path(config->global.config_dir, config->tasks[i].working_dir, config->tasks[i].working_dir);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+
+    status = emtask_panel_materialize_auth(config);
+    if (status != SSH_OK) {
+        return status;
+    }
 
     if (config->global.auth_backend == EMTASK_AUTH_BACKEND_INTERNAL && config->global.username[0] == '\0') {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -612,10 +781,54 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
     if (config->global.max_workers == 0u || config->task_count == 0u) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
+    if (config->global.panel_enabled && config->global.panel_port == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (config->global.panel_enabled) {
+        if ((config->global.panel_auth & ~(EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP)) != 0u) {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        if ((config->global.panel_auth & EMTASK_PANEL_AUTH_TOKEN) != 0u && config->global.panel_token[0] == '\0') {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        if ((config->global.panel_auth & EMTASK_PANEL_AUTH_OTP) != 0u) {
+            uint8_t otp_secret[128];
+            size_t otp_secret_len;
+
+            if (config->global.panel_otp_secret[0] == '\0' ||
+                emtask_panel_decode_base32_secret(
+                    config->global.panel_otp_secret,
+                    otp_secret,
+                    sizeof(otp_secret),
+                    &otp_secret_len) != SSH_OK) {
+                memset(otp_secret, 0, sizeof(otp_secret));
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+            memset(otp_secret, 0, sizeof(otp_secret));
+        }
+    }
     for (size_t i = 0u; i < config->task_count; ++i) {
         if (config->tasks[i].name[0] == '\0' || config->tasks[i].command[0] == '\0' || config->tasks[i].port == 0u) {
             return SSH_ERR_INVALID_ARGUMENT;
         }
+        if (config->global.panel_enabled && config->tasks[i].port == config->global.panel_port) {
+            const char *task_addr = config->tasks[i].listen_address[0] != '\0' ? config->tasks[i].listen_address : "0.0.0.0";
+            const char *panel_addr = config->global.panel_listen_address[0] != '\0'
+                                         ? config->global.panel_listen_address
+                                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
+
+            if (emtask_key_equals(task_addr, panel_addr) ||
+                emtask_key_equals(task_addr, "0.0.0.0") ||
+                emtask_key_equals(panel_addr, "0.0.0.0") ||
+                emtask_key_equals(task_addr, "::") ||
+                emtask_key_equals(panel_addr, "::")) {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+        }
+    }
+    status = emtask_panel_materialize_qr(config);
+    if (status != SSH_OK) {
+        return status;
     }
     return SSH_OK;
 }
@@ -678,6 +891,1126 @@ static int emtask_save_file(const char *path, const uint8_t *data, size_t data_l
         return SSH_ERR_PLATFORM;
     }
     return fclose(file) == 0 ? SSH_OK : SSH_ERR_PLATFORM;
+}
+
+static int emtask_text_appendf(char *out, size_t out_capacity, size_t *out_len, const char *fmt, ...)
+{
+    va_list args;
+    int written;
+
+    if (out == NULL || out_len == NULL || fmt == NULL || *out_len >= out_capacity) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    va_start(args, fmt);
+    written = vsnprintf(out + *out_len, out_capacity - *out_len, fmt, args);
+    va_end(args);
+    if (written < 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    if ((size_t)written >= out_capacity - *out_len) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    *out_len += (size_t)written;
+    return SSH_OK;
+}
+
+static int emtask_panel_file_exists(const char *path, int *exists_out)
+{
+    FILE *file;
+
+    if (path == NULL || exists_out == NULL || path[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            *exists_out = 0;
+            return SSH_OK;
+        }
+        return SSH_ERR_PLATFORM;
+    }
+    (void)fclose(file);
+    *exists_out = 1;
+    return SSH_OK;
+}
+
+static int emtask_panel_fill_random(uint8_t *data, size_t data_len)
+{
+    emtask_crypto_context_t crypto_ctx;
+    const ssh_rng_api_t *rng;
+    int status;
+
+    if (data == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (data_len == 0u) {
+        return SSH_OK;
+    }
+
+    memset(&crypto_ctx, 0, sizeof(crypto_ctx));
+    status = ssh_crypto_open(EMTASK_CTX_PTR(&crypto_ctx));
+    if (status != SSH_OK) {
+        return status;
+    }
+    rng = ssh_crypto_rng_api(EMTASK_CTX_CONST_PTR(&crypto_ctx));
+    if (rng == NULL || rng->fill == NULL) {
+        ssh_crypto_close(EMTASK_CTX_PTR(&crypto_ctx));
+        return SSH_ERR_UNSUPPORTED;
+    }
+    status = rng->fill(rng->ctx, data, data_len);
+    ssh_crypto_close(EMTASK_CTX_PTR(&crypto_ctx));
+    return status;
+}
+
+static int emtask_panel_base64url_encode(const uint8_t *data, size_t data_len, char *out, size_t out_capacity)
+{
+    static const char k_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    size_t i;
+    size_t j;
+
+    if (data == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    j = 0u;
+    for (i = 0u; i < data_len; i += 3u) {
+        size_t remaining = data_len - i;
+        size_t chars = remaining >= 3u ? 4u : remaining + 1u;
+        uint32_t value = ((uint32_t)data[i] << 16) |
+                         (remaining > 1u ? ((uint32_t)data[i + 1u] << 8) : 0u) |
+                         (remaining > 2u ? (uint32_t)data[i + 2u] : 0u);
+        size_t k;
+
+        if (j + chars + 1u > out_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        for (k = 0u; k < chars; ++k) {
+            out[j++] = k_table[(value >> (18u - (6u * k))) & 0x3fu];
+        }
+    }
+    out[j] = '\0';
+    return SSH_OK;
+}
+
+static int emtask_panel_base32_encode(const uint8_t *data, size_t data_len, char *out, size_t out_capacity)
+{
+    static const char k_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    uint32_t buffer;
+    unsigned bits;
+    size_t i;
+    size_t j;
+
+    if (data == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    buffer = 0u;
+    bits = 0u;
+    j = 0u;
+    for (i = 0u; i < data_len; ++i) {
+        buffer = (buffer << 8) | data[i];
+        bits += 8u;
+        while (bits >= 5u) {
+            if (j + 2u > out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[j++] = k_table[(buffer >> (bits - 5u)) & 0x1fu];
+            bits -= 5u;
+        }
+    }
+    if (bits != 0u) {
+        if (j + 2u > out_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        out[j++] = k_table[(buffer << (5u - bits)) & 0x1fu];
+    }
+    out[j] = '\0';
+    return SSH_OK;
+}
+
+static int emtask_panel_generate_token(char out[EMTASK_MAX_TEXT])
+{
+    uint8_t random_bytes[EMTASK_PANEL_TOKEN_RANDOM_BYTES];
+    int status;
+
+    if (out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(random_bytes, 0, sizeof(random_bytes));
+    status = emtask_panel_fill_random(random_bytes, sizeof(random_bytes));
+    if (status == SSH_OK) {
+        status = emtask_panel_base64url_encode(random_bytes, sizeof(random_bytes), out, EMTASK_MAX_TEXT);
+    }
+    memset(random_bytes, 0, sizeof(random_bytes));
+    return status;
+}
+
+static int emtask_panel_generate_otp_secret(char out[EMTASK_MAX_TEXT])
+{
+    uint8_t random_bytes[EMTASK_PANEL_OTP_RANDOM_BYTES];
+    int status;
+
+    if (out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(random_bytes, 0, sizeof(random_bytes));
+    status = emtask_panel_fill_random(random_bytes, sizeof(random_bytes));
+    if (status == SSH_OK) {
+        status = emtask_panel_base32_encode(random_bytes, sizeof(random_bytes), out, EMTASK_MAX_TEXT);
+    }
+    memset(random_bytes, 0, sizeof(random_bytes));
+    return status;
+}
+
+static int emtask_panel_apply_auth_file_pair(emtask_global_config_t *global, const char *key, char *value)
+{
+    if (global == NULL || key == NULL || value == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    value = emtask_trim(value);
+    emtask_unquote(value);
+    if (emtask_key_equals(key, "panel_token") || emtask_key_equals(key, "token")) {
+        if (global->panel_token[0] == '\0') {
+            return emtask_copy_text(global->panel_token, sizeof(global->panel_token), value);
+        }
+        return SSH_OK;
+    }
+    if (emtask_key_equals(key, "panel_otp_secret") ||
+        emtask_key_equals(key, "otp_secret") ||
+        emtask_key_equals(key, "totp_secret")) {
+        if (global->panel_otp_secret[0] == '\0') {
+            return emtask_copy_text(global->panel_otp_secret, sizeof(global->panel_otp_secret), value);
+        }
+        return SSH_OK;
+    }
+    return SSH_OK;
+}
+
+static int emtask_panel_load_auth_file(emtask_global_config_t *global, int *exists_out)
+{
+    uint8_t data[4096];
+    size_t data_len;
+    char *cursor;
+    int exists;
+    int status;
+
+    if (global == NULL || exists_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = emtask_panel_file_exists(global->panel_auth_file, &exists);
+    if (status != SSH_OK || !exists) {
+        *exists_out = 0;
+        return status;
+    }
+    *exists_out = 1;
+
+    memset(data, 0, sizeof(data));
+    status = emtask_load_file(global->panel_auth_file, data, sizeof(data) - 1u, &data_len);
+    if (status == SSH_ERR_MALFORMED_PACKET) {
+        return SSH_OK;
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+    data[data_len] = '\0';
+
+    cursor = (char *)data;
+    while (cursor != NULL && *cursor != '\0') {
+        char *line;
+        char *end;
+        char *sep;
+        char *key;
+
+        line = cursor;
+        end = strpbrk(cursor, "\r\n");
+        if (end != NULL) {
+            char newline = *end;
+
+            *end = '\0';
+            cursor = end + 1;
+            if (newline == '\r' && *cursor == '\n') {
+                ++cursor;
+            }
+        } else {
+            cursor = NULL;
+        }
+
+        line = emtask_trim(line);
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        sep = strchr(line, '=');
+        if (sep == NULL) {
+            continue;
+        }
+        *sep = '\0';
+        key = emtask_trim(line);
+        status = emtask_panel_apply_auth_file_pair(global, key, sep + 1);
+        if (status != SSH_OK) {
+            memset(data, 0, sizeof(data));
+            return status;
+        }
+    }
+
+    memset(data, 0, sizeof(data));
+    return SSH_OK;
+}
+
+static const char *emtask_panel_auth_config_name(unsigned auth)
+{
+    if ((auth & (EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP)) ==
+        (EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP)) {
+        return "token+otp";
+    }
+    if ((auth & EMTASK_PANEL_AUTH_TOKEN) != 0u) {
+        return "token";
+    }
+    if ((auth & EMTASK_PANEL_AUTH_OTP) != 0u) {
+        return "otp";
+    }
+    return "none";
+}
+
+static int emtask_panel_save_auth_file(const emtask_global_config_t *global)
+{
+    char text[4096];
+    size_t len;
+    int status;
+
+    if (global == NULL || global->panel_auth_file[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    len = 0u;
+    status = emtask_text_appendf(
+        text,
+        sizeof(text),
+        &len,
+        "# Generated by emtask. Keep this file private.\n"
+        "# It contains panel authentication secrets.\n"
+        "panel_auth = %s\n",
+        emtask_panel_auth_config_name(global->panel_auth));
+    if (status != SSH_OK) {
+        return status;
+    }
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_TOKEN) != 0u) {
+        status = emtask_text_appendf(text, sizeof(text), &len, "panel_token = %s\n", global->panel_token);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_OTP) != 0u) {
+        status = emtask_text_appendf(text, sizeof(text), &len, "panel_otp_secret = %s\n", global->panel_otp_secret);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    status = emtask_save_file(global->panel_auth_file, (const uint8_t *)text, len);
+    memset(text, 0, sizeof(text));
+    return status;
+}
+
+static int emtask_panel_materialize_auth(emtask_config_t *config)
+{
+    emtask_global_config_t *global;
+    int auth_file_exists;
+    int need_save;
+    int status;
+
+    if (config == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    global = &config->global;
+    if (!global->panel_enabled || global->panel_auth == 0u) {
+        return SSH_OK;
+    }
+    if (global->panel_auth_file[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    auth_file_exists = 0;
+    need_save = 0;
+    status = emtask_panel_load_auth_file(global, &auth_file_exists);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (!auth_file_exists) {
+        need_save = 1;
+    }
+
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_TOKEN) != 0u && global->panel_token[0] == '\0') {
+        status = emtask_panel_generate_token(global->panel_token);
+        if (status != SSH_OK) {
+            return status;
+        }
+        need_save = 1;
+    }
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_OTP) != 0u && global->panel_otp_secret[0] == '\0') {
+        status = emtask_panel_generate_otp_secret(global->panel_otp_secret);
+        if (status != SSH_OK) {
+            return status;
+        }
+        need_save = 1;
+    }
+    if (need_save) {
+        status = emtask_panel_save_auth_file(global);
+        if (status != SSH_OK) {
+            return status;
+        }
+        emtask_logf("panel auth material written to %s", global->panel_auth_file);
+    }
+    return SSH_OK;
+}
+
+static int emtask_panel_payload_append_literal(char *out, size_t out_capacity, size_t *out_len, const char *text)
+{
+    size_t len;
+
+    if (out == NULL || out_len == NULL || text == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    len = strlen(text);
+    if (*out_len + len + 1u > out_capacity) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    memcpy(out + *out_len, text, len);
+    *out_len += len;
+    out[*out_len] = '\0';
+    return SSH_OK;
+}
+
+static int emtask_panel_payload_append_escaped(
+    char *out,
+    size_t out_capacity,
+    size_t *out_len,
+    const char *text,
+    size_t raw_limit)
+{
+    static const char k_hex[] = "0123456789ABCDEF";
+    size_t i;
+
+    if (out == NULL || out_len == NULL || text == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    for (i = 0u; text[i] != '\0' && (raw_limit == 0u || i < raw_limit); ++i) {
+        unsigned char ch = (unsigned char)text[i];
+        int safe = (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') ||
+                   (ch >= '0' && ch <= '9') ||
+                   ch == '-' || ch == '_' || ch == '.' || ch == '~' || ch == ':';
+
+        if (safe) {
+            if (*out_len + 2u > out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[(*out_len)++] = (char)ch;
+        } else {
+            if (*out_len + 4u > out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[(*out_len)++] = '%';
+            out[(*out_len)++] = k_hex[(ch >> 4) & 0x0fu];
+            out[(*out_len)++] = k_hex[ch & 0x0fu];
+        }
+        out[*out_len] = '\0';
+    }
+    return SSH_OK;
+}
+
+static int emtask_panel_payload_append_field(
+    char *out,
+    size_t out_capacity,
+    size_t *out_len,
+    const char *key,
+    const char *value,
+    size_t raw_limit)
+{
+    int status;
+
+    if (value == NULL || value[0] == '\0') {
+        return SSH_OK;
+    }
+    status = emtask_panel_payload_append_literal(out, out_capacity, out_len, "|");
+    if (status == SSH_OK) {
+        status = emtask_panel_payload_append_literal(out, out_capacity, out_len, key);
+    }
+    if (status == SSH_OK) {
+        status = emtask_panel_payload_append_literal(out, out_capacity, out_len, "=");
+    }
+    if (status == SSH_OK) {
+        status = emtask_panel_payload_append_escaped(out, out_capacity, out_len, value, raw_limit);
+    }
+    return status;
+}
+
+static const char *emtask_panel_qr_host(const emtask_global_config_t *global)
+{
+    const char *host;
+
+    if (global == NULL) {
+        return "127.0.0.1";
+    }
+    host = global->panel_qr_host[0] != '\0' ? global->panel_qr_host : global->panel_listen_address;
+    if (host[0] == '\0' ||
+        emtask_key_equals(host, "0.0.0.0") ||
+        emtask_key_equals(host, "::") ||
+        emtask_key_equals(host, "[::]")) {
+        return "127.0.0.1";
+    }
+    return host;
+}
+
+static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *out, size_t out_capacity, int include_commands)
+{
+    const emtask_global_config_t *global;
+    const emtask_task_config_t *first_task;
+    const char *start_command;
+    const char *stop_command;
+    char value[64];
+    size_t len;
+    int status;
+
+    if (config == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    global = &config->global;
+    first_task = config->task_count != 0u ? &config->tasks[0] : NULL;
+    len = 0u;
+    out[0] = '\0';
+
+    status = emtask_panel_payload_append_literal(out, out_capacity, &len, "emtask1");
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_payload_append_field(out, out_capacity, &len, "h", emtask_panel_qr_host(global), 0u);
+    if (status != SSH_OK) {
+        return status;
+    }
+    (void)snprintf(value, sizeof(value), "%u", (unsigned)global->panel_port);
+    status = emtask_panel_payload_append_field(out, out_capacity, &len, "pp", value, 0u);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (first_task != NULL) {
+        (void)snprintf(value, sizeof(value), "%u", (unsigned)first_task->port);
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "sp", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "sn", first_task->name, 48u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        (void)snprintf(value, sizeof(value), "%u", (unsigned)(first_task->use_sftp != 0));
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "sf", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    (void)snprintf(value, sizeof(value), "%u", global->panel_auth & (EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP));
+    status = emtask_panel_payload_append_field(out, out_capacity, &len, "a", value, 0u);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_TOKEN) != 0u) {
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "t", global->panel_token, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    if ((global->panel_auth & EMTASK_PANEL_AUTH_OTP) != 0u) {
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "o", global->panel_otp_secret, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        (void)snprintf(value, sizeof(value), "%u", global->panel_otp_digits);
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "d", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        (void)snprintf(value, sizeof(value), "%u", global->panel_otp_step_sec);
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "i", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        (void)snprintf(value, sizeof(value), "%u", global->panel_otp_window);
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "w", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    if (include_commands) {
+        start_command = global->panel_qr_start_command[0] != '\0' ? global->panel_qr_start_command : "emtask";
+        stop_command = global->panel_qr_stop_command[0] != '\0' ? global->panel_qr_stop_command : "Ctrl-C";
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "start", start_command, 64u);
+        if (status != SSH_OK) {
+            return status;
+        }
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "stop", stop_command, 64u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    return SSH_OK;
+}
+
+typedef struct emtask_qr_matrix {
+    uint8_t modules[EMTASK_QR_SIZE * EMTASK_QR_SIZE];
+    uint8_t is_function[EMTASK_QR_SIZE * EMTASK_QR_SIZE];
+} emtask_qr_matrix_t;
+
+typedef struct emtask_qr_bit_buffer {
+    uint8_t data[EMTASK_QR_DATA_CODEWORDS];
+    size_t bit_len;
+} emtask_qr_bit_buffer_t;
+
+static size_t emtask_qr_index(unsigned row, unsigned col)
+{
+    return ((size_t)row * EMTASK_QR_SIZE) + col;
+}
+
+static void emtask_qr_set(emtask_qr_matrix_t *qr, unsigned row, unsigned col, int black, int is_function)
+{
+    size_t index;
+
+    if (qr == NULL || row >= EMTASK_QR_SIZE || col >= EMTASK_QR_SIZE) {
+        return;
+    }
+    index = emtask_qr_index(row, col);
+    qr->modules[index] = black ? 1u : 0u;
+    if (is_function) {
+        qr->is_function[index] = 1u;
+    }
+}
+
+static uint32_t emtask_qr_bch_remainder(uint32_t value, uint32_t generator, unsigned degree)
+{
+    int bit;
+
+    value <<= degree;
+    for (bit = 31; bit >= (int)degree; --bit) {
+        if ((value & (1u << (unsigned)bit)) != 0u) {
+            value ^= generator << (unsigned)(bit - (int)degree);
+        }
+    }
+    return value & ((1u << degree) - 1u);
+}
+
+static void emtask_qr_draw_finder(emtask_qr_matrix_t *qr, unsigned row, unsigned col)
+{
+    int dy;
+    int dx;
+
+    for (dy = -1; dy <= 7; ++dy) {
+        for (dx = -1; dx <= 7; ++dx) {
+            int r = (int)row + dy;
+            int c = (int)col + dx;
+            int black;
+
+            if (r < 0 || c < 0 || r >= (int)EMTASK_QR_SIZE || c >= (int)EMTASK_QR_SIZE) {
+                continue;
+            }
+            black = dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6 &&
+                    (dx == 0 || dx == 6 || dy == 0 || dy == 6 ||
+                     (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4));
+            emtask_qr_set(qr, (unsigned)r, (unsigned)c, black, 1);
+        }
+    }
+}
+
+static void emtask_qr_draw_alignment(emtask_qr_matrix_t *qr, unsigned row, unsigned col)
+{
+    int dy;
+    int dx;
+
+    for (dy = -2; dy <= 2; ++dy) {
+        for (dx = -2; dx <= 2; ++dx) {
+            unsigned abs_dx = (unsigned)(dx < 0 ? -dx : dx);
+            unsigned abs_dy = (unsigned)(dy < 0 ? -dy : dy);
+            unsigned dist = abs_dx > abs_dy ? abs_dx : abs_dy;
+            int black = dist == 0u || dist == 2u;
+
+            emtask_qr_set(qr, (unsigned)((int)row + dy), (unsigned)((int)col + dx), black, 1);
+        }
+    }
+}
+
+static void emtask_qr_write_format_bits(emtask_qr_matrix_t *qr, unsigned mask)
+{
+    uint32_t data = (1u << 3) | (mask & 7u);
+    uint32_t bits = ((data << 10) | emtask_qr_bch_remainder(data, 0x537u, 10u)) ^ 0x5412u;
+    unsigned i;
+
+    for (i = 0u; i <= 5u; ++i) {
+        emtask_qr_set(qr, i, 8u, (bits >> i) & 1u, 1);
+    }
+    emtask_qr_set(qr, 7u, 8u, (bits >> 6) & 1u, 1);
+    emtask_qr_set(qr, 8u, 8u, (bits >> 7) & 1u, 1);
+    emtask_qr_set(qr, 8u, 7u, (bits >> 8) & 1u, 1);
+    for (i = 9u; i < 15u; ++i) {
+        emtask_qr_set(qr, 8u, 14u - i, (bits >> i) & 1u, 1);
+    }
+    for (i = 0u; i < 8u; ++i) {
+        emtask_qr_set(qr, 8u, EMTASK_QR_SIZE - 1u - i, (bits >> i) & 1u, 1);
+    }
+    for (i = 8u; i < 15u; ++i) {
+        emtask_qr_set(qr, EMTASK_QR_SIZE - 15u + i, 8u, (bits >> i) & 1u, 1);
+    }
+}
+
+static void emtask_qr_write_version_bits(emtask_qr_matrix_t *qr)
+{
+    uint32_t bits = (EMTASK_QR_VERSION << 12) |
+                    emtask_qr_bch_remainder(EMTASK_QR_VERSION, 0x1f25u, 12u);
+    unsigned i;
+
+    for (i = 0u; i < 18u; ++i) {
+        unsigned a = EMTASK_QR_SIZE - 11u + (i % 3u);
+        unsigned b = i / 3u;
+        int black = (bits >> i) & 1u;
+
+        emtask_qr_set(qr, b, a, black, 1);
+        emtask_qr_set(qr, a, b, black, 1);
+    }
+}
+
+static void emtask_qr_draw_function_patterns(emtask_qr_matrix_t *qr)
+{
+    static const unsigned k_alignment[] = {6u, 28u, 50u};
+    unsigned i;
+    unsigned j;
+
+    memset(qr, 0, sizeof(*qr));
+    emtask_qr_draw_finder(qr, 0u, 0u);
+    emtask_qr_draw_finder(qr, 0u, EMTASK_QR_SIZE - 7u);
+    emtask_qr_draw_finder(qr, EMTASK_QR_SIZE - 7u, 0u);
+
+    for (i = 0u; i < EMTASK_QR_SIZE; ++i) {
+        if (qr->is_function[emtask_qr_index(6u, i)] == 0u) {
+            emtask_qr_set(qr, 6u, i, (i % 2u) == 0u, 1);
+        }
+        if (qr->is_function[emtask_qr_index(i, 6u)] == 0u) {
+            emtask_qr_set(qr, i, 6u, (i % 2u) == 0u, 1);
+        }
+    }
+
+    for (i = 0u; i < sizeof(k_alignment) / sizeof(k_alignment[0]); ++i) {
+        for (j = 0u; j < sizeof(k_alignment) / sizeof(k_alignment[0]); ++j) {
+            if ((i == 0u && j == 0u) ||
+                (i == 0u && j + 1u == sizeof(k_alignment) / sizeof(k_alignment[0])) ||
+                (i + 1u == sizeof(k_alignment) / sizeof(k_alignment[0]) && j == 0u)) {
+                continue;
+            }
+            emtask_qr_draw_alignment(qr, k_alignment[i], k_alignment[j]);
+        }
+    }
+
+    for (i = 0u; i <= 8u; ++i) {
+        if (i != 6u) {
+            emtask_qr_set(qr, 8u, i, 0, 1);
+            emtask_qr_set(qr, i, 8u, 0, 1);
+        }
+    }
+    for (i = EMTASK_QR_SIZE - 8u; i < EMTASK_QR_SIZE; ++i) {
+        emtask_qr_set(qr, 8u, i, 0, 1);
+    }
+    for (i = EMTASK_QR_SIZE - 7u; i < EMTASK_QR_SIZE; ++i) {
+        emtask_qr_set(qr, i, 8u, 0, 1);
+    }
+
+    emtask_qr_set(qr, EMTASK_QR_SIZE - 8u, 8u, 1, 1);
+    emtask_qr_write_version_bits(qr);
+}
+
+static int emtask_qr_bit_buffer_append(emtask_qr_bit_buffer_t *bits, uint32_t value, unsigned bit_count)
+{
+    unsigned i;
+
+    if (bits == NULL || bit_count > 24u || bits->bit_len + bit_count > EMTASK_QR_DATA_CODEWORDS * 8u) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    for (i = 0u; i < bit_count; ++i) {
+        unsigned shift = bit_count - 1u - i;
+        if (((value >> shift) & 1u) != 0u) {
+            bits->data[bits->bit_len >> 3] |= (uint8_t)(0x80u >> (bits->bit_len & 7u));
+        }
+        ++bits->bit_len;
+    }
+    return SSH_OK;
+}
+
+static int emtask_qr_build_data_codewords(const char *payload, uint8_t data_codewords[EMTASK_QR_DATA_CODEWORDS])
+{
+    emtask_qr_bit_buffer_t bits;
+    size_t payload_len;
+    size_t codeword_len;
+    size_t i;
+    int status;
+
+    if (payload == NULL || data_codewords == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    payload_len = strlen(payload);
+    if (payload_len > 271u) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    memset(&bits, 0, sizeof(bits));
+    status = emtask_qr_bit_buffer_append(&bits, 0x4u, 4u);
+    if (status == SSH_OK) {
+        status = emtask_qr_bit_buffer_append(&bits, (uint32_t)payload_len, 16u);
+    }
+    for (i = 0u; status == SSH_OK && i < payload_len; ++i) {
+        status = emtask_qr_bit_buffer_append(&bits, (uint8_t)payload[i], 8u);
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    if (bits.bit_len < EMTASK_QR_DATA_CODEWORDS * 8u) {
+        size_t remaining = (EMTASK_QR_DATA_CODEWORDS * 8u) - bits.bit_len;
+        size_t terminator = remaining < 4u ? remaining : 4u;
+
+        bits.bit_len += terminator;
+    }
+    while ((bits.bit_len & 7u) != 0u) {
+        ++bits.bit_len;
+    }
+    codeword_len = bits.bit_len >> 3;
+    for (i = codeword_len; i < EMTASK_QR_DATA_CODEWORDS; ++i) {
+        bits.data[i] = (uint8_t)(((i - codeword_len) & 1u) == 0u ? 0xecu : 0x11u);
+    }
+
+    memcpy(data_codewords, bits.data, EMTASK_QR_DATA_CODEWORDS);
+    return SSH_OK;
+}
+
+static void emtask_qr_gf_init(uint8_t exp_table[512], uint8_t log_table[256])
+{
+    unsigned value;
+    unsigned i;
+
+    memset(log_table, 0, 256u);
+    value = 1u;
+    for (i = 0u; i < 255u; ++i) {
+        exp_table[i] = (uint8_t)value;
+        log_table[value] = (uint8_t)i;
+        value <<= 1;
+        if ((value & 0x100u) != 0u) {
+            value ^= 0x11du;
+        }
+    }
+    for (i = 255u; i < 512u; ++i) {
+        exp_table[i] = exp_table[i - 255u];
+    }
+}
+
+static uint8_t emtask_qr_gf_mul(const uint8_t exp_table[512], const uint8_t log_table[256], uint8_t a, uint8_t b)
+{
+    if (a == 0u || b == 0u) {
+        return 0u;
+    }
+    return exp_table[(unsigned)log_table[a] + (unsigned)log_table[b]];
+}
+
+static void emtask_qr_compute_generator(
+    const uint8_t exp_table[512],
+    const uint8_t log_table[256],
+    uint8_t generator[EMTASK_QR_ECC_CODEWORDS])
+{
+    unsigned i;
+
+    memset(generator, 0, EMTASK_QR_ECC_CODEWORDS);
+    generator[EMTASK_QR_ECC_CODEWORDS - 1u] = 1u;
+    for (i = 0u; i < EMTASK_QR_ECC_CODEWORDS; ++i) {
+        unsigned j;
+        uint8_t root = exp_table[i];
+
+        for (j = 0u; j < EMTASK_QR_ECC_CODEWORDS; ++j) {
+            generator[j] = emtask_qr_gf_mul(exp_table, log_table, generator[j], root);
+            if (j + 1u < EMTASK_QR_ECC_CODEWORDS) {
+                generator[j] ^= generator[j + 1u];
+            }
+        }
+    }
+}
+
+static void emtask_qr_compute_ecc(
+    const uint8_t exp_table[512],
+    const uint8_t log_table[256],
+    const uint8_t generator[EMTASK_QR_ECC_CODEWORDS],
+    const uint8_t *data,
+    size_t data_len,
+    uint8_t ecc[EMTASK_QR_ECC_CODEWORDS])
+{
+    size_t i;
+
+    memset(ecc, 0, EMTASK_QR_ECC_CODEWORDS);
+    for (i = 0u; i < data_len; ++i) {
+        unsigned j;
+        uint8_t factor = data[i] ^ ecc[0];
+
+        memmove(ecc, ecc + 1u, EMTASK_QR_ECC_CODEWORDS - 1u);
+        ecc[EMTASK_QR_ECC_CODEWORDS - 1u] = 0u;
+        for (j = 0u; j < EMTASK_QR_ECC_CODEWORDS; ++j) {
+            ecc[j] ^= emtask_qr_gf_mul(exp_table, log_table, generator[j], factor);
+        }
+    }
+}
+
+static int emtask_qr_interleave_codewords(
+    const uint8_t data_codewords[EMTASK_QR_DATA_CODEWORDS],
+    uint8_t out[EMTASK_QR_TOTAL_CODEWORDS])
+{
+    static const size_t k_block_data_len[EMTASK_QR_BLOCK_COUNT] = {68u, 68u, 69u, 69u};
+    uint8_t exp_table[512];
+    uint8_t log_table[256];
+    uint8_t generator[EMTASK_QR_ECC_CODEWORDS];
+    uint8_t block_data[EMTASK_QR_BLOCK_COUNT][69];
+    uint8_t block_ecc[EMTASK_QR_BLOCK_COUNT][EMTASK_QR_ECC_CODEWORDS];
+    size_t offset;
+    size_t out_len;
+    unsigned block;
+    size_t i;
+
+    if (data_codewords == NULL || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    emtask_qr_gf_init(exp_table, log_table);
+    emtask_qr_compute_generator(exp_table, log_table, generator);
+
+    offset = 0u;
+    for (block = 0u; block < EMTASK_QR_BLOCK_COUNT; ++block) {
+        memcpy(block_data[block], data_codewords + offset, k_block_data_len[block]);
+        emtask_qr_compute_ecc(
+            exp_table,
+            log_table,
+            generator,
+            block_data[block],
+            k_block_data_len[block],
+            block_ecc[block]);
+        offset += k_block_data_len[block];
+    }
+
+    out_len = 0u;
+    for (i = 0u; i < 69u; ++i) {
+        for (block = 0u; block < EMTASK_QR_BLOCK_COUNT; ++block) {
+            if (i < k_block_data_len[block]) {
+                out[out_len++] = block_data[block][i];
+            }
+        }
+    }
+    for (i = 0u; i < EMTASK_QR_ECC_CODEWORDS; ++i) {
+        for (block = 0u; block < EMTASK_QR_BLOCK_COUNT; ++block) {
+            out[out_len++] = block_ecc[block][i];
+        }
+    }
+    return out_len == EMTASK_QR_TOTAL_CODEWORDS ? SSH_OK : SSH_ERR_PLATFORM;
+}
+
+static void emtask_qr_place_data(emtask_qr_matrix_t *qr, const uint8_t codewords[EMTASK_QR_TOTAL_CODEWORDS])
+{
+    size_t bit_index;
+    int right;
+
+    bit_index = 0u;
+    for (right = (int)EMTASK_QR_SIZE - 1; right >= 1; right -= 2) {
+        int upward;
+        int i;
+
+        if (right == 6) {
+            --right;
+        }
+        upward = ((((int)EMTASK_QR_SIZE - 1 - right) / 2) & 1) == 0;
+        for (i = 0; i < (int)EMTASK_QR_SIZE; ++i) {
+            int row = upward ? ((int)EMTASK_QR_SIZE - 1 - i) : i;
+            int j;
+
+            for (j = 0; j < 2; ++j) {
+                int col = right - j;
+                int black;
+
+                if (qr->is_function[emtask_qr_index((unsigned)row, (unsigned)col)] != 0u) {
+                    continue;
+                }
+                black = 0;
+                if (bit_index < EMTASK_QR_TOTAL_CODEWORDS * 8u) {
+                    black = (codewords[bit_index >> 3] >> (7u - (bit_index & 7u))) & 1u;
+                    ++bit_index;
+                }
+                if ((((unsigned)row + (unsigned)col) & 1u) == 0u) {
+                    black = !black;
+                }
+                emtask_qr_set(qr, (unsigned)row, (unsigned)col, black, 0);
+            }
+        }
+    }
+}
+
+static int emtask_qr_build_matrix(const char *payload, emtask_qr_matrix_t *qr)
+{
+    uint8_t data_codewords[EMTASK_QR_DATA_CODEWORDS];
+    uint8_t all_codewords[EMTASK_QR_TOTAL_CODEWORDS];
+    int status;
+
+    if (payload == NULL || qr == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = emtask_qr_build_data_codewords(payload, data_codewords);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_qr_interleave_codewords(data_codewords, all_codewords);
+    if (status != SSH_OK) {
+        memset(data_codewords, 0, sizeof(data_codewords));
+        memset(all_codewords, 0, sizeof(all_codewords));
+        return status;
+    }
+
+    emtask_qr_draw_function_patterns(qr);
+    emtask_qr_place_data(qr, all_codewords);
+    emtask_qr_write_format_bits(qr, 0u);
+    emtask_qr_set(qr, EMTASK_QR_SIZE - 8u, 8u, 1, 1);
+
+    memset(data_codewords, 0, sizeof(data_codewords));
+    memset(all_codewords, 0, sizeof(all_codewords));
+    return SSH_OK;
+}
+
+static void emtask_qr_write_xml_escaped(FILE *file, const char *text)
+{
+    const char *p;
+
+    if (file == NULL || text == NULL) {
+        return;
+    }
+    for (p = text; *p != '\0'; ++p) {
+        switch (*p) {
+        case '&':
+            (void)fputs("&amp;", file);
+            break;
+        case '<':
+            (void)fputs("&lt;", file);
+            break;
+        case '>':
+            (void)fputs("&gt;", file);
+            break;
+        case '"':
+            (void)fputs("&quot;", file);
+            break;
+        default:
+            (void)fputc(*p, file);
+            break;
+        }
+    }
+}
+
+static int emtask_qr_write_svg(const char *path, const char *payload, const emtask_qr_matrix_t *qr)
+{
+    enum { k_quiet = 4, k_module = 8 };
+    unsigned image_size;
+    FILE *file;
+    unsigned row;
+    unsigned col;
+
+    if (path == NULL || payload == NULL || qr == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+
+    image_size = (EMTASK_QR_SIZE + (2u * k_quiet)) * k_module;
+    if (fprintf(
+            file,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%u\" height=\"%u\" viewBox=\"0 0 %u %u\" shape-rendering=\"crispEdges\">\n"
+            "<title>emtask server import QR</title>\n<desc>",
+            image_size,
+            image_size,
+            image_size,
+            image_size) < 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    emtask_qr_write_xml_escaped(file, payload);
+    if (fprintf(file, "</desc>\n<rect width=\"100%%\" height=\"100%%\" fill=\"#fff\"/>\n") < 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    for (row = 0u; row < EMTASK_QR_SIZE; ++row) {
+        for (col = 0u; col < EMTASK_QR_SIZE; ++col) {
+            if (qr->modules[emtask_qr_index(row, col)] == 0u) {
+                continue;
+            }
+            if (fprintf(
+                    file,
+                    "<rect x=\"%u\" y=\"%u\" width=\"%u\" height=\"%u\" fill=\"#000\"/>\n",
+                    (col + k_quiet) * k_module,
+                    (row + k_quiet) * k_module,
+                    k_module,
+                    k_module) < 0) {
+                (void)fclose(file);
+                return SSH_ERR_PLATFORM;
+            }
+        }
+    }
+    if (fprintf(file, "</svg>\n") < 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    return fclose(file) == 0 ? SSH_OK : SSH_ERR_PLATFORM;
+}
+
+static int emtask_panel_materialize_qr(const emtask_config_t *config)
+{
+    emtask_qr_matrix_t qr;
+    char payload[EMTASK_QR_PAYLOAD_MAX];
+    int exists;
+    int status;
+
+    if (config == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!config->global.panel_enabled || config->global.panel_auth == 0u || config->global.panel_qr_file[0] == '\0') {
+        return SSH_OK;
+    }
+
+    status = emtask_panel_file_exists(config->global.panel_qr_file, &exists);
+    if (status != SSH_OK || exists) {
+        return status;
+    }
+
+    status = emtask_panel_build_qr_payload(config, payload, sizeof(payload), 1);
+    if (status == SSH_OK && strlen(payload) > 271u) {
+        status = SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    if (status == SSH_ERR_BUFFER_TOO_SMALL) {
+        status = emtask_panel_build_qr_payload(config, payload, sizeof(payload), 0);
+    }
+    if (status != SSH_OK) {
+        memset(payload, 0, sizeof(payload));
+        return status;
+    }
+    status = emtask_qr_build_matrix(payload, &qr);
+    if (status == SSH_OK) {
+        status = emtask_qr_write_svg(config->global.panel_qr_file, payload, &qr);
+    }
+    if (status == SSH_OK) {
+        emtask_logf("panel QR code written to %s", config->global.panel_qr_file);
+    }
+    memset(payload, 0, sizeof(payload));
+    memset(&qr, 0, sizeof(qr));
+    return status;
 }
 
 static int emtask_prepare_hostkey(emtask_app_t *app)
@@ -1308,6 +2641,859 @@ static int emtask_net_close(void *ctx, void *conn)
 {
     (void)ctx;
     return emtask_endpoint_close((emtask_endpoint_t *)conn);
+}
+
+typedef struct emtask_panel_buffer {
+    char *data;
+    size_t len;
+    size_t capacity;
+    int truncated;
+} emtask_panel_buffer_t;
+
+static void emtask_panel_buffer_init(emtask_panel_buffer_t *buf, char *data, size_t capacity)
+{
+    if (buf == NULL) {
+        return;
+    }
+    buf->data = data;
+    buf->len = 0u;
+    buf->capacity = capacity;
+    buf->truncated = 0;
+    if (data != NULL && capacity != 0u) {
+        data[0] = '\0';
+    }
+}
+
+static void emtask_panel_appendf(emtask_panel_buffer_t *buf, const char *fmt, ...)
+{
+    va_list args;
+    int written;
+    size_t available;
+
+    if (buf == NULL || buf->data == NULL || buf->capacity == 0u || fmt == NULL || buf->truncated) {
+        return;
+    }
+    if (buf->len >= buf->capacity) {
+        buf->truncated = 1;
+        return;
+    }
+
+    available = buf->capacity - buf->len;
+    va_start(args, fmt);
+    written = vsnprintf(buf->data + buf->len, available, fmt, args);
+    va_end(args);
+    if (written < 0) {
+        buf->truncated = 1;
+        return;
+    }
+    if ((size_t)written >= available) {
+        buf->len = buf->capacity - 1u;
+        buf->data[buf->len] = '\0';
+        buf->truncated = 1;
+        return;
+    }
+    buf->len += (size_t)written;
+}
+
+static void emtask_panel_append_json_string(emtask_panel_buffer_t *buf, const char *text)
+{
+    const unsigned char *p;
+
+    emtask_panel_appendf(buf, "\"");
+    if (text != NULL) {
+        for (p = (const unsigned char *)text; *p != '\0'; ++p) {
+            switch (*p) {
+            case '\\':
+                emtask_panel_appendf(buf, "\\\\");
+                break;
+            case '"':
+                emtask_panel_appendf(buf, "\\\"");
+                break;
+            case '\b':
+                emtask_panel_appendf(buf, "\\b");
+                break;
+            case '\f':
+                emtask_panel_appendf(buf, "\\f");
+                break;
+            case '\n':
+                emtask_panel_appendf(buf, "\\n");
+                break;
+            case '\r':
+                emtask_panel_appendf(buf, "\\r");
+                break;
+            case '\t':
+                emtask_panel_appendf(buf, "\\t");
+                break;
+            default:
+                if (*p < 0x20u) {
+                    emtask_panel_appendf(buf, "\\u%04x", (unsigned)*p);
+                } else {
+                    emtask_panel_appendf(buf, "%c", (char)*p);
+                }
+                break;
+            }
+        }
+    }
+    emtask_panel_appendf(buf, "\"");
+}
+
+static int emtask_panel_constant_time_equal(const char *lhs, const char *rhs)
+{
+    size_t lhs_len;
+    size_t rhs_len;
+    size_t max_len;
+    unsigned diff;
+
+    if (lhs == NULL || rhs == NULL) {
+        return 0;
+    }
+    lhs_len = strlen(lhs);
+    rhs_len = strlen(rhs);
+    max_len = lhs_len > rhs_len ? lhs_len : rhs_len;
+    diff = (unsigned)(lhs_len ^ rhs_len);
+    for (size_t i = 0u; i < max_len; ++i) {
+        unsigned lc = i < lhs_len ? (unsigned char)lhs[i] : 0u;
+        unsigned rc = i < rhs_len ? (unsigned char)rhs[i] : 0u;
+        diff |= lc ^ rc;
+    }
+    return diff == 0u;
+}
+
+static int emtask_panel_char_to_lower(int ch)
+{
+    return ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch;
+}
+
+static int emtask_panel_prefix_equals_nocase(const char *text, const char *prefix)
+{
+    if (text == NULL || prefix == NULL) {
+        return 0;
+    }
+    while (*prefix != '\0') {
+        if (emtask_panel_char_to_lower((unsigned char)*text) != emtask_panel_char_to_lower((unsigned char)*prefix)) {
+            return 0;
+        }
+        ++text;
+        ++prefix;
+    }
+    return 1;
+}
+
+static int emtask_panel_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static int emtask_panel_url_decode(const char *src, size_t src_len, char *out, size_t out_capacity)
+{
+    size_t written;
+
+    if (src == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    written = 0u;
+    for (size_t i = 0u; i < src_len; ++i) {
+        char ch = src[i];
+
+        if (written + 1u >= out_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        if (ch == '%' && i + 2u < src_len) {
+            int hi = emtask_panel_hex_value(src[i + 1u]);
+            int lo = emtask_panel_hex_value(src[i + 2u]);
+            if (hi >= 0 && lo >= 0) {
+                out[written++] = (char)((hi << 4) | lo);
+                i += 2u;
+                continue;
+            }
+        }
+        out[written++] = ch == '+' ? ' ' : ch;
+    }
+    out[written] = '\0';
+    return SSH_OK;
+}
+
+static int emtask_panel_query_value(const char *query, const char *key, char *out, size_t out_capacity)
+{
+    size_t key_len;
+    const char *p;
+
+    if (query == NULL || key == NULL || out == NULL || out_capacity == 0u) {
+        return 0;
+    }
+    out[0] = '\0';
+    key_len = strlen(key);
+    p = query;
+    while (*p != '\0') {
+        const char *name = p;
+        const char *eq;
+        const char *end;
+
+        end = strchr(p, '&');
+        if (end == NULL) {
+            end = p + strlen(p);
+        }
+        eq = memchr(name, '=', (size_t)(end - name));
+        if (eq != NULL && (size_t)(eq - name) == key_len && memcmp(name, key, key_len) == 0) {
+            return emtask_panel_url_decode(eq + 1, (size_t)(end - eq - 1), out, out_capacity) == SSH_OK;
+        }
+        p = *end == '&' ? end + 1 : end;
+    }
+    return 0;
+}
+
+static void emtask_panel_trim_ascii(char *text)
+{
+    char *trimmed;
+    char *end;
+
+    if (text == NULL) {
+        return;
+    }
+    trimmed = text;
+    while (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\r' || *trimmed == '\n') {
+        ++trimmed;
+    }
+    if (trimmed != text) {
+        memmove(text, trimmed, strlen(trimmed) + 1u);
+    }
+    end = text + strlen(text);
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
+        --end;
+    }
+    *end = '\0';
+}
+
+static int emtask_panel_header_value(const char *request, const char *name, char *out, size_t out_capacity)
+{
+    size_t name_len;
+    const char *p;
+
+    if (request == NULL || name == NULL || out == NULL || out_capacity == 0u) {
+        return 0;
+    }
+    out[0] = '\0';
+    name_len = strlen(name);
+    p = strchr(request, '\n');
+    if (p == NULL) {
+        return 0;
+    }
+    ++p;
+    while (*p != '\0') {
+        const char *line_end;
+        const char *colon;
+        size_t line_len;
+
+        line_end = strchr(p, '\n');
+        if (line_end == NULL) {
+            line_end = p + strlen(p);
+        }
+        line_len = (size_t)(line_end - p);
+        if (line_len != 0u && p[line_len - 1u] == '\r') {
+            --line_len;
+        }
+        if (line_len == 0u) {
+            return 0;
+        }
+        colon = memchr(p, ':', line_len);
+        if (colon != NULL && (size_t)(colon - p) == name_len) {
+            int match = 1;
+            for (size_t i = 0u; i < name_len; ++i) {
+                if (emtask_panel_char_to_lower((unsigned char)p[i]) != emtask_panel_char_to_lower((unsigned char)name[i])) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (match) {
+                size_t value_len = line_len - (size_t)(colon - p) - 1u;
+                if (value_len + 1u > out_capacity) {
+                    value_len = out_capacity - 1u;
+                }
+                memcpy(out, colon + 1, value_len);
+                out[value_len] = '\0';
+                emtask_panel_trim_ascii(out);
+                return 1;
+            }
+        }
+        p = *line_end == '\n' ? line_end + 1 : line_end;
+    }
+    return 0;
+}
+
+static int emtask_panel_base32_value(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch - 'A';
+    }
+    if (ch >= 'a' && ch <= 'z') {
+        return ch - 'a';
+    }
+    if (ch >= '2' && ch <= '7') {
+        return ch - '2' + 26;
+    }
+    return -1;
+}
+
+static int emtask_panel_decode_base32_secret(const char *text, uint8_t *out, size_t out_capacity, size_t *out_len)
+{
+    uint32_t acc;
+    unsigned bits;
+    size_t written;
+
+    if (text == NULL || out == NULL || out_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    acc = 0u;
+    bits = 0u;
+    written = 0u;
+    for (const char *p = text; *p != '\0'; ++p) {
+        int value;
+
+        if (*p == '=' || *p == ' ' || *p == '\t' || *p == '-' || *p == ':') {
+            continue;
+        }
+        value = emtask_panel_base32_value(*p);
+        if (value < 0) {
+            return SSH_ERR_MALFORMED_PACKET;
+        }
+        acc = (acc << 5) | (uint32_t)value;
+        bits += 5u;
+        if (bits >= 8u) {
+            bits -= 8u;
+            if (written >= out_capacity) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            out[written++] = (uint8_t)((acc >> bits) & 0xffu);
+        }
+    }
+    *out_len = written;
+    return written != 0u ? SSH_OK : SSH_ERR_MALFORMED_PACKET;
+}
+
+static int emtask_panel_totp_code(
+    const uint8_t *secret,
+    size_t secret_len,
+    uint64_t counter,
+    unsigned digits,
+    char out[16])
+{
+    const mbedtls_md_info_t *info;
+    uint8_t msg[8];
+    uint8_t hmac[20];
+    uint32_t bin_code;
+    uint32_t divisor;
+    uint32_t code;
+    unsigned offset;
+    int written;
+
+    if (secret == NULL || secret_len == 0u || out == NULL || digits < 6u || digits > 8u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
+    if (info == NULL) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    for (unsigned i = 0u; i < 8u; ++i) {
+        msg[7u - i] = (uint8_t)(counter & 0xffu);
+        counter >>= 8;
+    }
+    if (mbedtls_md_hmac(info, secret, secret_len, msg, sizeof(msg), hmac) != 0) {
+        memset(hmac, 0, sizeof(hmac));
+        return SSH_ERR_PLATFORM;
+    }
+    offset = hmac[19] & 0x0fu;
+    bin_code = (((uint32_t)hmac[offset] & 0x7fu) << 24) |
+               ((uint32_t)hmac[offset + 1u] << 16) |
+               ((uint32_t)hmac[offset + 2u] << 8) |
+               (uint32_t)hmac[offset + 3u];
+    divisor = 1u;
+    for (unsigned i = 0u; i < digits; ++i) {
+        divisor *= 10u;
+    }
+    code = bin_code % divisor;
+    written = snprintf(out, 16u, "%0*u", (int)digits, (unsigned)code);
+    memset(hmac, 0, sizeof(hmac));
+    return written == (int)digits ? SSH_OK : SSH_ERR_BUFFER_TOO_SMALL;
+}
+
+static int emtask_panel_verify_otp(const emtask_global_config_t *global, const char *otp)
+{
+    uint8_t secret[128];
+    size_t secret_len;
+    time_t now;
+    uint64_t counter;
+    int status;
+
+    if (global == NULL || otp == NULL || otp[0] == '\0') {
+        return 0;
+    }
+    for (const char *p = otp; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9') {
+            return 0;
+        }
+    }
+    if (strlen(otp) != global->panel_otp_digits) {
+        return 0;
+    }
+    status = emtask_panel_decode_base32_secret(global->panel_otp_secret, secret, sizeof(secret), &secret_len);
+    if (status != SSH_OK) {
+        memset(secret, 0, sizeof(secret));
+        return 0;
+    }
+    now = time(NULL);
+    if (now < 0 || global->panel_otp_step_sec == 0u) {
+        memset(secret, 0, sizeof(secret));
+        return 0;
+    }
+    counter = (uint64_t)now / (uint64_t)global->panel_otp_step_sec;
+    for (int delta = -(int)global->panel_otp_window; delta <= (int)global->panel_otp_window; ++delta) {
+        char expected[16];
+        uint64_t candidate;
+
+        if (delta < 0 && counter < (uint64_t)(-delta)) {
+            continue;
+        }
+        candidate = delta < 0 ? counter - (uint64_t)(-delta) : counter + (uint64_t)delta;
+        if (emtask_panel_totp_code(secret, secret_len, candidate, global->panel_otp_digits, expected) == SSH_OK &&
+            emtask_panel_constant_time_equal(expected, otp)) {
+            memset(secret, 0, sizeof(secret));
+            return 1;
+        }
+    }
+    memset(secret, 0, sizeof(secret));
+    return 0;
+}
+
+static int emtask_panel_verify_request_auth(const emtask_global_config_t *global, const char *request, const char *query)
+{
+    char token[EMTASK_MAX_TEXT];
+    char otp[64];
+    char header[EMTASK_MAX_TEXT];
+    int token_ok;
+    int otp_ok;
+
+    if (global == NULL) {
+        return 0;
+    }
+    if (global->panel_auth == 0u) {
+        return 1;
+    }
+
+    token_ok = (global->panel_auth & EMTASK_PANEL_AUTH_TOKEN) == 0u;
+    otp_ok = (global->panel_auth & EMTASK_PANEL_AUTH_OTP) == 0u;
+    token[0] = '\0';
+    otp[0] = '\0';
+    header[0] = '\0';
+
+    if (!token_ok) {
+        if (emtask_panel_header_value(request, "Authorization", header, sizeof(header))) {
+            if (emtask_panel_prefix_equals_nocase(header, "Bearer ")) {
+                (void)emtask_copy_text(token, sizeof(token), header + strlen("Bearer "));
+                emtask_panel_trim_ascii(token);
+            }
+        }
+        if (token[0] == '\0') {
+            (void)emtask_panel_header_value(request, "X-Panel-Token", token, sizeof(token));
+        }
+        if (token[0] == '\0') {
+            (void)emtask_panel_query_value(query, "token", token, sizeof(token));
+        }
+        token_ok = emtask_panel_constant_time_equal(global->panel_token, token);
+    }
+
+    if (!otp_ok) {
+        if (!emtask_panel_header_value(request, "X-Panel-OTP", otp, sizeof(otp))) {
+            (void)emtask_panel_header_value(request, "X-OTP", otp, sizeof(otp));
+        }
+        if (otp[0] == '\0') {
+            (void)emtask_panel_query_value(query, "otp", otp, sizeof(otp));
+        }
+        otp_ok = emtask_panel_verify_otp(global, otp);
+    }
+
+    memset(token, 0, sizeof(token));
+    memset(otp, 0, sizeof(otp));
+    memset(header, 0, sizeof(header));
+    return token_ok && otp_ok;
+}
+
+static int emtask_panel_send_all(uintptr_t socket_handle, const char *data, size_t len)
+{
+    size_t offset;
+
+    if (data == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    offset = 0u;
+    while (offset < len) {
+        size_t chunk = len - offset;
+        int n;
+
+        if (chunk > 16384u) {
+            chunk = 16384u;
+        }
+        switch (emtask_wait_for_socket(socket_handle, 1, 5000u)) {
+        case 0:
+            return SSH_ERR_PLATFORM;
+        case -1:
+            return SSH_ERR_PLATFORM;
+        default:
+            break;
+        }
+        n = emtask_platform_net_send(socket_handle, (const uint8_t *)data + offset, chunk);
+        if (n <= 0) {
+            return SSH_ERR_PLATFORM;
+        }
+        offset += (size_t)n;
+    }
+    return SSH_OK;
+}
+
+static int emtask_panel_send_response(
+    uintptr_t socket_handle,
+    int code,
+    const char *status_text,
+    const char *content_type,
+    const char *body)
+{
+    char header[512];
+    size_t body_len;
+    int written;
+    int status;
+
+    if (status_text == NULL || content_type == NULL || body == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    body_len = strlen(body);
+    written = snprintf(
+        header,
+        sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-store\r\n"
+        "\r\n",
+        code,
+        status_text,
+        content_type,
+        (unsigned)body_len);
+    if (written < 0 || (size_t)written >= sizeof(header)) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    status = emtask_panel_send_all(socket_handle, header, (size_t)written);
+    if (status != SSH_OK) {
+        return status;
+    }
+    return emtask_panel_send_all(socket_handle, body, body_len);
+}
+
+static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_task_t *task)
+{
+    int session_active;
+    int term_initialized;
+    int term_running;
+    int term_attached;
+    int term_faulted;
+    uint32_t last_exit_status;
+    uint32_t cols;
+    uint32_t rows;
+    uint32_t screen_cols;
+    uint32_t screen_rows;
+    size_t replay_len;
+    size_t replay_capacity;
+
+    if (json == NULL || task == NULL) {
+        return;
+    }
+
+    session_active = 0;
+    emtask_mutex_lock(&task->session_manager.lock);
+    session_active = task->session_manager.active_worker != NULL;
+    emtask_mutex_unlock(&task->session_manager.lock);
+
+    term_initialized = 0;
+    term_running = 0;
+    term_attached = 0;
+    term_faulted = 0;
+    last_exit_status = 0u;
+    cols = 0u;
+    rows = 0u;
+    screen_cols = 0u;
+    screen_rows = 0u;
+    replay_len = 0u;
+    replay_capacity = 0u;
+    emtask_mutex_lock(&task->term.lock);
+    term_initialized = task->term.initialized;
+    term_running = task->term.running;
+    term_attached = task->term.attached;
+    term_faulted = task->term.faulted;
+    last_exit_status = task->term.last_exit_status;
+    cols = task->term.cols;
+    rows = task->term.rows;
+    screen_cols = task->term.screen_cols;
+    screen_rows = task->term.screen_rows;
+    replay_len = task->term.replay_len;
+    replay_capacity = task->term.replay_capacity;
+    emtask_mutex_unlock(&task->term.lock);
+
+    emtask_panel_appendf(json, "{");
+    emtask_panel_appendf(json, "\"name\":");
+    emtask_panel_append_json_string(json, task->config.name);
+    emtask_panel_appendf(json, ",\"listen_address\":");
+    emtask_panel_append_json_string(json, task->config.listen_address[0] != '\0' ? task->config.listen_address : "0.0.0.0");
+    emtask_panel_appendf(json, ",\"port\":%u", (unsigned)task->config.port);
+    emtask_panel_appendf(json, ",\"command\":");
+    emtask_panel_append_json_string(json, task->config.command);
+    emtask_panel_appendf(json, ",\"working_dir\":");
+    emtask_panel_append_json_string(json, task->config.working_dir);
+    emtask_panel_appendf(json, ",\"use_sftp\":%s", task->config.use_sftp ? "true" : "false");
+    emtask_panel_appendf(json, ",\"use_conpty\":%s", task->config.use_conpty ? "true" : "false");
+    emtask_panel_appendf(json, ",\"restart_limit\":%u", task->config.restart_limit);
+    emtask_panel_appendf(json, ",\"restart_window_sec\":%u", task->config.restart_window_sec);
+    emtask_panel_appendf(json, ",\"listener_open\":%s", task->listener_open ? "true" : "false");
+    emtask_panel_appendf(json, ",\"session\":{\"terminal_active\":%s}", session_active ? "true" : "false");
+    emtask_panel_appendf(
+        json,
+        ",\"terminal\":{\"initialized\":%s,\"running\":%s,\"attached\":%s,\"faulted\":%s,\"last_exit_status\":%u,\"cols\":%u,\"rows\":%u,\"screen_cols\":%u,\"screen_rows\":%u,\"replay_len\":%u,\"replay_capacity\":%u}",
+        term_initialized ? "true" : "false",
+        term_running ? "true" : "false",
+        term_attached ? "true" : "false",
+        term_faulted ? "true" : "false",
+        (unsigned)last_exit_status,
+        (unsigned)cols,
+        (unsigned)rows,
+        (unsigned)screen_cols,
+        (unsigned)screen_rows,
+        (unsigned)replay_len,
+        (unsigned)replay_capacity);
+    emtask_panel_appendf(json, "}");
+}
+
+static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t json;
+    unsigned pool_active;
+    unsigned pool_max;
+    uint64_t now_ms;
+    uint64_t uptime_ms;
+    size_t i;
+
+    if (app == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    emtask_panel_buffer_init(&json, out, out_capacity);
+    emtask_mutex_lock(&app->pool.lock);
+    pool_active = app->pool.active_workers;
+    pool_max = app->pool.max_workers;
+    emtask_mutex_unlock(&app->pool.lock);
+    now_ms = emtask_platform_monotonic_ms();
+    uptime_ms = app->started_ms != 0u && now_ms >= app->started_ms ? now_ms - app->started_ms : 0u;
+
+    if (!tasks_only) {
+        emtask_panel_appendf(&json, "{");
+        emtask_panel_appendf(&json, "\"software\":\"emtask\"");
+        emtask_panel_appendf(&json, ",\"status\":\"ok\"");
+        emtask_panel_appendf(&json, ",\"uptime_ms\":%u", (unsigned)uptime_ms);
+        emtask_panel_appendf(&json, ",\"config\":{\"path\":");
+        emtask_panel_append_json_string(&json, app->config.global.config_path);
+        emtask_panel_appendf(&json, ",\"dir\":");
+        emtask_panel_append_json_string(&json, app->config.global.config_dir);
+        emtask_panel_appendf(&json, ",\"auth_backend\":");
+        emtask_panel_append_json_string(
+            &json,
+            app->config.global.auth_backend == EMTASK_AUTH_BACKEND_PASSWD ? "passwd" : "internal");
+        emtask_panel_appendf(&json, ",\"username\":");
+        emtask_panel_append_json_string(
+            &json,
+            app->config.global.username[0] != '\0' ? app->config.global.username : "<system>");
+        emtask_panel_appendf(&json, ",\"hostkey_file\":");
+        emtask_panel_append_json_string(&json, app->config.global.hostkey_file);
+        emtask_panel_appendf(&json, ",\"authorized_keys_file\":");
+        emtask_panel_append_json_string(&json, app->config.global.authorized_keys_file);
+        emtask_panel_appendf(&json, ",\"timeout_ms\":%u", (unsigned)app->config.global.timeout_ms);
+        emtask_panel_appendf(&json, "}");
+        emtask_panel_appendf(
+            &json,
+            ",\"panel\":{\"enabled\":%s,\"listen_address\":",
+            app->config.global.panel_enabled ? "true" : "false");
+        emtask_panel_append_json_string(
+            &json,
+            app->config.global.panel_listen_address[0] != '\0'
+                ? app->config.global.panel_listen_address
+                : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS);
+        emtask_panel_appendf(
+            &json,
+            ",\"port\":%u,\"listener_open\":%s,\"auth\":",
+            (unsigned)app->config.global.panel_port,
+            app->panel_listener_open ? "true" : "false");
+        if (app->config.global.panel_auth == 0u) {
+            emtask_panel_append_json_string(&json, "none");
+        } else if (app->config.global.panel_auth == EMTASK_PANEL_AUTH_TOKEN) {
+            emtask_panel_append_json_string(&json, "token");
+        } else if (app->config.global.panel_auth == EMTASK_PANEL_AUTH_OTP) {
+            emtask_panel_append_json_string(&json, "otp");
+        } else {
+            emtask_panel_append_json_string(&json, "token+otp");
+        }
+        emtask_panel_appendf(&json, ",\"auth_file\":");
+        emtask_panel_append_json_string(&json, app->config.global.panel_auth_file);
+        emtask_panel_appendf(&json, ",\"qr_file\":");
+        emtask_panel_append_json_string(&json, app->config.global.panel_qr_file);
+        emtask_panel_appendf(&json, ",\"qr_host\":");
+        emtask_panel_append_json_string(&json, emtask_panel_qr_host(&app->config.global));
+        emtask_panel_appendf(
+            &json,
+            ",\"otp_digits\":%u,\"otp_step_sec\":%u,\"otp_window\":%u}",
+            app->config.global.panel_otp_digits,
+            app->config.global.panel_otp_step_sec,
+            app->config.global.panel_otp_window);
+        emtask_panel_appendf(
+            &json,
+            ",\"worker_pool\":{\"max_workers\":%u,\"active_workers\":%u}",
+            pool_max,
+            pool_active);
+        emtask_panel_appendf(&json, ",\"task_count\":%u", (unsigned)app->task_count);
+        emtask_panel_appendf(&json, ",\"tasks\":[");
+    } else {
+        emtask_panel_appendf(&json, "{\"tasks\":[");
+    }
+    for (i = 0u; i < app->task_count; ++i) {
+        if (i != 0u) {
+            emtask_panel_appendf(&json, ",");
+        }
+        emtask_panel_append_task_json(&json, &app->tasks[i]);
+    }
+    emtask_panel_appendf(&json, "]}\n");
+    if (json.truncated) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return SSH_OK;
+}
+
+static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *conn)
+{
+    char request[1024];
+    char method[16];
+    char target[512];
+    char *path;
+    char *query;
+    char body[32768];
+    int n;
+    int status;
+    uintptr_t socket_handle;
+
+    if (app == NULL || conn == NULL || !conn->open) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    socket_handle = conn->socket_handle;
+    memset(request, 0, sizeof(request));
+    switch (emtask_wait_for_socket(socket_handle, 0, 5000u)) {
+    case 0:
+        return SSH_ERR_PLATFORM;
+    case -1:
+        return SSH_ERR_PLATFORM;
+    default:
+        break;
+    }
+    n = emtask_platform_net_recv(socket_handle, (uint8_t *)request, sizeof(request) - 1u);
+    if (n <= 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    request[n] = '\0';
+    method[0] = '\0';
+    target[0] = '\0';
+    if (sscanf(request, "%15s %511s", method, target) != 2) {
+        return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"bad_request\"}\n");
+    }
+    path = target;
+    query = strchr(target, '?');
+    if (query != NULL) {
+        *query = '\0';
+        ++query;
+    } else {
+        query = "";
+    }
+    if (strcmp(method, "GET") != 0) {
+        return emtask_panel_send_response(
+            socket_handle,
+            405,
+            "Method Not Allowed",
+            "application/json",
+            "{\"error\":\"method_not_allowed\"}\n");
+    }
+    if (!emtask_panel_verify_request_auth(&app->config.global, request, query)) {
+        return emtask_panel_send_response(
+            socket_handle,
+            401,
+            "Unauthorized",
+            "application/json",
+            "{\"error\":\"unauthorized\"}\n");
+    }
+    if (strcmp(path, "/health") == 0) {
+        return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", "{\"status\":\"ok\"}\n");
+    }
+    if (strcmp(path, "/") == 0) {
+        return emtask_panel_send_response(
+            socket_handle,
+            200,
+            "OK",
+            "text/html; charset=utf-8",
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>emtask panel</title></head>"
+            "<body><h1>emtask panel</h1><ul>"
+            "<li><a href=\"/status\">/status</a></li>"
+            "<li><a href=\"/tasks\">/tasks</a></li>"
+            "<li><a href=\"/health\">/health</a></li>"
+            "</ul></body></html>\n");
+    }
+    if (strcmp(path, "/status") == 0 || strcmp(path, "/tasks") == 0) {
+        status = emtask_panel_build_status_json(app, strcmp(path, "/tasks") == 0, body, sizeof(body));
+        if (status != SSH_OK) {
+            return emtask_panel_send_response(
+                socket_handle,
+                500,
+                "Internal Server Error",
+                "application/json",
+                "{\"error\":\"status_too_large\"}\n");
+        }
+        return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", body);
+    }
+    return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
+}
+
+void emtask_panel_thread_main(emtask_app_t *app)
+{
+    int status;
+
+    if (app == NULL) {
+        return;
+    }
+
+    for (;;) {
+        ssh_tcp_conn_t accepted;
+
+        memset(&accepted, 0, sizeof(accepted));
+        status = ssh_tcp_accept(&app->tcp, &app->panel_listener, &accepted, 0u);
+        if (status != SSH_OK) {
+            emtask_logf("panel accept failed: %s", ssh_status_string(status));
+            continue;
+        }
+        status = emtask_panel_handle_connection(app, &accepted);
+        if (status != SSH_OK) {
+            emtask_logf("panel request from %s failed: %s", ssh_tcp_conn_peer_address(&accepted), ssh_status_string(status));
+        }
+        (void)ssh_tcp_conn_close(&app->tcp, &accepted);
+    }
 }
 
 static uint64_t emtask_monotonic_ms(void)
@@ -2519,6 +4705,11 @@ static int emtask_term_init(emtask_term_t *term, const emtask_task_config_t *con
         emtask_mutex_deinit(&term->lock);
         return status;
     }
+    status = emtask_copy_text(term->working_dir, sizeof(term->working_dir), config->working_dir);
+    if (status != SSH_OK) {
+        emtask_mutex_deinit(&term->lock);
+        return status;
+    }
     term->restart_limit = config->restart_limit;
     term->restart_window_ms = (uint64_t)config->restart_window_sec * 1000u;
     term->replay_on_attach = config->replay_on_attach;
@@ -2633,6 +4824,26 @@ static int emtask_session_manager_takeover(emtask_session_manager_t *manager, em
     }
 }
 
+static int emtask_before_auto_channel_accept(
+    void *ctx,
+    ssh_server_channel_kind_t kind,
+    struct ssh_transport_session *transport,
+    void *conn)
+{
+    emtask_worker_t *worker;
+
+    (void)transport;
+    (void)conn;
+    worker = (emtask_worker_t *)ctx;
+    if (worker == NULL || worker->task == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (kind == SSH_SERVER_CHANNEL_KIND_TERMINAL) {
+        return emtask_session_manager_takeover(&worker->task->session_manager, worker);
+    }
+    return SSH_OK;
+}
+
 static int emtask_run_worker_session(emtask_worker_t *worker)
 {
     emtask_app_t *app;
@@ -2643,10 +4854,15 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
     ssh_server_session_options_t options;
     ssh_transport_session_t transport;
     ssh_server_terminal_channel_t channel;
+    ssh_server_sftp_channel_t sftp_channel;
+    ssh_stdio_fs_t sftp_fs;
+    ssh_server_channel_kind_t channel_kind;
     const ssh_crypto_api_t *crypto;
     int status;
     int server_initialized;
     int channel_initialized;
+    int sftp_channel_initialized;
+    int sftp_fs_initialized;
 
     if (worker == NULL || worker->app == NULL || worker->task == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -2658,8 +4874,13 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
     memset(&server, 0, sizeof(server));
     memset(&transport, 0, sizeof(transport));
     memset(&channel, 0, sizeof(channel));
+    memset(&sftp_channel, 0, sizeof(sftp_channel));
+    memset(&sftp_fs, 0, sizeof(sftp_fs));
+    channel_kind = SSH_SERVER_CHANNEL_KIND_NONE;
     server_initialized = 0;
     channel_initialized = 0;
+    sftp_channel_initialized = 0;
+    sftp_fs_initialized = 0;
 
     status = ssh_crypto_open(EMTASK_CTX_PTR(&crypto_ctx));
     if (status != SSH_OK) {
@@ -2683,6 +4904,17 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
 
     platform.net = &g_emtask_net_api;
     platform.term = emtask_term_api(&worker->task->term);
+    if (worker->task->config.use_sftp) {
+        const char *sftp_root = worker->task->config.working_dir[0] != '\0' ? worker->task->config.working_dir : ".";
+
+        status = ssh_stdio_fs_init(&sftp_fs, sftp_root);
+        if (status != SSH_OK) {
+            ssh_crypto_close(EMTASK_CTX_PTR(&crypto_ctx));
+            return status;
+        }
+        sftp_fs_initialized = 1;
+        platform.fs = ssh_stdio_fs_api(&sftp_fs);
+    }
     platform.crypto = crypto;
     platform.rng = ssh_crypto_rng_api(EMTASK_CTX_CONST_PTR(&crypto_ctx));
 
@@ -2699,6 +4931,9 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
 
     status = ssh_server_init(&server, &platform, &server_config);
     if (status != SSH_OK) {
+        if (sftp_fs_initialized) {
+            ssh_stdio_fs_deinit(&sftp_fs);
+        }
         ssh_crypto_close(EMTASK_CTX_PTR(&crypto_ctx));
         return status;
     }
@@ -2713,24 +4948,56 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
         status = ssh_server_run_userauth(&transport, &worker->endpoint, &options);
     }
     if (status == SSH_OK) {
-        status = emtask_session_manager_takeover(&worker->task->session_manager, worker);
-    }
-    if (status == SSH_OK) {
-        status = ssh_server_accept_terminal_channel(&transport, &worker->endpoint, &channel, &options);
-        if (status == SSH_OK) {
-            channel_initialized = 1;
+        if (worker->task->config.use_sftp) {
+            status = ssh_server_accept_auto_channel(
+                &transport,
+                &worker->endpoint,
+                &sftp_channel,
+                &channel,
+                &options,
+                &channel_kind,
+                emtask_before_auto_channel_accept,
+                worker);
+            if (status == SSH_OK && channel_kind == SSH_SERVER_CHANNEL_KIND_SFTP) {
+                sftp_channel_initialized = 1;
+            } else if (status == SSH_OK && channel_kind == SSH_SERVER_CHANNEL_KIND_TERMINAL) {
+                channel_initialized = 1;
+            } else if (status == SSH_OK) {
+                status = SSH_ERR_UNSUPPORTED;
+            }
+        } else {
+            status = emtask_session_manager_takeover(&worker->task->session_manager, worker);
+            if (status == SSH_OK) {
+                status = ssh_server_accept_terminal_channel(&transport, &worker->endpoint, &channel, &options);
+            }
+            if (status == SSH_OK) {
+                channel_initialized = 1;
+            }
         }
     }
     while (status == SSH_OK) {
-        status = ssh_server_process_terminal_channel_data(&transport, &worker->endpoint, &channel, &options);
-        if (status == SSH_ERR_NOT_FOUND) {
-            status = SSH_OK;
-        } else if (status == SSH_ERR_CLOSED) {
-            status = SSH_OK;
-            break;
+        if (sftp_channel_initialized) {
+            status = ssh_server_process_sftp_channel_data(&transport, &worker->endpoint, &sftp_channel, &options);
+            if (status == SSH_ERR_NOT_FOUND) {
+                status = SSH_OK;
+            } else if (status == SSH_ERR_CLOSED) {
+                status = SSH_OK;
+                break;
+            }
+        } else {
+            status = ssh_server_process_terminal_channel_data(&transport, &worker->endpoint, &channel, &options);
+            if (status == SSH_ERR_NOT_FOUND) {
+                status = SSH_OK;
+            } else if (status == SSH_ERR_CLOSED) {
+                status = SSH_OK;
+                break;
+            }
         }
     }
 
+    if (sftp_channel_initialized) {
+        ssh_server_sftp_channel_deinit(&sftp_channel);
+    }
     if (channel_initialized) {
         ssh_server_terminal_channel_deinit(&transport, &channel);
     }
@@ -2739,6 +5006,9 @@ static int emtask_run_worker_session(emtask_worker_t *worker)
 
     if (server_initialized) {
         ssh_server_deinit(&server);
+    }
+    if (sftp_fs_initialized) {
+        ssh_stdio_fs_deinit(&sftp_fs);
     }
     ssh_crypto_close(EMTASK_CTX_PTR(&crypto_ctx));
     return status;
@@ -2764,6 +5034,11 @@ void emtask_worker_thread_main(emtask_worker_t *worker)
 static int emtask_start_worker_thread(emtask_worker_t *worker)
 {
     return emtask_platform_start_worker_thread(worker);
+}
+
+static int emtask_start_panel_thread(emtask_app_t *app)
+{
+    return emtask_platform_start_panel_thread(app);
 }
 
 void emtask_listener_thread_main(emtask_task_t *task)
@@ -2880,6 +5155,45 @@ static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task)
     task->initialized = 0;
 }
 
+static int emtask_panel_init(emtask_app_t *app)
+{
+    const char *listen_address;
+    int status;
+
+    if (app == NULL || !app->config.global.panel_enabled) {
+        return SSH_OK;
+    }
+
+    listen_address = app->config.global.panel_listen_address[0] != '\0'
+                         ? app->config.global.panel_listen_address
+                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
+    status = ssh_tcp_listen(
+        &app->tcp,
+        listen_address,
+        app->config.global.panel_port,
+        16,
+        &app->panel_listener);
+    if (status != SSH_OK) {
+        emtask_logf(
+            "panel listen failed on %s:%u: %s",
+            listen_address,
+            (unsigned)app->config.global.panel_port,
+            ssh_status_string(status));
+        return status;
+    }
+    app->panel_listener_open = 1;
+    return SSH_OK;
+}
+
+static void emtask_panel_deinit(emtask_app_t *app)
+{
+    if (app == NULL || !app->panel_listener_open) {
+        return;
+    }
+    (void)ssh_tcp_listener_close(&app->tcp, &app->panel_listener);
+    app->panel_listener_open = 0;
+}
+
 static void emtask_usage(const char *program)
 {
     fprintf(
@@ -2934,6 +5248,7 @@ int main(int argc, char **argv)
         emtask_passwd_auth_deinit(&app);
         return 2;
     }
+    app.started_ms = emtask_platform_monotonic_ms();
 
     app.task_count = app.config.task_count;
     app.tasks = (emtask_task_t *)calloc(app.task_count, sizeof(*app.tasks));
@@ -2961,6 +5276,19 @@ int main(int argc, char **argv)
         }
     }
 
+    status = emtask_panel_init(&app);
+    if (status != SSH_OK) {
+        while (i > 0u) {
+            --i;
+            emtask_task_deinit(&app, &app.tasks[i]);
+        }
+        free(app.tasks);
+        emtask_worker_pool_deinit(&app.pool);
+        ssh_tcp_platform_deinit(&app.tcp);
+        emtask_passwd_auth_deinit(&app);
+        return 2;
+    }
+
     printf(
         "emtask starting %u task(s), auth=%s, user=%s, backend=mbedtls_legacy\n",
         (unsigned)app.task_count,
@@ -2975,7 +5303,24 @@ int main(int argc, char **argv)
             app.tasks[i].config.restart_limit,
             app.tasks[i].config.restart_window_sec);
     }
+    if (app.config.global.panel_enabled) {
+        printf(
+            "  panel listening on %s:%u\n",
+            app.config.global.panel_listen_address[0] != '\0'
+                ? app.config.global.panel_listen_address
+                : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
+            (unsigned)app.config.global.panel_port);
+    }
     fflush(stdout);
+
+    if (app.config.global.panel_enabled) {
+        status = emtask_start_panel_thread(&app);
+        if (status != SSH_OK) {
+            emtask_logf("panel thread start failed: %s", ssh_status_string(status));
+            emtask_panel_deinit(&app);
+            return 2;
+        }
+    }
 
     for (i = 1u; i < app.task_count; ++i) {
         status = emtask_platform_start_listener_thread(&app.tasks[i]);

@@ -270,3 +270,14 @@ int emtask_platform_start_listener_thread(emtask_task_t *task)
 {
     return emtask_start_detached_thread(emtask_listener_thread_entry, task);
 }
+
+static void *emtask_panel_thread_entry(void *arg)
+{
+    emtask_panel_thread_main((emtask_app_t *)arg);
+    return NULL;
+}
+
+int emtask_platform_start_panel_thread(emtask_app_t *app)
+{
+    return emtask_start_detached_thread(emtask_panel_thread_entry, app);
+}

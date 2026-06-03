@@ -1459,8 +1459,14 @@ int ssh_server_process_sftp_channel_data(
         &channel_data_len,
         effective.timeout_ms);
     if (status != SSH_OK) {
-        if (status == SSH_ERR_NOT_FOUND && channel->sftp_rx_len != 0u) {
-            status = SSH_OK;
+        if (status == SSH_ERR_NOT_FOUND) {
+            if (channel->sftp_rx_len != 0u) {
+                status = SSH_OK;
+            } else if (channel->close_sent) {
+                return SSH_ERR_CLOSED;
+            } else {
+                return status;
+            }
         } else {
             if (status != SSH_ERR_NOT_FOUND) {
                 char line[128];
@@ -1534,7 +1540,7 @@ int ssh_server_process_sftp_channel_data(
                 }
                 channel->close_sent = 1;
             }
-            return SSH_ERR_CLOSED;
+            return SSH_OK;
         } else if (message.message_id == SSH_MSG_CHANNEL_CLOSE) {
             if (!channel->close_sent) {
                 status = ssh_transport_send_channel_close(
@@ -1755,6 +1761,119 @@ void ssh_server_sftp_channel_deinit(ssh_server_sftp_channel_t *channel)
 
     sftp_server_session_deinit(&channel->sftp);
     memset(channel, 0, sizeof(*channel));
+}
+
+int ssh_server_accept_auto_channel(
+    struct ssh_transport_session *transport,
+    void *conn,
+    ssh_server_sftp_channel_t *sftp_channel,
+    ssh_server_terminal_channel_t *terminal_channel,
+    const ssh_server_session_options_t *options,
+    ssh_server_channel_kind_t *kind_out,
+    ssh_server_channel_accept_hook_fn before_accept,
+    void *before_accept_ctx)
+{
+    ssh_server_session_options_t effective;
+    ssh_channel_open_t open;
+    ssh_channel_request_t request;
+    unsigned attempts;
+    int status;
+
+    if (transport == NULL || transport->server == NULL || conn == NULL ||
+        sftp_channel == NULL || terminal_channel == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    effective_session_options(options, &effective);
+    memset(sftp_channel, 0, sizeof(*sftp_channel));
+    memset(terminal_channel, 0, sizeof(*terminal_channel));
+    if (kind_out != NULL) {
+        *kind_out = SSH_SERVER_CHANNEL_KIND_NONE;
+    }
+    memset(&open, 0, sizeof(open));
+    memset(&request, 0, sizeof(request));
+
+    status = ssh_transport_receive_channel_open_skip_global_requests(transport, conn, &open, effective.timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (!ssh_channel_type_is_session(open.channel_type)) {
+        (void)ssh_transport_send_channel_open_failure(
+            transport,
+            conn,
+            open.sender_channel,
+            SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
+            "unsupported channel type",
+            effective.timeout_ms);
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    status = ssh_transport_send_channel_open_confirmation(
+        transport,
+        conn,
+        open.sender_channel,
+        effective.server_channel,
+        effective.channel_window_size,
+        effective.channel_max_packet_size,
+        effective.timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    for (attempts = 0u; attempts < 16u; ++attempts) {
+        status = ssh_transport_receive_channel_request(transport, conn, &request, effective.timeout_ms);
+        if (status != SSH_OK && status != SSH_ERR_UNSUPPORTED) {
+            if (should_tolerate_pre_request_malformed(transport, status)) {
+                continue;
+            }
+            return status;
+        }
+        if (status == SSH_OK && request.recipient_channel != effective.server_channel) {
+            return SSH_ERR_SECURITY;
+        }
+
+        if (status == SSH_OK &&
+            channel_request_is_subsystem_name(
+                &request,
+                effective.sftp_subsystem_name != NULL ? effective.sftp_subsystem_name : SSH_SUBSYSTEM_SFTP)) {
+            if (before_accept != NULL) {
+                status = before_accept(before_accept_ctx, SSH_SERVER_CHANNEL_KIND_SFTP, transport, conn);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            status = sftp_accept_after_open(transport, conn, sftp_channel, &effective, &open, &request, 1);
+            if (status == SSH_OK && kind_out != NULL) {
+                *kind_out = SSH_SERVER_CHANNEL_KIND_SFTP;
+            }
+            return status;
+        }
+
+        if (status == SSH_OK && ssh_channel_request_is_terminal(&request)) {
+            if (before_accept != NULL) {
+                status = before_accept(before_accept_ctx, SSH_SERVER_CHANNEL_KIND_TERMINAL, transport, conn);
+                if (status != SSH_OK) {
+                    return status;
+                }
+            }
+            status = terminal_accept_after_open(transport, conn, terminal_channel, &effective, &open, &request, 1);
+            if (status == SSH_OK && kind_out != NULL) {
+                *kind_out = SSH_SERVER_CHANNEL_KIND_TERMINAL;
+            }
+            return status;
+        }
+
+        if (should_reply_failure_for_non_sftp_request(&request)) {
+            (void)ssh_transport_send_channel_failure(
+                transport,
+                conn,
+                open.sender_channel,
+                effective.timeout_ms);
+        }
+        (void)non_sftp_channel_request_allowed_by_policy(&effective, &request);
+    }
+
+    return SSH_ERR_UNSUPPORTED;
 }
 
 int ssh_server_run_sftp_session(

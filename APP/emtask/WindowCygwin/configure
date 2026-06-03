@@ -1,5 +1,50 @@
-#!/bin/bash
-# need bash !!!
+#!/usr/bin/env bash
+# shellcheck disable=SC2128
+
+# User-editable configure defaults.
+CONF_MKENV_TEMPLATE=gnu
+
+CONF_BUILD=build
+
+CONF_TARGET=$CONF_BUILD/emtask.exe
+
+CONF_TOP=../../..
+
+CONF_CROSS_COMPILE=
+
+CONF_SYSROOT=
+
+CONF_CFLAG=(
+)
+
+CONF_LDFLAG=(
+)
+
+CONF_LIB=(
+    ws2_32
+    advapi32
+)
+
+CONF_LIBPATH=(
+)
+
+CONF_PREBUILD=PERBUILD
+
+CONF_INCLUDE=(
+    # Items are converted to -I...
+    # $CONF_TOP/hello
+    .
+    $CONF_TOP
+    $CONF_TOP/include
+    $CONF_TOP/APP/emtask
+    $CONF_TOP/Libs/external/mbedtls/include
+    $CONF_TOP/Libs/external/mbedtls/library
+    $CONF_TOP/File/mbedtls-legacy
+)
+
+CONF_ENV_VARS=(
+    # RUST_TARGET=arm-unknown-linux-gnueabihf
+)
 
 CONF_SRC_DIR_1=(
     src/core
@@ -48,317 +93,909 @@ CONF_SRC_S_2=(
 CONF_SRC_S_3=(
 )
 
-
-rm -rf makefile
-
-echo -e "include mkenv.mk" >> makefile
-echo -e "" >> makefile
-
-echo -e "all: \$(TARGET)" >> makefile
-echo -e "" >> makefile
-
-for item in ${CONF_SRC_DIR_1[*]};
-do
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "OBJ_DIR_1 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "OBJ_DIR_1 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "SRC_DIR_1 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "OBJ_DIR_1 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-done
-
-for item in ${CONF_SRC_DIR_2[*]};
-do
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "OBJ_DIR_2 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "OBJ_DIR_2 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "SRC_DIR_2 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "OBJ_DIR_2 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-done
-
-for item in ${CONF_SRC_DIR_3[*]};
-do
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.cpp)" >> makefile
-echo -e "OBJ += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "OBJ_DIR_3 += \$(patsubst %.cpp, \$(BUILD)/$item/%.cpp.o, \$(notdir \$(wildcard \$(TOP)/$item/*.cpp)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.c)" >> makefile
-echo -e "OBJ += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "OBJ_DIR_3 += \$(patsubst %.c, \$(BUILD)/$item/%.c.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.c)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "SRC += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "SRC_DIR_3 += \$(wildcard \$(TOP)/$item/*.S)" >> makefile
-echo -e "OBJ += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "OBJ_DIR_3 += \$(patsubst %.S, \$(BUILD)/$item/%.S.o,  \$(notdir \$(wildcard \$(TOP)/$item/*.S)))" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.cpp.o: \$(TOP)/$item/%.cpp \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.c.o:  \$(TOP)/$item/%.c \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-echo -e "\$(BUILD)/$item/%.S.o:  \$(TOP)/$item/%.S \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-done
-
-for item in ${CONF_SRC_C_1[*]};
-do
-
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_C_1 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_C_1 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o:  \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_C_2[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_C_2 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_C_2 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o:  \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_C_3[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_C_3 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_C_3 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/ $item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CC) -c \$(CFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_CPP_1[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_CPP_1 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_CPP_1 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_CPP_2[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_CPP_2 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_CPP_2 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_CPP_3[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_CPP_3 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_CPP_3 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(CXX) -c \$(CXXFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_S_1[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_S_1 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_S_1 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_S_2[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_S_2 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_S_2 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-
-
-done
-
-for item in ${CONF_SRC_S_3[*]};
-do
-echo -e "SRC += \$(TOP)/$item" >> makefile
-echo -e "SRC_S_3 += \$(TOP)/$item" >> makefile
-echo -e "OBJ += \$(BUILD)/$item.o" >> makefile
-echo -e "OBJ_S_3 += \$(BUILD)/$item.o" >> makefile
-echo -e "" >> makefile
-echo -e "\$(BUILD)/$item.o: \$(TOP)/$item \$(BUILD) \$(PREBUILD)" >> makefile
-echo -e "\t\$(AS) -c \$(ASFLAGS) \$(INC) -o \$@ \$<" >> makefile
-echo -e "" >> makefile
-done
-
-
-
-echo -e "\$(BUILD):" >> makefile
-
-for item in ${CONF_SRC_DIR_1[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
-done
-
-for item in ${CONF_SRC_DIR_2[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
-done
-
-for item in ${CONF_SRC_DIR_3[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/$item" >> makefile
-done
-
-for item in ${CONF_SRC_C_1[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_C_2[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_C_3[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_CPP_1[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_CPP_2[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_CPP_3[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_S_1[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_S_2[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-for item in ${CONF_SRC_S_3[*]};
-do
-echo -e "\t\$(MKDIR) -p \$(BUILD)/\$(dir $item)" >> makefile
-done
-
-echo -e "" >> makefile
-
-echo -e "clean:" >> makefile
-echo -e "\trm -rf \$(BUILD)" >> makefile
-echo -e "" >> makefile
-
-echo -e "totalclean: clean" >> makefile
-echo -e "\trm -rf makefile" >> makefile
-echo -e "" >> makefile
-
-echo -e "include mkrule.mk" >> makefile
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly MAKEFILE_OUT="${SCRIPT_DIR}/makefile"
+readonly MKENV_OUT="${SCRIPT_DIR}/mkenv.mk"
+
+CLI_CONF_BUILD=""
+CLI_CONF_TARGET=""
+CLI_CONF_TOP=""
+CLI_CONF_CROSS_COMPILE=""
+CLI_CONF_SYSROOT=""
+CLI_CONF_CFLAG=""
+CLI_CONF_LDFLAG=""
+CLI_CONF_LIB=""
+CLI_CONF_LIBPATH=""
+CLI_CONF_PREBUILD=""
+CLI_CONF_MKENV_TEMPLATE=""
+CLI_CONF_ENV_VARS=()
+CLI_FORCE_MKENV=0
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./configure [options]
+
+Options:
+  --mkenv-template=NAME      Select mkenv template, for example gnu
+  --mkenv-template NAME      Select mkenv template, for example gnu
+  MKENV_TEMPLATE=NAME        Same as --mkenv-template
+  --build=DIR                Override BUILD
+  --build DIR                Override BUILD
+  BUILD=DIR                  Same as --build
+  --target=FILE              Override TARGET
+  --target FILE              Override TARGET
+  TARGET=FILE                Same as --target
+  --cross-compile=PREFIX     Toolchain prefix, for example arm-none-eabi-
+  --cross-compile PREFIX     Toolchain prefix, for example arm-none-eabi-
+  CROSS_COMPILE=PREFIX       Same as --cross-compile
+  CROSS=PREFIX               Alias of CROSS_COMPILE=PREFIX
+  --sysroot=DIR              Compiler/linker sysroot path
+  --sysroot DIR              Compiler/linker sysroot path
+  SYSROOT=DIR                Same as --sysroot
+  --cflags=FLAGS             Extra C/C++/ASM flags appended to mkenv.mk
+  --cflags FLAGS             Extra C/C++/ASM flags appended to mkenv.mk
+  CFLAGS=FLAGS               Same as --cflags
+  --ldflags=FLAGS            Extra linker flags appended to mkenv.mk
+  --ldflags FLAGS            Extra linker flags appended to mkenv.mk
+  LDFLAGS=FLAGS              Same as --ldflags
+  --top=DIR                  Override TOP
+  --top DIR                  Override TOP
+  TOP=DIR                    Same as --top
+  --lib=FLAGS                Extra libraries appended to LIB
+  --lib FLAGS                Extra libraries appended to LIB
+  LIB=FLAGS                  Same as --lib
+  --libpath=FLAGS            Extra library paths appended to LDFLAGS
+  --libpath FLAGS            Extra library paths appended to LDFLAGS
+  LIBPATH=FLAGS              Same as --libpath
+  --prebuild=TARGET          Override PREBUILD target
+  --prebuild TARGET          Override PREBUILD target
+  PREBUILD=TARGET            Same as --prebuild
+  -f, --force                Alias of --force-mkenv
+  --force-mkenv              Regenerate mkenv.mk even if it already exists
+  --force-mkenv=BOOL         BOOL: 1/true/yes/on or 0/false/no/off
+  FORCE_MKENV=BOOL           Same as --force-mkenv=BOOL
+  NAME=VALUE                 Extra mkenv variable, for example RUST_TARGET=...
+                             If the same key exists in CONF_ENV_VARS, CLI wins
+  -h, --help, help           Show this help message
+
+Behavior:
+  - If mkenv.mk already exists, configure will keep it unchanged.
+  - If mkenv.mk does not exist, configure will generate a readable default one.
+  - -f, --force, or --force-mkenv can be used to overwrite the existing mkenv.mk.
+  - configure always regenerates ./makefile.
+EOF
+}
+
+parse_bool_flag() {
+    local value="${1:-}"
+
+    case "$value" in
+        1|true|TRUE|yes|YES|on|ON)
+            printf '1'
+            ;;
+        0|false|FALSE|no|NO|off|OFF)
+            printf '0'
+            ;;
+        *)
+            echo "error: invalid boolean value: $value" >&2
+            echo "expected one of: 1 true yes on 0 false no off" >&2
+            exit 1
+            ;;
+    esac
+}
+
+join_words() {
+    local result=""
+    local item
+
+    for item in "$@"; do
+        [[ -n "$item" ]] || continue
+        if [[ -n "$result" ]]; then
+            result+=" "
+        fi
+        result+="$item"
+    done
+
+    printf '%s' "$result"
+}
+
+build_include_flags() {
+    local include_flags=()
+    local item
+
+    for item in "$@"; do
+        [[ -n "$item" ]] || continue
+        case "$item" in
+            -I*)
+                include_flags+=("$item")
+                ;;
+            *)
+                include_flags+=("-I$item")
+                ;;
+        esac
+    done
+
+    join_words "${include_flags[@]}"
+}
+
+build_library_flags() {
+    local library_flags=()
+    local item
+
+    for item in "$@"; do
+        [[ -n "$item" ]] || continue
+        case "$item" in
+            -l*|-L*|-Wl,*|-T*|/*.a|/*.so|/*.dll.a|*.a|*.so|*.dll.a)
+                library_flags+=("$item")
+                ;;
+            *)
+                library_flags+=("-l$item")
+                ;;
+        esac
+    done
+
+    join_words "${library_flags[@]}"
+}
+
+build_libpath_flags() {
+    local libpath_flags=()
+    local item
+
+    for item in "$@"; do
+        [[ -n "$item" ]] || continue
+        case "$item" in
+            -L*)
+                libpath_flags+=("$item")
+                ;;
+            *)
+                libpath_flags+=("-L$item")
+                ;;
+        esac
+    done
+
+    join_words "${libpath_flags[@]}"
+}
+
+normalize_config() {
+    local conf_cflag=()
+    local conf_ldflag=()
+    local conf_lib=()
+    local conf_libpath=()
+    local conf_include=()
+    local conf_env_vars=()
+    local merged_env_vars=()
+    local env_item env_key
+    local cli_item cli_key
+    local replaced
+
+    conf_cflag=("${CONF_CFLAG[@]}")
+    conf_ldflag=("${CONF_LDFLAG[@]}")
+    conf_lib=("${CONF_LIB[@]}")
+    conf_libpath=("${CONF_LIBPATH[@]}")
+    conf_include=("${CONF_INCLUDE[@]}")
+    conf_env_vars=("${CONF_ENV_VARS[@]}")
+
+    CONF_MKENV_TEMPLATE="${CONF_MKENV_TEMPLATE:-gnu}"
+    CONF_BUILD="${CONF_BUILD:-build}"
+    CONF_TOP="${CONF_TOP:-../}"
+    CONF_CROSS_COMPILE="${CONF_CROSS_COMPILE:-${CROSS_COMPILE:-${CROSS:-}}}"
+    CONF_SYSROOT="${CONF_SYSROOT:-${SYSROOT:-}}"
+    CONF_PREBUILD="${CONF_PREBUILD:-hand}"
+    CONF_TARGET="${CONF_TARGET:-${CONF_BUILD}/eemesh}"
+
+    if [[ -n "$CLI_CONF_MKENV_TEMPLATE" ]]; then
+        CONF_MKENV_TEMPLATE="$CLI_CONF_MKENV_TEMPLATE"
+    fi
+
+    if [[ -n "$CLI_CONF_BUILD" ]]; then
+        CONF_BUILD="$CLI_CONF_BUILD"
+    fi
+
+    if [[ -n "$CLI_CONF_TARGET" ]]; then
+        CONF_TARGET="$CLI_CONF_TARGET"
+    elif [[ -z "$CONF_TARGET" ]]; then
+        CONF_TARGET="${CONF_BUILD}/eemesh"
+    fi
+
+    if [[ -n "$CLI_CONF_TOP" ]]; then
+        CONF_TOP="$CLI_CONF_TOP"
+    fi
+
+    if [[ -n "$CLI_CONF_CROSS_COMPILE" ]]; then
+        CONF_CROSS_COMPILE="$CLI_CONF_CROSS_COMPILE"
+    fi
+
+    if [[ -n "$CLI_CONF_SYSROOT" ]]; then
+        CONF_SYSROOT="$CLI_CONF_SYSROOT"
+    fi
+
+    if [[ -n "$CLI_CONF_CFLAG" ]]; then
+        CONF_CFLAG="$CLI_CONF_CFLAG"
+    elif ((${#conf_cflag[@]} > 0)); then
+        CONF_CFLAG="$(join_words "${conf_cflag[@]}")"
+    else
+        CONF_CFLAG="${CFLAGS:-}"
+    fi
+
+    if [[ -n "$CLI_CONF_LDFLAG" ]]; then
+        CONF_LDFLAG="$CLI_CONF_LDFLAG"
+    elif ((${#conf_ldflag[@]} > 0)); then
+        CONF_LDFLAG="$(join_words "${conf_ldflag[@]}")"
+    else
+        CONF_LDFLAG="${LDFLAGS:-}"
+    fi
+
+    if [[ -n "$CLI_CONF_LIB" ]]; then
+        read -r -a conf_lib <<< "$CLI_CONF_LIB"
+        CONF_LIB="$(build_library_flags "${conf_lib[@]}")"
+    elif ((${#conf_lib[@]} > 0)); then
+        CONF_LIB="$(build_library_flags "${conf_lib[@]}")"
+    else
+        CONF_LIB=""
+    fi
+
+    if [[ -n "$CLI_CONF_LIBPATH" ]]; then
+        read -r -a conf_libpath <<< "$CLI_CONF_LIBPATH"
+        CONF_LIBPATH="$(build_libpath_flags "${conf_libpath[@]}")"
+    elif ((${#conf_libpath[@]} > 0)); then
+        CONF_LIBPATH="$(build_libpath_flags "${conf_libpath[@]}")"
+    else
+        CONF_LIBPATH=""
+    fi
+
+    if [[ -n "$CLI_CONF_PREBUILD" ]]; then
+        CONF_PREBUILD="$CLI_CONF_PREBUILD"
+    fi
+
+    if ((${#conf_include[@]} > 0)); then
+        CONF_INCLUDE="$(build_include_flags "${conf_include[@]}")"
+    else
+        CONF_INCLUDE=""
+    fi
+
+    merged_env_vars=("${conf_env_vars[@]}")
+    for cli_item in "${CLI_CONF_ENV_VARS[@]}"; do
+        [[ "$cli_item" == *=* ]] || continue
+        cli_key="${cli_item%%=*}"
+        replaced=0
+
+        for idx in "${!merged_env_vars[@]}"; do
+            env_item="${merged_env_vars[$idx]}"
+            [[ "$env_item" == *=* ]] || continue
+            env_key="${env_item%%=*}"
+            if [[ "$env_key" == "$cli_key" ]]; then
+                merged_env_vars[$idx]="$cli_item"
+                replaced=1
+                break
+            fi
+        done
+
+        if [[ "$replaced" -eq 0 ]]; then
+            merged_env_vars+=("$cli_item")
+        fi
+    done
+
+    if ((${#merged_env_vars[@]} > 0)); then
+        CONF_ENV_VARS="$(join_words "${merged_env_vars[@]}")"
+    else
+        CONF_ENV_VARS=""
+    fi
+}
+
+quote_make_value() {
+    local value="${1-}"
+    value="${value//\\/\\\\}"
+    printf '%s' "$value"
+}
+
+emit() {
+    printf '%s\n' "$1" >> "$MAKEFILE_OUT"
+}
+
+emit_blank() {
+    printf '\n' >> "$MAKEFILE_OUT"
+}
+
+emit_mkenv_extra_vars() {
+    local extra_vars="$1"
+    local item
+
+    [[ -n "$extra_vars" ]] || return 0
+
+    for item in $extra_vars; do
+        printf '%s\n' "$item" >> "$MKENV_OUT"
+    done
+}
+
+emit_mkenv_template_gnu() {
+    local build="$1"
+    local target="$2"
+    local cross="$3"
+    local sysroot="$4"
+    local cflags="$5"
+    local ldflags="$6"
+    local libpath="$7"
+    local top="$8"
+    local lib="$9"
+    local prebuild="${10}"
+    local include_flags="${11}"
+
+    cat >"$MKENV_OUT" <<EOF
+# Auto-generated by configure. Edit if project defaults need to change.
+
+TOP ?= $top
+
+CROSS_COMPILE ?= $cross
+CROSS ?= \$(CROSS_COMPILE)
+SYSROOT ?= $sysroot
+CC ?= \$(CROSS_COMPILE)gcc
+CXX ?= \$(CROSS_COMPILE)g++
+LD ?= \$(CROSS_COMPILE)ld
+AS ?= \$(CC)
+AR ?= \$(CROSS_COMPILE)ar
+OBJCOPY ?= \$(CROSS_COMPILE)objcopy
+OBJDUMP ?= \$(CROSS_COMPILE)objdump
+
+MKDIR ?= mkdir
+RM ?= rm -rf
+RMDIR ?= rm -rf
+PYTHON ?= python3
+
+BUILD ?= $build
+TARGET ?= $target
+
+CFLAGS += -Wno-unused-result
+CXXFLAGS +=
+ASFLAGS +=
+LDFLAGS += $ldflags $libpath
+
+INC += -I. -I./\$(BUILD) -I\$(TOP) -I\$(TOP)/target
+LIB += $lib
+PREBUILD ?= $prebuild
+
+CONF_CFLAG += $cflags
+CONF_LDFLAG ?=
+CONF_BUILD ?=
+CONF_TARGET ?=
+CONF_TOP ?=
+CONF_SYSROOT ?=
+CONF_LIB ?=
+CONF_LIBPATH ?=
+CONF_PREBUILD ?=
+CONF_INCLUDE ?=
+EOF
+}
+
+emit_mkenv_common_tail() {
+    cat >>"$MKENV_OUT" <<'EOF'
+
+ifeq ($(DEBUG),1)
+CFLAGS += -O0 -g
+CXXFLAGS += -O0 -g
+ASFLAGS += -O0 -g
+else
+CFLAGS += -Os -g
+CXXFLAGS += -Os -g
+ASFLAGS += -Os -g
+endif
+
+ifeq ($(PG),1)
+CFLAGS += -pg
+CXXFLAGS += -pg
+ASFLAGS += -pg
+LDFLAGS += -pg
+endif
+EOF
+}
+
+generate_mkenv() {
+    local build target cross sysroot cflags ldflags libpath top lib prebuild include_flags extra_vars
+    build="$(quote_make_value "$CONF_BUILD")"
+    target="$(quote_make_value "$CONF_TARGET")"
+    cross="$(quote_make_value "$CONF_CROSS_COMPILE")"
+    sysroot="$(quote_make_value "$CONF_SYSROOT")"
+    cflags="$(quote_make_value "$CONF_CFLAG")"
+    ldflags="$(quote_make_value "$CONF_LDFLAG")"
+    libpath="$(quote_make_value "$CONF_LIBPATH")"
+    top="$(quote_make_value "$CONF_TOP")"
+    lib="$(quote_make_value "$CONF_LIB")"
+    prebuild="$(quote_make_value "$CONF_PREBUILD")"
+    include_flags="$(quote_make_value "$CONF_INCLUDE")"
+    extra_vars="$(quote_make_value "$CONF_ENV_VARS")"
+
+    case "$CONF_MKENV_TEMPLATE" in
+        gnu)
+            emit_mkenv_template_gnu "$build" "$target" "$cross" "$sysroot" "$cflags" "$ldflags" "$libpath" "$top" "$lib" "$prebuild" "$include_flags"
+            ;;
+        *)
+            echo "error: unsupported mkenv template: $CONF_MKENV_TEMPLATE" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "$extra_vars" ]]; then
+        printf '\n' >> "$MKENV_OUT"
+        emit_mkenv_extra_vars "$extra_vars"
+    fi
+
+    emit_mkenv_common_tail
+}
+
+append_dir_group() {
+    local group_name="$1"
+    local src_dir="$2"
+
+    emit "SRC += \$(wildcard \$(TOP)/${src_dir}/*.cpp)"
+    emit "SRC_CPP += \$(wildcard \$(TOP)/${src_dir}/*.cpp)"
+    emit "${group_name} += \$(wildcard \$(TOP)/${src_dir}/*.cpp)"
+    emit "OBJ += \$(patsubst %.cpp,\$(BUILD)/${src_dir}/%.cpp.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.cpp)))"
+    emit "OBJ_${group_name} += \$(patsubst %.cpp,\$(BUILD)/${src_dir}/%.cpp.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.cpp)))"
+    emit_blank
+
+    emit "SRC += \$(wildcard \$(TOP)/${src_dir}/*.c)"
+    emit "SRC_C += \$(wildcard \$(TOP)/${src_dir}/*.c)"
+    emit "${group_name} += \$(wildcard \$(TOP)/${src_dir}/*.c)"
+    emit "OBJ += \$(patsubst %.c,\$(BUILD)/${src_dir}/%.c.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.c)))"
+    emit "OBJ_${group_name} += \$(patsubst %.c,\$(BUILD)/${src_dir}/%.c.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.c)))"
+    emit_blank
+
+    emit "SRC += \$(wildcard \$(TOP)/${src_dir}/*.S)"
+    emit "SRC_S += \$(wildcard \$(TOP)/${src_dir}/*.S)"
+    emit "${group_name} += \$(wildcard \$(TOP)/${src_dir}/*.S)"
+    emit "OBJ += \$(patsubst %.S,\$(BUILD)/${src_dir}/%.S.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.S)))"
+    emit "OBJ_${group_name} += \$(patsubst %.S,\$(BUILD)/${src_dir}/%.S.o,\$(notdir \$(wildcard \$(TOP)/${src_dir}/*.S)))"
+    emit_blank
+
+    emit "\$(BUILD)/${src_dir}/%.cpp.o: \$(TOP)/${src_dir}/%.cpp \$(BUILD) \$(PREBUILD)"
+    emit $'\t''$(CXX) -c $(CXXFLAGS) $(INC) -o $@ $<'
+    emit_blank
+
+    emit "\$(BUILD)/${src_dir}/%.c.o: \$(TOP)/${src_dir}/%.c \$(BUILD) \$(PREBUILD)"
+    emit $'\t''$(CC) -c $(CFLAGS) $(INC) -o $@ $<'
+    emit_blank
+
+    emit "\$(BUILD)/${src_dir}/%.S.o: \$(TOP)/${src_dir}/%.S \$(BUILD) \$(PREBUILD)"
+    emit $'\t''$(AS) -c $(ASFLAGS) $(INC) -o $@ $<'
+    emit_blank
+}
+
+append_file_group() {
+    local group_name="$1"
+    local compiler="$2"
+    local flags_var="$3"
+    local src_file="$4"
+    local src_bucket=""
+
+    case "$compiler" in
+        CC) src_bucket="SRC_C" ;;
+        CXX) src_bucket="SRC_CPP" ;;
+        AS) src_bucket="SRC_S" ;;
+        *)
+            echo "error: unsupported compiler bucket: $compiler" >&2
+            exit 1
+            ;;
+    esac
+
+    emit "SRC += \$(TOP)/${src_file}"
+    emit "${src_bucket} += \$(TOP)/${src_file}"
+    emit "${group_name} += \$(TOP)/${src_file}"
+    emit "OBJ += \$(BUILD)/${src_file}.o"
+    emit "OBJ_${group_name} += \$(BUILD)/${src_file}.o"
+    emit_blank
+
+    emit "\$(BUILD)/${src_file}.o: \$(TOP)/${src_file} \$(BUILD) \$(PREBUILD)"
+    emit $'\t''$('"${compiler}"') -c $('"${flags_var}"') $(INC) -o $@ $<'
+    emit_blank
+}
+
+append_build_dirs() {
+    local entry="$1"
+    emit $'\t''$(MKDIR) -p $(BUILD)/'"${entry}"
+}
+
+append_parent_build_dir() {
+    local entry="$1"
+    local dir_part
+    dir_part="$(dirname -- "$entry")"
+    if [[ "$dir_part" == "." ]]; then
+        emit $'\t''$(MKDIR) -p $(BUILD)'
+    else
+        emit $'\t''$(MKDIR) -p $(BUILD)/'"${dir_part}"
+    fi
+}
+
+emit_optional_append() {
+    local target_var="$1"
+    local value_var="$2"
+    local default_value="${3:-}"
+
+    emit "ifneq (\$(strip \$(${value_var})),)"
+    emit "${target_var} += \$(${value_var})"
+    if [[ -n "$default_value" ]]; then
+        emit "else ifneq (\$(strip ${default_value}),)"
+        emit "${target_var} += ${default_value}"
+    fi
+    emit "endif"
+}
+
+generate_makefile() {
+    : >"$MAKEFILE_OUT"
+
+    emit "include mkenv.mk"
+    emit_blank
+
+    emit "CONFIGURE_CONF_BUILD := $(quote_make_value "$CONF_BUILD")"
+    emit "CONFIGURE_CONF_TARGET := $(quote_make_value "$CONF_TARGET")"
+    emit "CONFIGURE_CONF_TOP := $(quote_make_value "$CONF_TOP")"
+    emit "CONFIGURE_CROSS_COMPILE := $(quote_make_value "$CONF_CROSS_COMPILE")"
+    emit "CONFIGURE_CONF_SYSROOT := $(quote_make_value "$CONF_SYSROOT")"
+    emit "CONFIGURE_CONF_CFLAG := $(quote_make_value "$CONF_CFLAG")"
+    emit "CONFIGURE_CONF_LDFLAG := $(quote_make_value "$CONF_LDFLAG")"
+    emit "CONFIGURE_CONF_LIB := $(quote_make_value "$CONF_LIB")"
+    emit "CONFIGURE_CONF_LIBPATH := $(quote_make_value "$CONF_LIBPATH")"
+    emit "CONFIGURE_CONF_PREBUILD := $(quote_make_value "$CONF_PREBUILD")"
+    emit "CONFIGURE_CONF_INCLUDE := $(quote_make_value "$CONF_INCLUDE")"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(CONF_BUILD)),)"
+    emit "override BUILD := \$(CONF_BUILD)"
+    emit "else ifneq (\$(strip \$(CONFIGURE_CONF_BUILD)),)"
+    emit "override BUILD := \$(CONFIGURE_CONF_BUILD)"
+    emit "CONF_BUILD := \$(CONFIGURE_CONF_BUILD)"
+    emit "endif"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(CONF_TARGET)),)"
+    emit "override TARGET := \$(CONF_TARGET)"
+    emit "else ifneq (\$(strip \$(CONFIGURE_CONF_TARGET)),)"
+    emit "override TARGET := \$(CONFIGURE_CONF_TARGET)"
+    emit "CONF_TARGET := \$(CONFIGURE_CONF_TARGET)"
+    emit "endif"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(CONF_TOP)),)"
+    emit "override TOP := \$(CONF_TOP)"
+    emit "else ifneq (\$(strip \$(CONFIGURE_CONF_TOP)),)"
+    emit "override TOP := \$(CONFIGURE_CONF_TOP)"
+    emit "CONF_TOP := \$(CONFIGURE_CONF_TOP)"
+    emit "endif"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(CONFIGURE_CROSS_COMPILE)),)"
+    emit "override CROSS_COMPILE := \$(CONFIGURE_CROSS_COMPILE)"
+    emit "override CROSS := \$(CONFIGURE_CROSS_COMPILE)"
+    emit "endif"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(CONF_SYSROOT)),)"
+    emit "override SYSROOT := \$(CONF_SYSROOT)"
+    emit "else ifneq (\$(strip \$(CONFIGURE_CONF_SYSROOT)),)"
+    emit "override SYSROOT := \$(CONFIGURE_CONF_SYSROOT)"
+    emit "CONF_SYSROOT := \$(CONFIGURE_CONF_SYSROOT)"
+    emit "endif"
+    emit_blank
+
+    emit "ifneq (\$(strip \$(SYSROOT)),)"
+    emit "SYSROOT_FLAG := --sysroot=\$(SYSROOT)"
+    emit "CFLAGS += \$(SYSROOT_FLAG)"
+    emit "CXXFLAGS += \$(SYSROOT_FLAG)"
+    emit "ASFLAGS += \$(SYSROOT_FLAG)"
+    emit "LDFLAGS += \$(SYSROOT_FLAG)"
+    emit "endif"
+    emit_blank
+
+    emit_optional_append "CFLAGS" "CONF_CFLAG" "\$(CONFIGURE_CONF_CFLAG)"
+    emit_optional_append "CXXFLAGS" "CONF_CFLAG" "\$(CONFIGURE_CONF_CFLAG)"
+    emit_optional_append "ASFLAGS" "CONF_CFLAG" "\$(CONFIGURE_CONF_CFLAG)"
+    emit_optional_append "LDFLAGS" "CONF_LDFLAG" "\$(CONFIGURE_CONF_LDFLAG)"
+    emit_optional_append "LDFLAGS" "CONF_LIBPATH" "\$(CONFIGURE_CONF_LIBPATH)"
+    emit_optional_append "LIB" "CONF_LIB" "\$(CONFIGURE_CONF_LIB)"
+    emit_optional_append "INC" "CONF_INCLUDE" "\$(CONFIGURE_CONF_INCLUDE)"
+    emit "PREBUILD := \$(if \$(strip \$(CONF_PREBUILD)),\$(CONF_PREBUILD),\$(PREBUILD))"
+    emit_blank
+
+    emit "CONFIGURE := ./configure"
+    emit "COMPILE_COMMANDS := compile_commands.json"
+    emit "COMPILE_COMMANDS_SCRIPT := ./gen_compile_commands.sh"
+    emit_blank
+
+    emit "all: \$(COMPILE_COMMANDS) \$(TARGET)"
+    emit_blank
+
+    local item
+
+    for item in "${CONF_SRC_DIR_1[@]}"; do
+        append_dir_group "SRC_DIR_1" "$item"
+    done
+
+    for item in "${CONF_SRC_DIR_2[@]}"; do
+        append_dir_group "SRC_DIR_2" "$item"
+    done
+
+    for item in "${CONF_SRC_DIR_3[@]}"; do
+        append_dir_group "SRC_DIR_3" "$item"
+    done
+
+    for item in "${CONF_SRC_C_1[@]}"; do
+        append_file_group "SRC_C_1" "CC" "CFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_C_2[@]}"; do
+        append_file_group "SRC_C_2" "CC" "CFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_C_3[@]}"; do
+        append_file_group "SRC_C_3" "CC" "CFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_CPP_1[@]}"; do
+        append_file_group "SRC_CPP_1" "CXX" "CXXFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_CPP_2[@]}"; do
+        append_file_group "SRC_CPP_2" "CXX" "CXXFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_CPP_3[@]}"; do
+        append_file_group "SRC_CPP_3" "CXX" "CXXFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_S_1[@]}"; do
+        append_file_group "SRC_S_1" "AS" "ASFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_S_2[@]}"; do
+        append_file_group "SRC_S_2" "AS" "ASFLAGS" "$item"
+    done
+
+    for item in "${CONF_SRC_S_3[@]}"; do
+        append_file_group "SRC_S_3" "AS" "ASFLAGS" "$item"
+    done
+
+    emit "\$(BUILD):"
+    for item in "${CONF_SRC_DIR_1[@]}"; do
+        append_build_dirs "$item"
+    done
+    for item in "${CONF_SRC_DIR_2[@]}"; do
+        append_build_dirs "$item"
+    done
+    for item in "${CONF_SRC_DIR_3[@]}"; do
+        append_build_dirs "$item"
+    done
+    for item in "${CONF_SRC_C_1[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_C_2[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_C_3[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_CPP_1[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_CPP_2[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_CPP_3[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_S_1[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_S_2[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    for item in "${CONF_SRC_S_3[@]}"; do
+        append_parent_build_dir "$item"
+    done
+    emit_blank
+
+    emit "\$(COMPILE_COMMANDS): \$(CONFIGURE) \$(COMPILE_COMMANDS_SCRIPT) mkenv.mk"
+    emit $'\t''bash $(COMPILE_COMMANDS_SCRIPT) \'
+    emit $'\t\t''--output $@ \'
+    emit $'\t\t''--directory . \'
+    emit $'\t\t''--build "$(BUILD)" \'
+    emit $'\t\t''--cc "$(CC)" \'
+    emit $'\t\t''--cxx "$(CXX)" \'
+    emit $'\t\t''--as "$(AS)" \'
+    emit $'\t\t''--cflags "$(CFLAGS) $(INC)" \'
+    emit $'\t\t''--cxxflags "$(CXXFLAGS) $(INC)" \'
+    emit $'\t\t''--asflags "$(ASFLAGS) $(INC)" \'
+    emit $'\t\t''--c-sources "$(SRC_C)" \'
+    emit $'\t\t''--cpp-sources "$(SRC_CPP)" \'
+    emit $'\t\t''--asm-sources "$(SRC_S)"'
+    emit_blank
+
+    emit ".PHONY: compile_commands"
+    emit "compile_commands: \$(COMPILE_COMMANDS)"
+    emit_blank
+
+    emit "clean:"
+    emit $'\t''$(RMDIR) $(BUILD)'
+    emit_blank
+
+    emit "fullclean:"
+    emit $'\t''$(RMDIR) $(BUILD)'
+    emit $'\t''$(RM) mkenv.mk $(COMPILE_COMMANDS) makefile'
+    emit_blank
+
+    emit "include mkrule.mk"
+}
+
+parse_args() {
+    while (($# > 0)); do
+        case "$1" in
+            -h|--help|help)
+                usage
+                exit 0
+                ;;
+            --mkenv-template=*)
+                CLI_CONF_MKENV_TEMPLATE="${1#*=}"
+                ;;
+            --mkenv-template)
+                shift
+                (($# > 0)) || { echo "error: missing value for --mkenv-template" >&2; exit 1; }
+                CLI_CONF_MKENV_TEMPLATE="$1"
+                ;;
+            MKENV_TEMPLATE=*)
+                CLI_CONF_MKENV_TEMPLATE="${1#*=}"
+                ;;
+            --build=*)
+                CLI_CONF_BUILD="${1#*=}"
+                ;;
+            --build)
+                shift
+                (($# > 0)) || { echo "error: missing value for --build" >&2; exit 1; }
+                CLI_CONF_BUILD="$1"
+                ;;
+            BUILD=*)
+                CLI_CONF_BUILD="${1#*=}"
+                ;;
+            --target=*)
+                CLI_CONF_TARGET="${1#*=}"
+                ;;
+            --target)
+                shift
+                (($# > 0)) || { echo "error: missing value for --target" >&2; exit 1; }
+                CLI_CONF_TARGET="$1"
+                ;;
+            TARGET=*)
+                CLI_CONF_TARGET="${1#*=}"
+                ;;
+            --cross-compile=*)
+                CLI_CONF_CROSS_COMPILE="${1#*=}"
+                ;;
+            --cross-compile)
+                shift
+                (($# > 0)) || { echo "error: missing value for --cross-compile" >&2; exit 1; }
+                CLI_CONF_CROSS_COMPILE="$1"
+                ;;
+            CROSS_COMPILE=*)
+                CLI_CONF_CROSS_COMPILE="${1#*=}"
+                ;;
+            CROSS=*)
+                CLI_CONF_CROSS_COMPILE="${1#*=}"
+                ;;
+            --sysroot=*)
+                CLI_CONF_SYSROOT="${1#*=}"
+                ;;
+            --sysroot)
+                shift
+                (($# > 0)) || { echo "error: missing value for --sysroot" >&2; exit 1; }
+                CLI_CONF_SYSROOT="$1"
+                ;;
+            SYSROOT=*)
+                CLI_CONF_SYSROOT="${1#*=}"
+                ;;
+            --cflags=*)
+                CLI_CONF_CFLAG="${1#*=}"
+                ;;
+            --cflags)
+                shift
+                (($# > 0)) || { echo "error: missing value for --cflags" >&2; exit 1; }
+                CLI_CONF_CFLAG="$1"
+                ;;
+            CFLAGS=*)
+                CLI_CONF_CFLAG="${1#*=}"
+                ;;
+            --ldflags=*)
+                CLI_CONF_LDFLAG="${1#*=}"
+                ;;
+            --ldflags)
+                shift
+                (($# > 0)) || { echo "error: missing value for --ldflags" >&2; exit 1; }
+                CLI_CONF_LDFLAG="$1"
+                ;;
+            LDFLAGS=*)
+                CLI_CONF_LDFLAG="${1#*=}"
+                ;;
+            --top=*)
+                CLI_CONF_TOP="${1#*=}"
+                ;;
+            --top)
+                shift
+                (($# > 0)) || { echo "error: missing value for --top" >&2; exit 1; }
+                CLI_CONF_TOP="$1"
+                ;;
+            TOP=*)
+                CLI_CONF_TOP="${1#*=}"
+                ;;
+            --lib=*)
+                CLI_CONF_LIB="${1#*=}"
+                ;;
+            --lib)
+                shift
+                (($# > 0)) || { echo "error: missing value for --lib" >&2; exit 1; }
+                CLI_CONF_LIB="$1"
+                ;;
+            LIB=*)
+                CLI_CONF_LIB="${1#*=}"
+                ;;
+            --libpath=*)
+                CLI_CONF_LIBPATH="${1#*=}"
+                ;;
+            --libpath)
+                shift
+                (($# > 0)) || { echo "error: missing value for --libpath" >&2; exit 1; }
+                CLI_CONF_LIBPATH="$1"
+                ;;
+            LIBPATH=*)
+                CLI_CONF_LIBPATH="${1#*=}"
+                ;;
+            --prebuild=*)
+                CLI_CONF_PREBUILD="${1#*=}"
+                ;;
+            --prebuild)
+                shift
+                (($# > 0)) || { echo "error: missing value for --prebuild" >&2; exit 1; }
+                CLI_CONF_PREBUILD="$1"
+                ;;
+            PREBUILD=*)
+                CLI_CONF_PREBUILD="${1#*=}"
+                ;;
+            -f|--force|--force-mkenv)
+                CLI_FORCE_MKENV=1
+                ;;
+            --force-mkenv=*)
+                CLI_FORCE_MKENV="$(parse_bool_flag "${1#*=}")"
+                ;;
+            FORCE_MKENV=*)
+                CLI_FORCE_MKENV="$(parse_bool_flag "${1#*=}")"
+                ;;
+            *=*)
+                CLI_CONF_ENV_VARS+=("$1")
+                ;;
+            *)
+                echo "error: unsupported option: $1" >&2
+                echo >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+main() {
+    parse_args "$@"
+    normalize_config
+
+    if [[ "$CLI_FORCE_MKENV" == "1" ]]; then
+        echo "force regenerate mkenv.mk"
+        generate_mkenv
+    elif [[ -e "$MKENV_OUT" ]]; then
+        echo "keep existing mkenv.mk"
+    else
+        echo "generate mkenv.mk"
+        generate_mkenv
+    fi
+
+    echo "generate makefile"
+    generate_makefile
+}
+
+main "$@"

@@ -6,12 +6,40 @@ password = emtask
 # timeout_ms = 30000
 # max_workers = 16
 # auth_backend = internal
+# Read-only HTTP/JSON panel. Keep bound to 127.0.0.1 unless protected externally.
+# panel_enabled = false
+# panel_listen_address = 127.0.0.1
+# panel_port = 8080
+# panel_auth = none
+# panel_auth = token
+# panel_auth = otp
+# panel_auth = token+otp
+# Do not put panel_token or panel_otp_secret in this main config.
+# When token/OTP is enabled, emtask loads them from this separate key file.
+# If the key file is missing or lacks required keys, random values are generated and saved.
+# panel_auth_file = emtask_panel_auth.keys
+# Key file format:
+#   panel_token = <random-token>
+#   panel_otp_secret = <base32-totp-secret>
+# If token/OTP is enabled, emtask creates this SVG QR file when it is missing.
+# It embeds token/OTP material and should be protected like a password.
+# panel_qr_file = emtask_panel_connect.svg
+# panel_qr_host = 127.0.0.1
+# panel_qr_start_command = emtask --config emtask.conf
+# panel_qr_stop_command = Ctrl-C
+# panel_otp_digits = 6
+# panel_otp_step_sec = 30
+# panel_otp_window = 1
 # Linux only: use /etc/passwd + /etc/shadow password verification instead of password above.
 # auth_backend = passwd
 
 [task shell]
 listen_address = 0.0.0.0
 port = 2222
+# working_dir may be absolute, or relative to this config file directory.
+# working_dir = .
+# Enable SFTP subsystem on this task port. Its root is working_dir (or current dir if empty).
+# use_sftp = false
 command = cmd.exe /Q /K
 # restart_limit = 8
 # restart_window_sec = 60
@@ -25,6 +53,8 @@ command = cmd.exe /Q /K
 [task powershell]
 listen_address = 127.0.0.1
 port = 2223
+# working_dir = C:\\work
+# use_sftp = false
 command = powershell.exe -NoLogo
 # restart_limit = 8
 # restart_window_sec = 60

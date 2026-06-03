@@ -22,6 +22,7 @@ build.ninja
 *.dylib
 *.dll
 *.exe
+!/tools/emtask-service-wrapper.exe
 *.pdb
 
 # Logs and runtime outputs
@@ -33,6 +34,8 @@ build.ninja
 /interop_*
 /tmp_*
 /stdio_fs_root/
+emtask_panel_auth.keys
+emtask_panel_connect.svg
 
 # Cache/temp
 /.cache/
