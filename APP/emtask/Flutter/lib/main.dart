@@ -2,21 +2,59 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:xterm/xterm.dart';
 import 'package:zxing2/qrcode.dart' as zxing;
 
 import 'src/emtask_connection.dart';
 import 'src/models.dart';
 import 'src/panel_client.dart';
 import 'src/profile_store.dart';
+import 'src/windows_screen_capture.dart';
 
 void main() {
-  runApp(const EmTaskClientApp());
+  runZonedGuarded(
+    () {
+      WidgetsFlutterBinding.ensureInitialized();
+      FlutterError.onError = _handleFlutterError;
+      ui.PlatformDispatcher.instance.onError = _handlePlatformError;
+      runApp(const EmTaskClientApp());
+    },
+    _handleUnhandledError,
+  );
+}
+
+void _handleFlutterError(FlutterErrorDetails details) {
+  if (_isBenignSshCloseError(details.exception)) {
+    debugPrint('忽略 SSH 关闭期异常：${details.exception}');
+    return;
+  }
+  FlutterError.presentError(details);
+}
+
+bool _handlePlatformError(Object error, StackTrace stack) {
+  _handleUnhandledError(error, stack);
+  return _isBenignSshCloseError(error);
+}
+
+void _handleUnhandledError(Object error, StackTrace stack) {
+  if (_isBenignSshCloseError(error)) {
+    debugPrint('忽略 SSH 关闭期异常：$error');
+    return;
+  }
+  debugPrint('未处理异常：$error');
+  debugPrintStack(stackTrace: stack);
+}
+
+bool _isBenignSshCloseError(Object error) {
+  final text = error.toString();
+  return text.contains('SSHStateError') && text.contains('Transport is closed');
 }
 
 enum _ResponsiveLayout {
@@ -164,6 +202,93 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     await _refreshPanel(storedPanel);
   }
 
+  Future<void> _editPanel(EmTaskPanelProfile panel) async {
+    final edited = await showDialog<EmTaskPanelProfile>(
+      context: context,
+      builder: (context) => _PanelDialog(panel: panel),
+    );
+    if (edited == null) {
+      return;
+    }
+
+    final index = _panels.indexWhere((item) => item.id == panel.id);
+    if (index < 0) {
+      return;
+    }
+    final previous = _panels[index];
+    final updated = edited.copyWith(id: previous.id);
+    final panelConnections = _connections
+        .where((connection) => _isPanelConnection(connection, previous))
+        .toList(growable: false);
+    final endpointChanged = previous.host != updated.host ||
+        previous.username != updated.username ||
+        previous.password != updated.password;
+    if (endpointChanged) {
+      for (final connection in panelConnections) {
+        if (connection.isConnected || connection.isConnecting) {
+          await connection.disconnect(keepOutput: true);
+        }
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _panels[index] = updated;
+      for (final connection in panelConnections) {
+        connection.profile =
+            _normalizePanelSession(updated, connection.profile);
+      }
+    });
+    await _savePanels();
+    await _saveProfiles();
+    await _refreshPanel(updated);
+  }
+
+  Future<void> _removePanel(EmTaskPanelProfile panel) async {
+    final panelConnections = _panelConnections(panel);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除面板'),
+        content: Text(
+          '确定删除 “${panel.name}” 吗？此面板下的 ${panelConnections.length} 个会话也会一起删除。',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    for (final connection in panelConnections) {
+      await connection.disconnect(keepOutput: true);
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _panels.removeWhere((item) => item.id == panel.id);
+      _refreshingPanels.remove(panel.id);
+      _connections.removeWhere(panelConnections.contains);
+    });
+    for (final connection in panelConnections) {
+      connection.dispose();
+    }
+    await _savePanels();
+    await _saveProfiles();
+  }
+
   Future<void> _importPanelFromQrText(String text) async {
     try {
       final imported = parseEmTaskPanelQrText(text);
@@ -171,11 +296,8 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       setState(() {
         panel = _upsertPanel(panel);
         if (imported.firstSession != null) {
-          _upsertProfiles(<EmTaskSessionProfile>[
-            imported.firstSession!.copyWith(
-              id: '${panel.id}-qr-first-${imported.firstSession!.port}',
-              name: '${panel.name} / ${imported.firstSession!.name.split('/').last.trim()}',
-            ),
+          _upsertPanelProfiles(panel, <EmTaskSessionProfile>[
+            _normalizePanelSession(panel, imported.firstSession!),
           ]);
         }
       });
@@ -198,7 +320,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       if (!mounted) {
         return;
       }
-      setState(() => _upsertProfiles(sessions));
+      if (!_panels.any((item) => item.id == panel.id)) {
+        return;
+      }
+      setState(() => _upsertPanelProfiles(panel, sessions));
       await _saveProfiles();
       _showHomeSnackBar('已从 ${panel.name} 获取 ${sessions.length} 个会话。');
     } catch (error) {
@@ -231,15 +356,16 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
                     : null,
               ),
               ListTile(
-                leading: const Icon(Icons.image_outlined),
-                title: const Text('选择截图图片识别'),
-                subtitle: const Text('从本机选择 PNG/JPG 等二维码截图'),
+                leading: const Icon(Icons.crop_free_outlined),
+                title: const Text('框选屏幕截图识别'),
+                subtitle: const Text('使用内置截图选择器，框选屏幕中的二维码区域'),
                 onTap: () => Navigator.of(context).pop(_QrImportAction.image),
               ),
               ListTile(
                 leading: const Icon(Icons.upload_file_outlined),
                 title: const Text('选择二维码文件导入'),
-                subtitle: const Text('支持 emtask_panel_connect.svg 或包含 emtask1 payload 的文本'),
+                subtitle: const Text(
+                    '支持 emtask_panel_connect.svg 或包含 emtask1 payload 的文本'),
                 onTap: () => Navigator.of(context).pop(_QrImportAction.file),
               ),
             ],
@@ -270,22 +396,66 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
   }
 
   Future<void> _importQrFromImage() async {
-    final picked = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      allowMultiple: false,
-      withData: true,
-    );
-    final file = picked?.files.single;
-    if (file == null) {
-      return;
-    }
     try {
-      final bytes = file.bytes ?? await File(file.path!).readAsBytes();
+      final bytes = await _captureScreenRegionImage();
+      if (bytes == null || bytes.isEmpty) {
+        _showHomeSnackBar('没有获取到框选截图。');
+        return;
+      }
       final payload = _decodeQrImage(bytes);
       await _importPanelFromQrText(payload);
     } catch (error) {
-      _showHomeSnackBar('截图识别失败：${_formatError(error)}');
+      _showHomeSnackBar('框选截图识别失败：${_formatError(error)}');
     }
+  }
+
+  Future<Uint8List?> _captureScreenRegionImage() async {
+    if (!Platform.isWindows) {
+      throw StateError('当前仅 Windows 支持直接框选屏幕截图；其他平台请使用二维码文件导入。');
+    }
+
+    WindowsWindowSnapshot? windowSnapshot;
+    late WindowsScreenCaptureResult screen;
+    _ScreenRegionSelection? selection;
+    try {
+      windowSnapshot = snapshotForegroundWindow();
+      hideWindowsWindow(windowSnapshot.windowHandle);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      screen = captureWindowsVirtualScreen();
+      if (!mounted) {
+        return null;
+      }
+      showWindowsFullscreenOverlay(windowSnapshot);
+      selection = await showDialog<_ScreenRegionSelection>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _ScreenRegionPicker(
+          imageBytes: screen.pngBytes,
+          imageWidth: screen.width,
+          imageHeight: screen.height,
+        ),
+      );
+    } finally {
+      if (windowSnapshot != null) {
+        restoreWindowsWindow(windowSnapshot);
+      }
+    }
+    if (selection == null) {
+      return null;
+    }
+
+    final image = img.decodeImage(screen.pngBytes);
+    if (image == null) {
+      throw StateError('无法读取屏幕截图。');
+    }
+    final cropped = img.copyCrop(
+      image,
+      x: selection.x,
+      y: selection.y,
+      width: selection.width,
+      height: selection.height,
+    );
+    return Uint8List.fromList(img.encodePng(cropped));
   }
 
   String _decodeQrImage(List<int> bytes) {
@@ -298,9 +468,8 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     for (var y = 0; y < image.height; y += 1) {
       for (var x = 0; x < image.width; x += 1) {
         final pixel = image.getPixel(x, y);
-        pixels[offset++] = (pixel.r.toInt() << 16) |
-            (pixel.g.toInt() << 8) |
-            pixel.b.toInt();
+        pixels[offset++] =
+            (pixel.r.toInt() << 16) | (pixel.g.toInt() << 8) | pixel.b.toInt();
       }
     }
     final source = zxing.RGBLuminanceSource(image.width, image.height, pixels);
@@ -353,17 +522,96 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     }
   }
 
-  void _upsertProfiles(List<EmTaskSessionProfile> profiles) {
-    for (final profile in profiles) {
-      final index = _connections.indexWhere(
-        (connection) => connection.profile.id == profile.id,
-      );
-      if (index < 0) {
-        _connections.add(EmTaskConnection(profile));
+  void _upsertPanelProfiles(
+    EmTaskPanelProfile panel,
+    List<EmTaskSessionProfile> profiles,
+  ) {
+    final normalized = profiles
+        .map((profile) => _normalizePanelSession(panel, profile))
+        .toList(growable: false);
+    final usedSessionIndexes = <int>{};
+    final nextConnections = <EmTaskConnection>[];
+
+    for (final connection in _connections) {
+      if (!_isPanelConnection(connection, panel)) {
+        nextConnections.add(connection);
+        continue;
+      }
+
+      var replacementIndex = -1;
+      for (var i = 0; i < normalized.length; i += 1) {
+        if (!usedSessionIndexes.contains(i) &&
+            _isSamePanelEndpoint(connection.profile, normalized[i])) {
+          replacementIndex = i;
+          break;
+        }
+      }
+      if (replacementIndex >= 0) {
+        connection.profile = normalized[replacementIndex];
+        nextConnections.add(connection);
+        usedSessionIndexes.add(replacementIndex);
       } else {
-        _connections[index].profile = profile;
+        connection.dispose();
       }
     }
+
+    for (var i = 0; i < normalized.length; i += 1) {
+      if (!usedSessionIndexes.contains(i)) {
+        nextConnections.add(EmTaskConnection(normalized[i]));
+      }
+    }
+    _connections = nextConnections;
+  }
+
+  EmTaskSessionProfile _normalizePanelSession(
+    EmTaskPanelProfile panel,
+    EmTaskSessionProfile profile,
+  ) {
+    final taskName = profile.name.contains('/')
+        ? profile.name.split('/').last.trim()
+        : profile.name.trim();
+    final safeTask = taskName.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '-');
+    return profile.copyWith(
+      id: '${panel.id}-$safeTask-${profile.port}',
+      name: '${panel.name} / ${taskName.isEmpty ? 'task' : taskName}',
+      host: panel.host,
+      username: panel.username,
+      password: panel.password,
+    );
+  }
+
+  bool _isPanelConnection(
+    EmTaskConnection connection,
+    EmTaskPanelProfile panel,
+  ) {
+    final profile = connection.profile;
+    return profile.id.startsWith('${panel.id}-') ||
+        (profile.host == panel.host &&
+            profile.name.startsWith('${panel.name} /'));
+  }
+
+  bool _isPanelProfile(EmTaskSessionProfile profile) {
+    return _panels.any(
+      (panel) =>
+          profile.id.startsWith('${panel.id}-') ||
+          (profile.host == panel.host &&
+              profile.name.startsWith('${panel.name} /')),
+    );
+  }
+
+  List<EmTaskConnection> _panelConnections(EmTaskPanelProfile panel) {
+    return _connections
+        .where((connection) => _isPanelConnection(connection, panel))
+        .toList(growable: false);
+  }
+
+  bool _isSamePanelEndpoint(
+    EmTaskSessionProfile left,
+    EmTaskSessionProfile right,
+  ) {
+    return left.host == right.host &&
+        left.port == right.port &&
+        left.username == right.username;
   }
 
   Future<void> _removeProfile(EmTaskConnection connection) async {
@@ -508,25 +756,58 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       body: SafeArea(
         child: Padding(
           padding: layout.pagePadding,
-          child: Column(
-            children: <Widget>[
-              if (_panels.isNotEmpty) ...<Widget>[
-                _buildPanelList(),
-                const SizedBox(height: 10),
-              ],
-              Expanded(
-                child: _connections.isEmpty
-                    ? _EmptyState(onCreate: () => _addOrEditProfile())
-                    : _buildSessionList(layout),
-              ),
-            ],
+          child: _connections.isEmpty && _panels.isEmpty
+              ? _EmptyState(onCreate: () => _addOrEditProfile())
+              : _buildSessionGroups(layout),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSessionGroups(_ResponsiveLayout layout) {
+    final manualConnections = _connections
+        .where((connection) => !_isPanelProfile(connection.profile))
+        .toList(growable: false);
+    return ListView(
+      children: <Widget>[
+        _buildSessionGroupCard(
+          layout: layout,
+          title: '会话',
+          subtitle: '手动新建的会话统一放在这里',
+          icon: Icons.hub_outlined,
+          connections: manualConnections,
+          emptyMessage: '暂无手动会话，点击右上角 + 新增。',
+        ),
+        for (final panel in _panels) ...<Widget>[
+          const SizedBox(height: 10),
+          _buildSessionGroupCard(
+            layout: layout,
+            title: panel.name,
+            subtitle: '${panel.host}:${panel.port} · ${panel.authMode.label}',
+            icon: Icons.dashboard_outlined,
+            connections: _panelConnections(panel),
+            emptyMessage: '此面板暂无会话，点击刷新重新获取。',
+            trailing: _PanelActions(
+              refreshing: _refreshingPanels.contains(panel.id),
+              onRefresh: () => _refreshPanel(panel),
+              onEdit: () => _editPanel(panel),
+              onDelete: () => _removePanel(panel),
+            ),
           ),
-        ),
-      ),
+        ],
+      ],
     );
   }
 
-  Widget _buildPanelList() {
+  Widget _buildSessionGroupCard({
+    required _ResponsiveLayout layout,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required List<EmTaskConnection> connections,
+    required String emptyMessage,
+    Widget? trailing,
+  }) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -535,87 +816,73 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
           children: <Widget>[
             Row(
               children: <Widget>[
-                const Icon(Icons.dashboard_outlined, size: 20),
+                Icon(icon, size: 20),
                 const SizedBox(width: 8),
-                Text('面板', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                Text('${_panels.length}'),
-              ],
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              height: 64,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _panels.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final panel = _panels[index];
-                  final refreshing = _refreshingPanels.contains(panel.id);
-                  return _PanelChip(
-                    panel: panel,
-                    refreshing: refreshing,
-                    onRefresh: () => _refreshPanel(panel),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSessionList(_ResponsiveLayout layout) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Icon(Icons.hub_outlined, size: 20),
-                const SizedBox(width: 8),
-                Text(
-                  '会话',
-                  style: Theme.of(context).textTheme.titleMedium,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ],
+                  ),
                 ),
-                const Spacer(),
                 Text(
-                  '${_connections.length}',
+                  '${connections.length}',
                   style: Theme.of(context).textTheme.labelLarge,
                 ),
+                if (trailing != null) ...<Widget>[
+                  const SizedBox(width: 6),
+                  trailing,
+                ],
               ],
             ),
             const SizedBox(height: 12),
-            Expanded(
-              child: layout.usesSessionGrid
-                  ? GridView.builder(
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                        maxCrossAxisExtent: 420,
-                        mainAxisExtent: 132,
-                        mainAxisSpacing: 10,
-                        crossAxisSpacing: 10,
-                      ),
-                      itemCount: _connections.length,
-                      itemBuilder: (context, index) => _buildSessionTile(index),
-                    )
-                  : ListView.separated(
-                      itemCount: _connections.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) => _buildSessionTile(index),
-                    ),
-            ),
+            if (connections.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                child: Text(emptyMessage),
+              )
+            else if (layout.usesSessionGrid)
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 420,
+                  mainAxisExtent: 132,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                ),
+                itemCount: connections.length,
+                itemBuilder: (context, index) =>
+                    _buildSessionTile(connections[index]),
+              )
+            else
+              ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: connections.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (context, index) =>
+                    _buildSessionTile(connections[index]),
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSessionTile(int index) {
-    final connection = _connections[index];
+  Widget _buildSessionTile(EmTaskConnection connection) {
     return AnimatedBuilder(
       animation: connection,
       builder: (context, _) {
@@ -646,11 +913,13 @@ class EmTaskSessionPage extends StatefulWidget {
 }
 
 class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
-  final _commandController = TextEditingController();
-  final _terminalScrollController = ScrollController();
+  late final Terminal _terminal;
+  late final TerminalController _terminalController;
+  final _terminalFocusNode = FocusNode();
   final _sftpPathController = TextEditingController();
   final _sftpListScrollController = ScrollController();
   final _sftpPreviewScrollController = ScrollController();
+  StreamSubscription<String>? _terminalOutputSubscription;
 
   bool _showSftp = false;
   bool _sftpBusy = false;
@@ -664,9 +933,35 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   @override
   void initState() {
     super.initState();
+    _terminal = Terminal(
+      maxLines: 5000,
+      onOutput: (data) {
+        try {
+          widget.connection.writeText(data);
+        } catch (error) {
+          _terminal.write('\r\n$error\r\n');
+        }
+      },
+      onResize: (columns, rows, pixelWidth, pixelHeight) {
+        widget.connection.resizeTerminal(
+          columns,
+          rows,
+          pixelWidth,
+          pixelHeight,
+        );
+      },
+    );
+    _terminalController = TerminalController();
     widget.connection.setActive(true);
-    _sftpPathController.text = widget.connection.profile.initialPath;
+    _sftpPathController.text =
+        _safeInitialSftpPath(widget.connection.profile.initialPath);
     _lastOutputLength = widget.connection.output.length;
+    if (widget.connection.output.isNotEmpty) {
+      _terminal.write(widget.connection.output.replaceAll('\n', '\r\n'));
+    }
+    _terminalOutputSubscription = widget.connection.terminalOutput.listen(
+      _terminal.write,
+    );
     widget.connection.addListener(_handleConnectionChanged);
   }
 
@@ -674,7 +969,6 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     final currentLength = widget.connection.output.length;
     if (!_showSftp && currentLength != _lastOutputLength) {
       _lastOutputLength = currentLength;
-      _scrollTerminalToBottom();
     }
   }
 
@@ -682,26 +976,12 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   void dispose() {
     widget.connection.removeListener(_handleConnectionChanged);
     widget.connection.setActive(false);
-    _commandController.dispose();
-    _terminalScrollController.dispose();
+    unawaited(_terminalOutputSubscription?.cancel());
+    _terminalFocusNode.dispose();
     _sftpPathController.dispose();
     _sftpListScrollController.dispose();
     _sftpPreviewScrollController.dispose();
     super.dispose();
-  }
-
-  Future<void> _sendCommand() async {
-    final command = _commandController.text.trimRight();
-    if (command.isEmpty) {
-      return;
-    }
-    try {
-      widget.connection.writeLine(command);
-      _commandController.clear();
-      _scrollTerminalToBottom();
-    } catch (error) {
-      _showSnackBar('$error');
-    }
   }
 
   Future<void> _toggleViewMode() async {
@@ -722,9 +1002,19 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
 
   Future<void> _loadDirectory({String? path}) async {
     final connection = widget.connection;
-    final targetPath = (path ?? _sftpPathController.text).trim().isEmpty
-        ? '.'
-        : (path ?? _sftpPathController.text).trim();
+    final rawPath = path ?? _sftpPathController.text;
+    late final String targetPath;
+    try {
+      targetPath = EmTaskConnection.normalizeSftpVirtualPath(rawPath);
+    } catch (error) {
+      setState(() {
+        _sftpError = _formatError(error);
+        _sftpPathController.text = '.';
+        _openedFilePath = null;
+        _openedFileText = null;
+      });
+      return;
+    }
     if (!connection.isConnected) {
       setState(() => _sftpError = '请先连接会话，然后再使用 SFTP。');
       return;
@@ -794,17 +1084,8 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     await _loadDirectory(path: _parentSftpPath(_sftpPathController.text));
   }
 
-  void _scrollTerminalToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_terminalScrollController.hasClients) {
-        return;
-      }
-      _terminalScrollController.animateTo(
-        _terminalScrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
-    });
+  Future<void> _resetSftpPath() async {
+    await _loadDirectory(path: '.');
   }
 
   void _scrollSftpListToTop() {
@@ -856,6 +1137,16 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
               ],
             ),
             actions: <Widget>[
+              if (!_showSftp)
+                IconButton(
+                  tooltip: '清空终端输出',
+                  onPressed: () {
+                    widget.connection.clearOutput();
+                    _terminal.write('\u001b[2J\u001b[H');
+                    _terminalFocusNode.requestFocus();
+                  },
+                  icon: const Icon(Icons.cleaning_services_outlined),
+                ),
               if (connection.profile.supportsSftp || _showSftp)
                 TextButton.icon(
                   style: TextButton.styleFrom(
@@ -885,84 +1176,53 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   Widget _buildTerminalView(EmTaskConnection connection) {
     return SafeArea(
       top: false,
-      child: Column(
-        children: <Widget>[
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              color: Colors.black,
-              child: Scrollbar(
-                controller: _terminalScrollController,
-                child: SingleChildScrollView(
-                  controller: _terminalScrollController,
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
-                  child: SelectableText(
-                    connection.output.isEmpty
-                        ? '已进入终端。远端输出会显示在这里。'
-                        : connection.output,
-                    style: const TextStyle(
-                      fontFamily: 'Consolas',
-                      fontFamilyFallback: <String>['Menlo', 'monospace'],
-                      fontSize: 14,
-                      height: 1.32,
-                      color: Color(0xffe5e7eb),
-                    ),
+      child: Container(
+        width: double.infinity,
+        color: Colors.black,
+        child: Stack(
+          children: <Widget>[
+            Positioned.fill(
+              child: TerminalView(
+                _terminal,
+                controller: _terminalController,
+                focusNode: _terminalFocusNode,
+                autofocus: true,
+                readOnly: !connection.isConnected,
+                theme: TerminalThemes.whiteOnBlack,
+                textStyle: const TerminalStyle(
+                  fontFamily: 'Consolas',
+                  fontFamilyFallback: <String>[
+                    'Cascadia Mono',
+                    'Microsoft YaHei UI',
+                    'Menlo',
+                    'monospace',
+                  ],
+                  fontSize: 14,
+                  height: 1.28,
+                ),
+                padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                cursorType: TerminalCursorType.block,
+                alwaysShowCursor: true,
+              ),
+            ),
+            if (!connection.isConnected)
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xdd111827),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xff334155)),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Text('会话已断开，请返回会话列表重新连接'),
                   ),
                 ),
               ),
-            ),
-          ),
-          Container(
-            decoration: const BoxDecoration(
-              color: Colors.black,
-              border: Border(top: BorderSide(color: Color(0xff1f2937))),
-            ),
-            padding: const EdgeInsets.fromLTRB(10, 6, 8, 8),
-            child: Row(
-              children: <Widget>[
-                const Text(
-                  r'$',
-                  style: TextStyle(
-                    fontFamily: 'Consolas',
-                    fontFamilyFallback: <String>['Menlo', 'monospace'],
-                    color: Color(0xff22c55e),
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _commandController,
-                    enabled: connection.isConnected,
-                    style: const TextStyle(
-                      fontFamily: 'Consolas',
-                      fontFamilyFallback: <String>['Menlo', 'monospace'],
-                      color: Color(0xffe5e7eb),
-                    ),
-                    decoration: InputDecoration(
-                      hintText: connection.isConnected
-                          ? '输入命令后回车发送到 emtask 终端'
-                          : '会话已断开，请返回会话列表重新连接',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    onSubmitted: (_) => _sendCommand(),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '发送',
-                  onPressed: connection.isConnected ? _sendCommand : null,
-                  icon: const Icon(Icons.keyboard_return),
-                ),
-                IconButton(
-                  tooltip: '清空终端输出',
-                  onPressed: connection.clearOutput,
-                  icon: const Icon(Icons.cleaning_services_outlined),
-                ),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -994,7 +1254,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
             ),
             const SizedBox(height: 8),
             Text(
-              '通过当前 SSH 连接打开 SFTP 子系统，点击目录进入，点击文件预览内容。',
+              '通过独立 SSH 连接打开 SFTP 子系统；根目录就是该任务工作路径，只能浏览工作路径及其子路径。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
@@ -1025,7 +1285,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
           enabled: !_sftpBusy,
           decoration: const InputDecoration(
             labelText: 'SFTP 路径',
-            hintText: r'. 或 C:\path\to\emtask 或 /opt/emtask',
+            hintText: '`.` 表示工作路径，例如 logs 或 logs/app.log',
             border: OutlineInputBorder(),
             isDense: true,
           ),
@@ -1048,6 +1308,12 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                   : null,
               icon: const Icon(Icons.drive_folder_upload_outlined),
               label: const Text('上级'),
+            ),
+            OutlinedButton.icon(
+              onPressed:
+                  connection.isConnected && !_sftpBusy ? _resetSftpPath : null,
+              icon: const Icon(Icons.home_outlined),
+              label: const Text('重置'),
             ),
             OutlinedButton.icon(
               onPressed: connection.isConnected && !_sftpBusy
@@ -1116,9 +1382,8 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   Widget _buildSftpEntryList() {
-    final emptyMessage = _loadedDirectoryPath == null
-        ? '输入路径后点击“打开目录”。'
-        : '目录为空。';
+    final emptyMessage =
+        _loadedDirectoryPath == null ? '输入路径后点击“打开目录”。' : '目录为空。';
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1237,74 +1502,351 @@ enum _SessionMenuAction {
   delete,
 }
 
+enum _PanelMenuAction {
+  edit,
+  delete,
+}
+
 enum _QrImportAction {
   camera,
   image,
   file,
 }
 
-class _PanelChip extends StatelessWidget {
-  const _PanelChip({
-    required this.panel,
-    required this.refreshing,
-    required this.onRefresh,
+class _ScreenRegionSelection {
+  const _ScreenRegionSelection({
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
   });
 
-  final EmTaskPanelProfile panel;
-  final bool refreshing;
-  final VoidCallback onRefresh;
+  final int x;
+  final int y;
+  final int width;
+  final int height;
+}
+
+class _ScreenRegionPicker extends StatefulWidget {
+  const _ScreenRegionPicker({
+    required this.imageBytes,
+    required this.imageWidth,
+    required this.imageHeight,
+  });
+
+  final Uint8List imageBytes;
+  final int imageWidth;
+  final int imageHeight;
+
+  @override
+  State<_ScreenRegionPicker> createState() => _ScreenRegionPickerState();
+}
+
+class _ScreenRegionPickerState extends State<_ScreenRegionPicker> {
+  Offset? _dragStart;
+  Offset? _dragCurrent;
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xff0f172a),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xff1f2937)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const Icon(Icons.dns_outlined, size: 18),
-            const SizedBox(width: 8),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 220),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    panel.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelLarge,
+    return Dialog.fullscreen(
+      backgroundColor: Colors.black,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+          final imageRect = _containedImageRect(viewport);
+          final selectionRect = _selectionRect(imageRect);
+          return Stack(
+            children: <Widget>[
+              Positioned.fill(
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: Center(
+                    child: SizedBox.fromSize(
+                      size: imageRect.size,
+                      child: Image.memory(
+                        widget.imageBytes,
+                        fit: BoxFit.fill,
+                        gaplessPlayback: true,
+                      ),
+                    ),
                   ),
-                  Text(
-                    '${panel.host}:${panel.port} · ${panel.authMode.label}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ],
+                ),
               ),
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: (details) {
+                    if (!imageRect.contains(details.localPosition)) {
+                      return;
+                    }
+                    setState(() {
+                      _dragStart =
+                          _clampOffset(details.localPosition, imageRect);
+                      _dragCurrent = _dragStart;
+                    });
+                  },
+                  onPanUpdate: (details) {
+                    if (_dragStart == null) {
+                      return;
+                    }
+                    setState(() {
+                      _dragCurrent =
+                          _clampOffset(details.localPosition, imageRect);
+                    });
+                  },
+                ),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _ScreenRegionPainter(
+                      imageRect: imageRect,
+                      selectionRect: selectionRect,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 16,
+                left: 16,
+                right: 16,
+                child: SafeArea(
+                  child: Center(
+                    child: Card(
+                      color: const Color(0xdd111827),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
+                        child: Text(
+                          '拖拽框选屏幕截图中的 emtask 面板二维码区域',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: 16,
+                child: SafeArea(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      FilledButton.tonal(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton.icon(
+                        onPressed: _isValidSelection(selectionRect)
+                            ? () => _confirmSelection(imageRect, selectionRect!)
+                            : null,
+                        icon: const Icon(Icons.qr_code_scanner_outlined),
+                        label: const Text('识别此区域'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Rect _containedImageRect(Size viewport) {
+    final imageSize = Size(
+      widget.imageWidth.toDouble(),
+      widget.imageHeight.toDouble(),
+    );
+    if (viewport.width <= 0 || viewport.height <= 0) {
+      return Rect.zero;
+    }
+    final imageAspect = imageSize.width / imageSize.height;
+    final viewportAspect = viewport.width / viewport.height;
+    if (viewportAspect > imageAspect) {
+      final height = viewport.height;
+      final width = height * imageAspect;
+      return Rect.fromLTWH((viewport.width - width) / 2, 0, width, height);
+    }
+    final width = viewport.width;
+    final height = width / imageAspect;
+    return Rect.fromLTWH(0, (viewport.height - height) / 2, width, height);
+  }
+
+  Rect? _selectionRect(Rect imageRect) {
+    final start = _dragStart;
+    final current = _dragCurrent;
+    if (start == null || current == null) {
+      return null;
+    }
+    return Rect.fromPoints(start, current).intersect(imageRect);
+  }
+
+  Offset _clampOffset(Offset offset, Rect bounds) {
+    return Offset(
+      offset.dx.clamp(bounds.left, bounds.right).toDouble(),
+      offset.dy.clamp(bounds.top, bounds.bottom).toDouble(),
+    );
+  }
+
+  bool _isValidSelection(Rect? selection) {
+    return selection != null && selection.width >= 8 && selection.height >= 8;
+  }
+
+  void _confirmSelection(Rect imageRect, Rect selection) {
+    final scaleX = widget.imageWidth / imageRect.width;
+    final scaleY = widget.imageHeight / imageRect.height;
+    final x = ((selection.left - imageRect.left) * scaleX)
+        .round()
+        .clamp(0, widget.imageWidth - 1);
+    final y = ((selection.top - imageRect.top) * scaleY)
+        .round()
+        .clamp(0, widget.imageHeight - 1);
+    final width = math.max(
+      1,
+      (selection.width * scaleX).round().clamp(1, widget.imageWidth - x),
+    );
+    final height = math.max(
+      1,
+      (selection.height * scaleY).round().clamp(1, widget.imageHeight - y),
+    );
+    Navigator.of(context).pop(
+      _ScreenRegionSelection(x: x, y: y, width: width, height: height),
+    );
+  }
+}
+
+class _ScreenRegionPainter extends CustomPainter {
+  const _ScreenRegionPainter({
+    required this.imageRect,
+    required this.selectionRect,
+  });
+
+  final Rect imageRect;
+  final Rect? selectionRect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final selection = selectionRect;
+    final overlay = Paint()..color = Colors.black.withOpacity(0.45);
+    final overlayPath = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
+    if (selection != null) {
+      overlayPath.addRect(selection);
+    }
+    canvas.drawPath(overlayPath, overlay);
+
+    final imageBorder = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = const Color(0xff64748b);
+    canvas.drawRect(imageRect, imageBorder);
+
+    if (selection == null) {
+      return;
+    }
+
+    final border = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..color = const Color(0xff22c55e);
+    canvas.drawRect(selection, border);
+
+    final corner = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.square
+      ..color = const Color(0xffbbf7d0);
+    const cornerLength = 22.0;
+    final points = <Offset, Offset>{
+      selection.topLeft: const Offset(1, 1),
+      selection.topRight: const Offset(-1, 1),
+      selection.bottomLeft: const Offset(1, -1),
+      selection.bottomRight: const Offset(-1, -1),
+    };
+    for (final entry in points.entries) {
+      final origin = entry.key;
+      final direction = entry.value;
+      canvas
+        ..drawLine(
+          origin,
+          origin + Offset(direction.dx * cornerLength, 0),
+          corner,
+        )
+        ..drawLine(
+          origin,
+          origin + Offset(0, direction.dy * cornerLength),
+          corner,
+        );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScreenRegionPainter oldDelegate) {
+    return oldDelegate.imageRect != imageRect ||
+        oldDelegate.selectionRect != selectionRect;
+  }
+}
+
+class _PanelActions extends StatelessWidget {
+  const _PanelActions({
+    required this.refreshing,
+    required this.onRefresh,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final bool refreshing;
+  final VoidCallback onRefresh;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        IconButton(
+          tooltip: '刷新面板会话',
+          onPressed: refreshing ? null : onRefresh,
+          icon: refreshing
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.refresh),
+        ),
+        PopupMenuButton<_PanelMenuAction>(
+          tooltip: '面板操作',
+          onSelected: (action) {
+            switch (action) {
+              case _PanelMenuAction.edit:
+                onEdit();
+              case _PanelMenuAction.delete:
+                onDelete();
+            }
+          },
+          itemBuilder: (context) => const <PopupMenuEntry<_PanelMenuAction>>[
+            PopupMenuItem<_PanelMenuAction>(
+              value: _PanelMenuAction.edit,
+              child: Text('编辑面板'),
             ),
-            const SizedBox(width: 6),
-            IconButton(
-              tooltip: '刷新面板会话',
-              onPressed: refreshing ? null : onRefresh,
-              icon: refreshing
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.refresh),
+            PopupMenuItem<_PanelMenuAction>(
+              value: _PanelMenuAction.delete,
+              child: Text('删除面板'),
             ),
           ],
         ),
-      ),
+      ],
     );
   }
 }
@@ -1377,7 +1919,9 @@ class _QrScannerPageState extends State<_QrScannerPage> {
 }
 
 class _PanelDialog extends StatefulWidget {
-  const _PanelDialog();
+  const _PanelDialog({this.panel});
+
+  final EmTaskPanelProfile? panel;
 
   @override
   State<_PanelDialog> createState() => _PanelDialogState();
@@ -1385,17 +1929,34 @@ class _PanelDialog extends StatefulWidget {
 
 class _PanelDialogState extends State<_PanelDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController(text: 'emtask 面板');
-  final _hostController = TextEditingController(text: '127.0.0.1');
-  final _portController = TextEditingController(text: '8080');
-  final _tokenController = TextEditingController();
-  final _otpSecretController = TextEditingController();
-  final _otpDigitsController = TextEditingController(text: '6');
-  final _otpStepController = TextEditingController(text: '30');
-  final _otpWindowController = TextEditingController(text: '1');
-  final _usernameController = TextEditingController(text: 'emtask');
-  final _passwordController = TextEditingController(text: 'emtask');
-  EmTaskPanelAuthMode _authMode = EmTaskPanelAuthMode.none;
+  late final TextEditingController _nameController;
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
+  late final TextEditingController _tokenController;
+  late final TextEditingController _otpSecretController;
+  late final TextEditingController _otpDigitsController;
+  late final TextEditingController _otpStepController;
+  late final TextEditingController _otpWindowController;
+  late final TextEditingController _usernameController;
+  late final TextEditingController _passwordController;
+  late EmTaskPanelAuthMode _authMode;
+
+  @override
+  void initState() {
+    super.initState();
+    final panel = widget.panel ?? EmTaskPanelProfile.defaults();
+    _nameController = TextEditingController(text: panel.name);
+    _hostController = TextEditingController(text: panel.host);
+    _portController = TextEditingController(text: '${panel.port}');
+    _tokenController = TextEditingController(text: panel.token);
+    _otpSecretController = TextEditingController(text: panel.otpSecret);
+    _otpDigitsController = TextEditingController(text: '${panel.otpDigits}');
+    _otpStepController = TextEditingController(text: '${panel.otpStepSeconds}');
+    _otpWindowController = TextEditingController(text: '${panel.otpWindow}');
+    _usernameController = TextEditingController(text: panel.username);
+    _passwordController = TextEditingController(text: panel.password);
+    _authMode = panel.authMode;
+  }
 
   @override
   void dispose() {
@@ -1437,7 +1998,7 @@ class _PanelDialogState extends State<_PanelDialog> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      '添加面板',
+                      widget.panel == null ? '添加面板' : '编辑面板',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                   ),
@@ -1495,7 +2056,8 @@ class _PanelDialogState extends State<_PanelDialog> {
                         const SizedBox(height: 10),
                         TextFormField(
                           controller: _tokenController,
-                          decoration: const InputDecoration(labelText: 'Panel Token'),
+                          decoration:
+                              const InputDecoration(labelText: 'Panel Token'),
                           validator: _required,
                         ),
                       ],
@@ -1503,20 +2065,23 @@ class _PanelDialogState extends State<_PanelDialog> {
                         const SizedBox(height: 10),
                         TextFormField(
                           controller: _otpSecretController,
-                          decoration: const InputDecoration(labelText: 'OTP Secret'),
+                          decoration:
+                              const InputDecoration(labelText: 'OTP Secret'),
                           validator: _required,
                         ),
                         const SizedBox(height: 10),
                         _buildFieldPair(
                           TextFormField(
                             controller: _otpDigitsController,
-                            decoration: const InputDecoration(labelText: 'OTP 位数'),
+                            decoration:
+                                const InputDecoration(labelText: 'OTP 位数'),
                             keyboardType: TextInputType.number,
                             validator: _positiveIntValidator,
                           ),
                           TextFormField(
                             controller: _otpStepController,
-                            decoration: const InputDecoration(labelText: 'OTP 步长秒'),
+                            decoration:
+                                const InputDecoration(labelText: 'OTP 步长秒'),
                             keyboardType: TextInputType.number,
                             validator: _positiveIntValidator,
                           ),
@@ -1524,7 +2089,8 @@ class _PanelDialogState extends State<_PanelDialog> {
                         const SizedBox(height: 10),
                         TextFormField(
                           controller: _otpWindowController,
-                          decoration: const InputDecoration(labelText: 'OTP 时间窗口'),
+                          decoration:
+                              const InputDecoration(labelText: 'OTP 时间窗口'),
                           keyboardType: TextInputType.number,
                           validator: _nonNegativeIntValidator,
                         ),
@@ -1568,7 +2134,7 @@ class _PanelDialogState extends State<_PanelDialog> {
                   ),
                   FilledButton(
                     onPressed: _submit,
-                    child: const Text('添加并获取会话'),
+                    child: Text(widget.panel == null ? '添加并获取会话' : '保存并刷新'),
                   ),
                 ],
               ),
@@ -1644,6 +2210,7 @@ class _PanelDialogState extends State<_PanelDialog> {
     }
     Navigator.of(context).pop(
       EmTaskPanelProfile.defaults(
+        id: widget.panel?.id,
         name: _nameController.text.trim(),
         host: _hostController.text.trim(),
         port: int.parse(_portController.text.trim()),
@@ -1651,7 +2218,7 @@ class _PanelDialogState extends State<_PanelDialog> {
         token: _tokenController.text.trim(),
         otpSecret: _otpSecretController.text.trim(),
         otpDigits: int.tryParse(_otpDigitsController.text.trim()) ?? 6,
-        otpStepSeconds: int.tryParse(_otpStepController.text.trim()) ?? 30,
+        otpStepSeconds: int.tryParse(_otpStepController.text.trim()) ?? 60,
         otpWindow: int.tryParse(_otpWindowController.text.trim()) ?? 1,
         username: _usernameController.text.trim(),
         password: _passwordController.text,
@@ -1758,7 +2325,8 @@ class _SessionTile extends StatelessWidget {
                     onDelete();
                 }
               },
-              itemBuilder: (context) => const <PopupMenuEntry<_SessionMenuAction>>[
+              itemBuilder: (context) =>
+                  const <PopupMenuEntry<_SessionMenuAction>>[
                 PopupMenuItem<_SessionMenuAction>(
                   value: _SessionMenuAction.edit,
                   child: Text('编辑'),
@@ -2079,14 +2647,15 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                         controller: _pathController,
                         decoration: const InputDecoration(
                           labelText: '默认 SFTP 路径',
-                          hintText: r'. 或 C:\path\to\emtask 或 /opt/emtask',
+                          hintText: '`.` 表示任务工作路径，例如 logs',
                         ),
+                        validator: _sftpPathValidator,
                       ),
                       const SizedBox(height: 8),
                       Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          '文件查看使用 SFTP；该路径会作为进入 SFTP 页面时的默认目录。',
+                          '文件查看使用 SFTP；路径只能位于任务工作路径内，不能填写本机绝对路径或 .. 上级路径。',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
@@ -2138,6 +2707,15 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     return null;
   }
 
+  String? _sftpPathValidator(String? value) {
+    try {
+      EmTaskConnection.normalizeSftpVirtualPath(value ?? '.');
+      return null;
+    } catch (error) {
+      return _formatError(error);
+    }
+  }
+
   Widget _buildFieldPair(
     Widget first,
     Widget second, {
@@ -2180,9 +2758,8 @@ class _ProfileDialogState extends State<_ProfileDialog> {
         username: _usernameController.text.trim(),
         password: _passwordController.text,
         shellKind: _shellKind,
-        initialPath: _pathController.text.trim().isEmpty
-            ? '.'
-            : _pathController.text.trim(),
+        initialPath:
+            EmTaskConnection.normalizeSftpVirtualPath(_pathController.text),
         supportsSftp: _supportsSftp,
       ),
     );
@@ -2233,19 +2810,21 @@ String _formatDateTime(DateTime value) {
 }
 
 String _parentSftpPath(String path) {
-  var value = path.trim();
-  if (value.isEmpty || value == '.') {
+  final value = EmTaskConnection.normalizeSftpVirtualPath(path);
+  if (value == '.') {
     return '.';
-  }
-  while (value.length > 1 &&
-      (value.endsWith('/') || value.endsWith(r'\'))) {
-    value = value.substring(0, value.length - 1);
   }
   final slash = value.lastIndexOf('/');
-  final backslash = value.lastIndexOf(r'\');
-  final index = math.max(slash, backslash);
-  if (index <= 0) {
+  if (slash <= 0) {
     return '.';
   }
-  return value.substring(0, index);
+  return value.substring(0, slash);
+}
+
+String _safeInitialSftpPath(String path) {
+  try {
+    return EmTaskConnection.normalizeSftpVirtualPath(path);
+  } catch (_) {
+    return '.';
+  }
 }

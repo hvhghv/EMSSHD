@@ -409,26 +409,12 @@ static void fake_secure_zero(void *ctx, void *ptr, size_t len)
     }
 }
 
-static int build_client_input(uint8_t *out, size_t out_capacity, size_t *out_len)
+static int build_client_kexinit_payload(uint8_t *out, size_t out_capacity, size_t *out_len)
 {
-    static const uint8_t client_ident[] = "SSH-2.0-test_client\r\n";
-    uint8_t payload_storage[EMSSH_MAX_KEXINIT_PAYLOAD];
-    uint8_t packet_storage[EMSSH_MAX_KEXINIT_PAYLOAD + 64u];
-    uint8_t ecdh_payload_storage[128];
-    uint8_t ecdh_packet_storage[192];
-    uint8_t newkeys_payload_storage[8];
-    uint8_t newkeys_packet_storage[32];
     uint8_t cookie[SSH_KEX_COOKIE_LEN];
-    ssh_buffer_t payload;
-    ssh_buffer_t ecdh_payload;
-    ssh_buffer_t newkeys_payload;
     ssh_kexinit_algorithm_set_t algorithms;
-    ssh_rng_api_t rng;
-    size_t packet_len;
-    size_t ecdh_packet_len;
-    size_t newkeys_packet_len;
+    ssh_buffer_t payload;
     size_t i;
-    int status;
 
     if (out == NULL || out_len == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -442,8 +428,73 @@ static int build_client_input(uint8_t *out, size_t out_capacity, size_t *out_len
     algorithms.kex_algorithms = "curve25519-sha256,ecdh-sha2-nistp256";
     algorithms.server_host_key_algorithms = "ssh-ed25519,ecdsa-sha2-nistp256";
 
-    ssh_buffer_init(&payload, payload_storage, sizeof(payload_storage));
-    status = ssh_kexinit_encode(&payload, cookie, &algorithms, 0);
+    ssh_buffer_init(&payload, out, out_capacity);
+    CHECK(ssh_kexinit_encode(&payload, cookie, &algorithms, 0) == SSH_OK);
+    *out_len = ssh_buffer_len(&payload);
+    return SSH_OK;
+}
+
+static int append_protected_packet(
+    ssh_packet_protection_t *protection,
+    uint8_t *out,
+    size_t out_capacity,
+    size_t *out_len,
+    const uint8_t *payload,
+    size_t payload_len,
+    const ssh_rng_api_t *rng)
+{
+    uint8_t packet[EMSSH_MAX_PACKET_SIZE + 4u + EMSSH_MAX_MAC];
+    size_t packet_len;
+    int status;
+
+    if (protection == NULL || out == NULL || out_len == NULL ||
+        (payload == NULL && payload_len != 0u)) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = ssh_packet_encode_protected(
+        protection,
+        packet,
+        sizeof(packet),
+        &packet_len,
+        payload,
+        payload_len,
+        rng);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (*out_len > out_capacity || packet_len > out_capacity - *out_len) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    memcpy(out + *out_len, packet, packet_len);
+    *out_len += packet_len;
+    return SSH_OK;
+}
+
+static int build_client_input(uint8_t *out, size_t out_capacity, size_t *out_len)
+{
+    static const uint8_t client_ident[] = "SSH-2.0-test_client\r\n";
+    uint8_t payload_storage[EMSSH_MAX_KEXINIT_PAYLOAD];
+    uint8_t packet_storage[EMSSH_MAX_KEXINIT_PAYLOAD + 64u];
+    uint8_t ecdh_payload_storage[128];
+    uint8_t ecdh_packet_storage[192];
+    uint8_t newkeys_payload_storage[8];
+    uint8_t newkeys_packet_storage[32];
+    ssh_buffer_t ecdh_payload;
+    ssh_buffer_t newkeys_payload;
+    ssh_rng_api_t rng;
+    size_t payload_len;
+    size_t packet_len;
+    size_t ecdh_packet_len;
+    size_t newkeys_packet_len;
+    int status;
+
+    if (out == NULL || out_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = build_client_kexinit_payload(payload_storage, sizeof(payload_storage), &payload_len);
     if (status != SSH_OK) {
         return status;
     }
@@ -455,7 +506,7 @@ static int build_client_input(uint8_t *out, size_t out_capacity, size_t *out_len
         sizeof(packet_storage),
         &packet_len,
         payload_storage,
-        ssh_buffer_len(&payload),
+        payload_len,
         SSH_PACKET_MIN_BLOCK_SIZE,
         &rng);
     if (status != SSH_OK) {
@@ -825,6 +876,178 @@ int main(void)
         CHECK(view_eq(channel_message.channel_request.request_type, SSH_CHANNEL_REQUEST_SIGNAL));
         CHECK(channel_message.channel_request.want_reply);
         CHECK(view_eq(channel_message.channel_request.signal_name, "TERM"));
+    }
+
+    {
+        uint8_t rekey_input[4096];
+        size_t rekey_input_len;
+        uint8_t rekey_kexinit_payload[EMSSH_MAX_KEXINIT_PAYLOAD];
+        size_t rekey_kexinit_payload_len;
+        uint8_t rekey_ecdh_payload[128];
+        size_t rekey_ecdh_payload_len;
+        uint8_t rekey_newkeys_payload[8];
+        size_t rekey_newkeys_payload_len;
+        uint8_t rekey_channel_payload[128];
+        size_t rekey_channel_payload_len;
+        ssh_packet_protection_t client_to_server;
+        ssh_buffer_t rekey_payload;
+        size_t server_out_before;
+        uint32_t inbound_sequence_start;
+        uint32_t outbound_sequence_start;
+
+        CHECK(ssh_transport_set_rekey_limits(&session, 0u, 0u) == SSH_OK);
+
+        client_to_server = session.inbound;
+        inbound_sequence_start = session.inbound.sequence;
+        outbound_sequence_start = session.outbound.sequence;
+        rekey_input_len = 0u;
+
+        CHECK(build_client_kexinit_payload(
+            rekey_kexinit_payload,
+            sizeof(rekey_kexinit_payload),
+            &rekey_kexinit_payload_len) == SSH_OK);
+        CHECK(append_protected_packet(
+            &client_to_server,
+            rekey_input,
+            sizeof(rekey_input),
+            &rekey_input_len,
+            rekey_kexinit_payload,
+            rekey_kexinit_payload_len,
+            &rng) == SSH_OK);
+
+        ssh_buffer_init(&rekey_payload, rekey_ecdh_payload, sizeof(rekey_ecdh_payload));
+        CHECK(ssh_kex_ecdh_init_encode(
+            &rekey_payload,
+            (const uint8_t *)"client-ephemeral",
+            strlen("client-ephemeral")) == SSH_OK);
+        rekey_ecdh_payload_len = ssh_buffer_len(&rekey_payload);
+        CHECK(append_protected_packet(
+            &client_to_server,
+            rekey_input,
+            sizeof(rekey_input),
+            &rekey_input_len,
+            rekey_ecdh_payload,
+            rekey_ecdh_payload_len,
+            &rng) == SSH_OK);
+
+        ssh_buffer_init(&rekey_payload, rekey_newkeys_payload, sizeof(rekey_newkeys_payload));
+        CHECK(ssh_kex_newkeys_encode(&rekey_payload) == SSH_OK);
+        rekey_newkeys_payload_len = ssh_buffer_len(&rekey_payload);
+        CHECK(append_protected_packet(
+            &client_to_server,
+            rekey_input,
+            sizeof(rekey_input),
+            &rekey_input_len,
+            rekey_newkeys_payload,
+            rekey_newkeys_payload_len,
+            &rng) == SSH_OK);
+
+        {
+            uint8_t rekey_cipher_key[16];
+            uint8_t rekey_cipher_iv[16];
+            uint8_t rekey_mac_key[32];
+            size_t material_len;
+
+            CHECK(fake_derive_key(
+                NULL,
+                session.negotiation.kex_algorithm,
+                session.shared_secret,
+                session.shared_secret_len,
+                session.exchange_hash,
+                session.exchange_hash_len,
+                session.session_id,
+                session.session_id_len,
+                'A',
+                rekey_cipher_iv,
+                sizeof(rekey_cipher_iv),
+                &material_len) == SSH_OK);
+            CHECK(material_len == sizeof(rekey_cipher_iv));
+            CHECK(fake_derive_key(
+                NULL,
+                session.negotiation.kex_algorithm,
+                session.shared_secret,
+                session.shared_secret_len,
+                session.exchange_hash,
+                session.exchange_hash_len,
+                session.session_id,
+                session.session_id_len,
+                'C',
+                rekey_cipher_key,
+                sizeof(rekey_cipher_key),
+                &material_len) == SSH_OK);
+            CHECK(material_len == sizeof(rekey_cipher_key));
+            CHECK(fake_derive_key(
+                NULL,
+                session.negotiation.kex_algorithm,
+                session.shared_secret,
+                session.shared_secret_len,
+                session.exchange_hash,
+                session.exchange_hash_len,
+                session.session_id,
+                session.session_id_len,
+                'E',
+                rekey_mac_key,
+                sizeof(rekey_mac_key),
+                &material_len) == SSH_OK);
+            CHECK(material_len == sizeof(rekey_mac_key));
+            CHECK(ssh_packet_protection_set(
+                &client_to_server,
+                &crypto,
+                session.negotiation.encryption_algorithm_client_to_server,
+                session.negotiation.mac_algorithm_client_to_server,
+                rekey_cipher_key,
+                sizeof(rekey_cipher_key),
+                rekey_cipher_iv,
+                sizeof(rekey_cipher_iv),
+                rekey_mac_key,
+                sizeof(rekey_mac_key),
+                16u,
+                32u) == SSH_OK);
+            client_to_server.sequence = inbound_sequence_start + 3u;
+        }
+
+        ssh_buffer_init(&rekey_payload, rekey_channel_payload, sizeof(rekey_channel_payload));
+        CHECK(ssh_channel_data_encode(
+            &rekey_payload,
+            0u,
+            (const uint8_t *)"after-rekey",
+            strlen("after-rekey")) == SSH_OK);
+        rekey_channel_payload_len = ssh_buffer_len(&rekey_payload);
+        CHECK(append_protected_packet(
+            &client_to_server,
+            rekey_input,
+            sizeof(rekey_input),
+            &rekey_input_len,
+            rekey_channel_payload,
+            rekey_channel_payload_len,
+            &rng) == SSH_OK);
+
+        conn.in = rekey_input;
+        conn.in_len = rekey_input_len;
+        conn.in_pos = 0u;
+        server_out_before = conn.out_len;
+        channel_message_data_len = 0u;
+        memset(&channel_message, 0, sizeof(channel_message));
+        CHECK(ssh_transport_receive_channel_message(
+            &session,
+            &conn,
+            &channel_message,
+            channel_message_data,
+            sizeof(channel_message_data),
+            &channel_message_data_len,
+            1000u) == SSH_OK);
+        CHECK(conn.in_pos == conn.in_len);
+        CHECK(conn.out_len > server_out_before);
+        CHECK(session.rekey_in_progress == 0);
+        CHECK(session.inbound.active);
+        CHECK(session.outbound.active);
+        CHECK(session.inbound.sequence == inbound_sequence_start + 4u);
+        CHECK(session.outbound.sequence == outbound_sequence_start + 3u);
+        CHECK(session.state == SSH_TRANSPORT_STATE_CHANNEL_DATA_RECEIVED);
+        CHECK(channel_message.message_id == SSH_MSG_CHANNEL_DATA);
+        CHECK(channel_message.recipient_channel == 0u);
+        CHECK(channel_message_data_len == strlen("after-rekey"));
+        CHECK(memcmp(channel_message_data, "after-rekey", channel_message_data_len) == 0);
     }
 
     malformed_block_size = session.inbound.block_size;

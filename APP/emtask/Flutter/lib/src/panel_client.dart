@@ -55,7 +55,9 @@ class EmTaskPanelClient {
       final response = await request.close().timeout(timeout);
       final body = await utf8.decoder.bind(response).join().timeout(timeout);
       if (response.statusCode == HttpStatus.unauthorized) {
-        throw StateError('面板鉴权失败，请检查 Token/OTP 配置。');
+        throw StateError(
+          '面板鉴权失败（HTTP 401）：请检查 Token、OTP secret、OTP 步长（默认 60 秒）和本机时间；如果重新生成过 emtask_panel_auth.keys，请重新导入最新二维码。',
+        );
       }
       if (response.statusCode != HttpStatus.ok) {
         throw StateError('面板请求失败：HTTP ${response.statusCode} $body');
@@ -120,7 +122,7 @@ class EmTaskPanelClient {
       username: panel.username,
       password: panel.password,
       shellKind: _inferShellKind(task.command),
-      initialPath: task.workingDir.trim().isEmpty ? '.' : task.workingDir.trim(),
+      initialPath: '.',
       supportsSftp: task.useSftp,
     );
   }
@@ -149,7 +151,7 @@ class EmTaskPanelClient {
 
   static String _totpNow(EmTaskPanelProfile panel) {
     final secret = _decodeBase32(panel.otpSecret);
-    final step = panel.otpStepSeconds <= 0 ? 30 : panel.otpStepSeconds;
+    final step = panel.otpStepSeconds <= 0 ? 60 : panel.otpStepSeconds;
     final counter = DateTime.now().millisecondsSinceEpoch ~/ (step * 1000);
     return _hotp(secret, counter, panel.otpDigits);
   }
@@ -223,7 +225,8 @@ EmTaskImportedPanel parseEmTaskPanelQrText(String source) {
     throw StateError('二维码缺少面板主机或端口。');
   }
 
-  final authMode = EmTaskPanelAuthModeX.fromBits(int.tryParse(fields['a'] ?? '0'));
+  final authMode =
+      EmTaskPanelAuthModeX.fromBits(int.tryParse(fields['a'] ?? '0'));
   final panel = EmTaskPanelProfile.defaults(
     name: 'emtask 面板 $host:$panelPort',
     host: host,
@@ -232,7 +235,7 @@ EmTaskImportedPanel parseEmTaskPanelQrText(String source) {
     token: fields['t'] ?? '',
     otpSecret: fields['o'] ?? '',
     otpDigits: int.tryParse(fields['d'] ?? '') ?? 6,
-    otpStepSeconds: int.tryParse(fields['i'] ?? '') ?? 30,
+    otpStepSeconds: int.tryParse(fields['i'] ?? '') ?? 60,
     otpWindow: int.tryParse(fields['w'] ?? '') ?? 1,
     startCommand: fields['start'] ?? '',
     stopCommand: fields['stop'] ?? '',

@@ -24,7 +24,7 @@ extension EmTaskShellKindX on EmTaskShellKind {
   String get label {
     switch (this) {
       case EmTaskShellKind.auto:
-        return '自动（cmd 模板）';
+        return '自动（UTF-8）';
       case EmTaskShellKind.cmd:
         return 'Windows cmd';
       case EmTaskShellKind.powershell:
@@ -37,7 +37,7 @@ extension EmTaskShellKindX on EmTaskShellKind {
   String get description {
     switch (this) {
       case EmTaskShellKind.auto:
-        return '按 emtask 默认 cmd.exe /Q /K 生成文件命令。';
+        return '适用于 codex 等现代终端程序，输入按 UTF-8 发送。';
       case EmTaskShellKind.cmd:
         return '适用于 Windows cmd.exe 任务。';
       case EmTaskShellKind.powershell:
@@ -183,12 +183,12 @@ class EmTaskPanelProfile {
     String? id,
     String name = 'emtask 面板',
     String host = '127.0.0.1',
-    int port = 8080,
-    EmTaskPanelAuthMode authMode = EmTaskPanelAuthMode.none,
+    int port = 6024,
+    EmTaskPanelAuthMode authMode = EmTaskPanelAuthMode.tokenOtp,
     String token = '',
     String otpSecret = '',
     int otpDigits = 6,
-    int otpStepSeconds = 30,
+    int otpStepSeconds = 60,
     int otpWindow = 1,
     String username = 'emtask',
     String password = 'emtask',
@@ -218,14 +218,14 @@ class EmTaskPanelProfile {
       id: json['id'] as String? ?? newId(),
       name: json['name'] as String? ?? 'emtask 面板',
       host: json['host'] as String? ?? '127.0.0.1',
-      port: json['port'] as int? ?? 8080,
-      authMode: EmTaskPanelAuthModeX.fromWireName(
-        json['authMode'] as String?,
-      ),
+      port: json['port'] as int? ?? 6024,
+      authMode: json.containsKey('authMode')
+          ? EmTaskPanelAuthModeX.fromWireName(json['authMode'] as String?)
+          : EmTaskPanelAuthMode.tokenOtp,
       token: json['token'] as String? ?? '',
       otpSecret: json['otpSecret'] as String? ?? '',
       otpDigits: json['otpDigits'] as int? ?? 6,
-      otpStepSeconds: json['otpStepSeconds'] as int? ?? 30,
+      otpStepSeconds: json['otpStepSeconds'] as int? ?? 60,
       otpWindow: json['otpWindow'] as int? ?? 1,
       username: json['username'] as String? ?? 'emtask',
       password: json['password'] as String? ?? 'emtask',
@@ -311,8 +311,7 @@ class EmTaskPanelProfile {
     );
   }
 
-  static String newId() =>
-      'panel-${DateTime.now().microsecondsSinceEpoch}';
+  static String newId() => 'panel-${DateTime.now().microsecondsSinceEpoch}';
 }
 
 class EmTaskImportedPanel {

@@ -450,6 +450,71 @@ static int receive_plain_packet(
     return SSH_OK;
 }
 
+static int send_transport_payload(
+    ssh_transport_session_t *session,
+    void *conn,
+    const uint8_t *payload,
+    size_t payload_len,
+    uint32_t timeout_ms)
+{
+    uint8_t packet[EMSSH_MAX_PACKET_SIZE + 4u + EMSSH_MAX_MAC];
+    size_t packet_len;
+    int status;
+
+    if (session == NULL || (payload == NULL && payload_len != 0u)) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (session->outbound.active) {
+        return ssh_transport_send_protected_payload(session, conn, payload, payload_len, timeout_ms);
+    }
+
+    status = ssh_packet_encode_plain(
+        packet,
+        sizeof(packet),
+        &packet_len,
+        payload,
+        payload_len,
+        SSH_PACKET_MIN_BLOCK_SIZE,
+        session->server->platform.rng);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    status = net_write_all(session, conn, packet, packet_len, timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    ++session->outbound_sequence;
+    return SSH_OK;
+}
+
+static int receive_transport_payload(
+    ssh_transport_session_t *session,
+    void *conn,
+    uint8_t *payload_out,
+    size_t payload_capacity,
+    size_t *payload_len,
+    uint32_t timeout_ms)
+{
+    if (session == NULL || payload_out == NULL || payload_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (session->inbound.active) {
+        return ssh_transport_receive_protected_payload(
+            session,
+            conn,
+            payload_out,
+            payload_capacity,
+            payload_len,
+            timeout_ms);
+    }
+
+    return receive_plain_packet(session, conn, payload_out, payload_capacity, payload_len, timeout_ms);
+}
+
 static void transport_copy_algorithms(
     ssh_kexinit_algorithm_set_t *dst,
     const ssh_crypto_api_t *crypto,
@@ -775,9 +840,7 @@ int ssh_transport_send_kexinit(
     uint32_t timeout_ms)
 {
     uint8_t cookie[SSH_KEX_COOKIE_LEN];
-    uint8_t packet[EMSSH_MAX_KEXINIT_PAYLOAD + 64u];
     ssh_buffer_t payload;
-    size_t packet_len;
     int status;
 
     if (session == NULL || session->server == NULL) {
@@ -800,50 +863,39 @@ int ssh_transport_send_kexinit(
     }
 
     session->server_kexinit_payload_len = ssh_buffer_len(&payload);
-    status = ssh_packet_encode_plain(
-        packet,
-        sizeof(packet),
-        &packet_len,
-        session->server_kexinit_payload,
-        session->server_kexinit_payload_len,
-        SSH_PACKET_MIN_BLOCK_SIZE,
-        session->server->platform.rng);
-    if (status != SSH_OK) {
-        return status;
-    }
-
-    status = net_write_all(session, conn, packet, packet_len, timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
-
-    ++session->outbound_sequence;
-    session->state = SSH_TRANSPORT_STATE_KEXINIT_SENT;
-    return SSH_OK;
-}
-
-int ssh_transport_receive_kexinit(
-    ssh_transport_session_t *session,
-    void *conn,
-    uint32_t timeout_ms)
-{
-    ssh_buffer_t payload;
-    int status;
-
-    if (session == NULL) {
-        return SSH_ERR_INVALID_ARGUMENT;
-    }
-
-    status = receive_plain_packet(
+    status = send_transport_payload(
         session,
         conn,
-        session->client_kexinit_payload,
-        sizeof(session->client_kexinit_payload),
-        &session->client_kexinit_payload_len,
+        session->server_kexinit_payload,
+        session->server_kexinit_payload_len,
         timeout_ms);
     if (status != SSH_OK) {
         return status;
     }
+
+    session->state = SSH_TRANSPORT_STATE_KEXINIT_SENT;
+    return SSH_OK;
+}
+
+static int process_kexinit_payload(
+    ssh_transport_session_t *session,
+    const uint8_t *payload_data,
+    size_t payload_len)
+{
+    ssh_buffer_t payload;
+    int status;
+
+    if (session == NULL || payload_data == NULL || payload_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (payload_len > sizeof(session->client_kexinit_payload)) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    if (payload_data != session->client_kexinit_payload) {
+        memcpy(session->client_kexinit_payload, payload_data, payload_len);
+    }
+    session->client_kexinit_payload_len = payload_len;
 
     ssh_buffer_wrap(&payload, session->client_kexinit_payload, session->client_kexinit_payload_len);
     status = ssh_kexinit_decode(&payload, &session->client_kexinit);
@@ -862,6 +914,34 @@ int ssh_transport_receive_kexinit(
 
     session->state = SSH_TRANSPORT_STATE_NEGOTIATED;
     return SSH_OK;
+}
+
+int ssh_transport_receive_kexinit(
+    ssh_transport_session_t *session,
+    void *conn,
+    uint32_t timeout_ms)
+{
+    int status;
+
+    if (session == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = receive_transport_payload(
+        session,
+        conn,
+        session->client_kexinit_payload,
+        sizeof(session->client_kexinit_payload),
+        &session->client_kexinit_payload_len,
+        timeout_ms);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    return process_kexinit_payload(
+        session,
+        session->client_kexinit_payload,
+        session->client_kexinit_payload_len);
 }
 
 static int build_exchange_hash_input(ssh_transport_session_t *session, uint8_t *out, size_t out_capacity, size_t *out_len)
@@ -934,7 +1014,7 @@ int ssh_transport_receive_kex_ecdh_init(
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    status = receive_plain_packet(
+    status = receive_transport_payload(
         session,
         conn,
         payload_storage,
@@ -966,9 +1046,7 @@ int ssh_transport_send_kex_ecdh_reply(
     uint8_t exchange_input[4096];
     size_t exchange_input_len;
     uint8_t reply_payload[EMSSH_MAX_KEX_REPLY_PAYLOAD];
-    uint8_t packet[EMSSH_MAX_KEX_REPLY_PAYLOAD + 64u];
     ssh_buffer_t reply;
-    size_t packet_len;
     int status;
 
     if (session == NULL || session->server == NULL) {
@@ -1074,24 +1152,11 @@ int ssh_transport_send_kex_ecdh_reply(
         return status;
     }
 
-    status = ssh_packet_encode_plain(
-        packet,
-        sizeof(packet),
-        &packet_len,
-        reply_payload,
-        ssh_buffer_len(&reply),
-        SSH_PACKET_MIN_BLOCK_SIZE,
-        session->server->platform.rng);
+    status = send_transport_payload(session, conn, reply_payload, ssh_buffer_len(&reply), timeout_ms);
     if (status != SSH_OK) {
         return status;
     }
 
-    status = net_write_all(session, conn, packet, packet_len, timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
-
-    ++session->outbound_sequence;
     session->state = SSH_TRANSPORT_STATE_KEX_ECDH_REPLY_SENT;
     return SSH_OK;
 }
@@ -1102,9 +1167,7 @@ int ssh_transport_send_newkeys(
     uint32_t timeout_ms)
 {
     uint8_t payload_storage[8];
-    uint8_t packet[32];
     ssh_buffer_t payload;
-    size_t packet_len;
     int status;
 
     if (session == NULL || session->server == NULL) {
@@ -1117,24 +1180,11 @@ int ssh_transport_send_newkeys(
         return status;
     }
 
-    status = ssh_packet_encode_plain(
-        packet,
-        sizeof(packet),
-        &packet_len,
-        payload_storage,
-        ssh_buffer_len(&payload),
-        SSH_PACKET_MIN_BLOCK_SIZE,
-        session->server->platform.rng);
+    status = send_transport_payload(session, conn, payload_storage, ssh_buffer_len(&payload), timeout_ms);
     if (status != SSH_OK) {
         return status;
     }
 
-    status = net_write_all(session, conn, packet, packet_len, timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
-
-    ++session->outbound_sequence;
     status = activate_packet_protection(session, 1);
     if (status != SSH_OK) {
         return status;
@@ -1158,7 +1208,7 @@ int ssh_transport_receive_newkeys(
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    status = receive_plain_packet(
+    status = receive_transport_payload(
         session,
         conn,
         payload_storage,
@@ -1375,6 +1425,50 @@ static int transport_payload_is_disconnect(const uint8_t *payload, size_t payloa
     return payload != NULL && payload_len != 0u && payload[0] == SSH_MSG_DISCONNECT;
 }
 
+static int transport_payload_is_kexinit(const uint8_t *payload, size_t payload_len)
+{
+    return payload != NULL && payload_len != 0u && payload[0] == SSH_MSG_KEXINIT;
+}
+
+static int ssh_transport_handle_peer_rekey(
+    ssh_transport_session_t *session,
+    void *conn,
+    const uint8_t *client_kexinit_payload,
+    size_t client_kexinit_payload_len,
+    uint32_t timeout_ms)
+{
+    int status;
+
+    if (session == NULL || conn == NULL || client_kexinit_payload == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!session->inbound.active || !session->outbound.active || session->rekey_in_progress) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+
+    session->rekey_in_progress = 1;
+
+    status = process_kexinit_payload(session, client_kexinit_payload, client_kexinit_payload_len);
+    if (status == SSH_OK) {
+        status = ssh_transport_send_kexinit(session, conn, timeout_ms);
+    }
+    if (status == SSH_OK) {
+        status = ssh_transport_receive_kex_ecdh_init(session, conn, timeout_ms);
+    }
+    if (status == SSH_OK) {
+        status = ssh_transport_send_kex_ecdh_reply(session, conn, timeout_ms);
+    }
+    if (status == SSH_OK) {
+        status = ssh_transport_send_newkeys(session, conn, timeout_ms);
+    }
+    if (status == SSH_OK) {
+        status = ssh_transport_receive_newkeys(session, conn, timeout_ms);
+    }
+
+    session->rekey_in_progress = 0;
+    return status;
+}
+
 static int receive_protected_payload_skip_ignorable(
     ssh_transport_session_t *session,
     void *conn,
@@ -1391,24 +1485,48 @@ static int receive_protected_payload_skip_ignorable(
     }
 
     for (skipped = 0u; skipped < 8u; ++skipped) {
+        uint8_t *received_payload;
+        size_t received_capacity;
+        size_t received_len;
+        int using_scratch;
+
+        using_scratch = payload_capacity < sizeof(session->client_kexinit_payload);
+        received_payload = using_scratch ? session->client_kexinit_payload : payload_out;
+        received_capacity = using_scratch ? sizeof(session->client_kexinit_payload) : payload_capacity;
+        received_len = 0u;
+
         status = ssh_transport_receive_protected_payload(
             session,
             conn,
-            payload_out,
-            payload_capacity,
-            payload_len,
+            received_payload,
+            received_capacity,
+            &received_len,
             timeout_ms);
         if (status != SSH_OK) {
             return status;
         }
-        if (*payload_len != 0u) {
-            session->last_received_message_id = payload_out[0];
+        if (received_len != 0u) {
+            session->last_received_message_id = received_payload[0];
             session->last_received_message_id_valid = 1;
         }
-        if (transport_payload_is_disconnect(payload_out, *payload_len)) {
+        if (transport_payload_is_disconnect(received_payload, received_len)) {
             return SSH_ERR_CLOSED;
         }
-        if (!transport_payload_is_ignorable(payload_out, *payload_len)) {
+        if (transport_payload_is_kexinit(received_payload, received_len)) {
+            status = ssh_transport_handle_peer_rekey(session, conn, received_payload, received_len, timeout_ms);
+            if (status != SSH_OK) {
+                return status;
+            }
+            continue;
+        }
+        if (!transport_payload_is_ignorable(received_payload, received_len)) {
+            if (using_scratch) {
+                if (received_len > payload_capacity) {
+                    return SSH_ERR_BUFFER_TOO_SMALL;
+                }
+                memcpy(payload_out, received_payload, received_len);
+            }
+            *payload_len = received_len;
             return SSH_OK;
         }
     }

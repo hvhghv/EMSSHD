@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show systemEncoding;
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
@@ -47,13 +48,16 @@ class EmTaskConnection extends ChangeNotifier {
 
   SSHClient? _client;
   SSHSession? _session;
+  SSHClient? _sftpSshClient;
   SftpClient? _sftpClient;
   StreamSubscription<String>? _stdoutSubscription;
   StreamSubscription<String>? _stderrSubscription;
+  final _terminalOutputController = StreamController<String>.broadcast();
   bool _disposed = false;
 
   bool get isConnected => status == EmTaskConnectionStatus.connected;
   bool get isConnecting => status == EmTaskConnectionStatus.connecting;
+  Stream<String> get terminalOutput => _terminalOutputController.stream;
 
   Future<void> connect() async {
     if (isConnected || isConnecting) {
@@ -64,33 +68,19 @@ class EmTaskConnection extends ChangeNotifier {
     _appendLocal('正在连接 ${profile.host}:${profile.port} ...');
 
     try {
-      final socket = await SSHSocket.connect(
-        profile.host,
-        profile.port,
-        timeout: _connectTimeout,
-      );
-
-      final client = SSHClient(
-        socket,
-        username: profile.username,
-        onPasswordRequest: () => profile.password,
-        onUserInfoRequest: (request) {
-          return request.prompts
-              .map((prompt) => prompt.echo ? '' : profile.password)
-              .toList(growable: false);
-        },
-        onVerifyHostKey: (_, __) => true,
-        keepAliveInterval: const Duration(seconds: 20),
-      );
+      final client = await _openAuthenticatedClient();
       _client = client;
-
-      await client.authenticated.timeout(_authTimeout);
       final shell = await client.shell(
         pty: const SSHPtyConfig(
           type: 'xterm-256color',
           width: 120,
           height: 35,
         ),
+        environment: const <String, String>{
+          'TERM': 'xterm-256color',
+          'LANG': 'C.UTF-8',
+          'LC_ALL': 'C.UTF-8',
+        },
       );
       _session = shell;
 
@@ -174,6 +164,7 @@ class EmTaskConnection extends ChangeNotifier {
 
   void clearOutput() {
     output = '';
+    _emitTerminal('[2J[H');
     _notifyIfAlive();
   }
 
@@ -182,16 +173,25 @@ class EmTaskConnection extends ChangeNotifier {
     if (shell == null || !isConnected) {
       throw StateError('当前会话未连接');
     }
-    shell.write(Uint8List.fromList(utf8.encode(text)));
+    shell.write(_encodeTerminalInput(text));
   }
 
   void writeLine(String line) {
     writeText('$line\r');
   }
 
+  void resizeTerminal(int columns, int rows,
+      [int pixelWidth = 0, int pixelHeight = 0]) {
+    final shell = _session;
+    if (shell == null || !isConnected) {
+      return;
+    }
+    shell.resizeTerminal(columns, rows, pixelWidth, pixelHeight);
+  }
+
   Future<List<EmTaskSftpEntry>> listSftpDirectory(String path) async {
     final sftp = await _ensureSftp();
-    final normalizedPath = _normalizeSftpPath(path);
+    final normalizedPath = normalizeSftpVirtualPath(path);
     try {
       final names = await sftp.listdir(normalizedPath).timeout(_sftpTimeout);
       final entries = names
@@ -226,7 +226,7 @@ class EmTaskConnection extends ChangeNotifier {
 
   Future<String> readSftpFile(String path) async {
     final sftp = await _ensureSftp();
-    final normalizedPath = _normalizeSftpPath(path);
+    final normalizedPath = normalizeSftpVirtualPath(path);
     SftpFile? file;
     try {
       final attrs = await sftp.stat(normalizedPath).timeout(_sftpTimeout);
@@ -235,9 +235,8 @@ class EmTaskConnection extends ChangeNotifier {
       }
 
       final size = attrs.size;
-      final length = size == null || size > _maxPreviewBytes
-          ? _maxPreviewBytes
-          : size;
+      final length =
+          size == null || size > _maxPreviewBytes ? _maxPreviewBytes : size;
       file = await sftp.open(normalizedPath).timeout(_sftpTimeout);
       final bytes = await file.readBytes(length: length).timeout(
             _sftpReadTimeout,
@@ -268,22 +267,56 @@ class EmTaskConnection extends ChangeNotifier {
       return existing;
     }
 
-    final client = _client;
-    if (client == null || !isConnected) {
+    if (!isConnected) {
       throw StateError('请先连接会话');
     }
 
     try {
+      final client = await _openAuthenticatedClient();
+      _sftpSshClient = client;
       final sftp = await client.sftp().timeout(_sftpTimeout);
       _sftpClient = sftp;
       await sftp.handshake.timeout(_sftpTimeout);
       return sftp;
     } on TimeoutException catch (error) {
       _closeSftp();
-      throw StateError('SFTP 连接超时，请确认 emtask 服务端已启用 SFTP：$error');
+      throw StateError('SFTP 独立连接超时，请确认 emtask 服务端已启用 SFTP：$error');
     } catch (error) {
       _closeSftp();
       throw StateError('SFTP 不可用，请确认 emtask 服务端已启用 SFTP：$error');
+    }
+  }
+
+  Future<SSHClient> _openAuthenticatedClient() async {
+    final socket = await SSHSocket.connect(
+      profile.host,
+      profile.port,
+      timeout: _connectTimeout,
+    );
+
+    final client = SSHClient(
+      socket,
+      username: profile.username,
+      onPasswordRequest: () => profile.password,
+      onUserInfoRequest: (request) {
+        return request.prompts
+            .map((prompt) => prompt.echo ? '' : profile.password)
+            .toList(growable: false);
+      },
+      onVerifyHostKey: (_, __) => true,
+      keepAliveInterval: const Duration(seconds: 20),
+    );
+
+    try {
+      await client.authenticated.timeout(_authTimeout);
+      return client;
+    } catch (_) {
+      try {
+        client.close();
+      } catch (_) {
+        // Ignore close errors.
+      }
+      rethrow;
     }
   }
 
@@ -294,9 +327,16 @@ class EmTaskConnection extends ChangeNotifier {
       // Ignore close errors.
     }
     _sftpClient = null;
+    try {
+      _sftpSshClient?.close();
+    } catch (_) {
+      // Ignore close errors.
+    }
+    _sftpSshClient = null;
   }
 
   void _handleRemoteText(String text) {
+    _emitTerminal(text);
     final visible = _normalizeTerminalText(text);
     if (visible.isEmpty) {
       return;
@@ -332,7 +372,23 @@ class EmTaskConnection extends ChangeNotifier {
     final now = DateTime.now();
     final line = '[${_formatClock(now)}] $message\n';
     output = _limitOutput('$output$line');
+    _emitTerminal(line.replaceAll('\n', '\r\n'));
     _notifyIfAlive();
+  }
+
+  void _emitTerminal(String text) {
+    if (!_terminalOutputController.isClosed) {
+      _terminalOutputController.add(text);
+    }
+  }
+
+  Uint8List _encodeTerminalInput(String text) {
+    final encoding = switch (profile.shellKind) {
+      EmTaskShellKind.auto => utf8,
+      EmTaskShellKind.posix => utf8,
+      EmTaskShellKind.cmd || EmTaskShellKind.powershell => systemEncoding,
+    };
+    return Uint8List.fromList(encoding.encode(text));
   }
 
   void _notifyIfAlive() {
@@ -345,24 +401,57 @@ class EmTaskConnection extends ChangeNotifier {
     return text
         .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '')
         .replaceAll(RegExp(r'\x1B\][^\x07]*(\x07|\x1B\\)'), '')
+        .replaceAll(RegExp(r'\x1B[()][0-2AB]'), '')
+        .replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '')
         .replaceAll('\r\n', '\n')
         .replaceAll('\r', '\n');
   }
 
-  static String _normalizeSftpPath(String path) {
+  static String normalizeSftpVirtualPath(String path) {
     final trimmed = path.trim();
-    return trimmed.isEmpty ? '.' : trimmed;
+    if (trimmed.isEmpty || trimmed == '.') {
+      return '.';
+    }
+    if (trimmed == '/') {
+      return '.';
+    }
+    if (trimmed.contains('\u0000') ||
+        trimmed.contains(':') ||
+        trimmed.startsWith('/') ||
+        trimmed.startsWith('\\')) {
+      throw StateError('SFTP 路径只能使用工作路径内的相对路径，不支持盘符或绝对本机路径。');
+    }
+
+    var value = trimmed.replaceAll('\\', '/');
+    if (value.isEmpty) {
+      return '.';
+    }
+
+    final segments = <String>[];
+    for (final segment in value.split('/')) {
+      if (segment.isEmpty || segment == '.') {
+        continue;
+      }
+      if (segment == '..') {
+        if (segments.isEmpty) {
+          throw StateError('SFTP 路径不能跳出任务工作路径。');
+        }
+        segments.removeLast();
+        continue;
+      }
+      segments.add(segment);
+    }
+    return segments.isEmpty ? '.' : segments.join('/');
   }
 
   static String _joinSftpPath(String base, String name) {
     if (base.isEmpty || base == '.') {
       return name;
     }
-    if (base.endsWith('/') || base.endsWith('\\')) {
+    if (base.endsWith('/')) {
       return '$base$name';
     }
-    final separator = base.contains('\\') && !base.contains('/') ? '\\' : '/';
-    return '$base$separator$name';
+    return '$base/$name';
   }
 
   static String _limitOutput(String value) {
@@ -382,6 +471,7 @@ class EmTaskConnection extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     unawaited(disconnect(keepOutput: true));
+    unawaited(_terminalOutputController.close());
     super.dispose();
   }
 }

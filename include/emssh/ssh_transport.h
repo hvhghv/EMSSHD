@@ -104,6 +104,7 @@ typedef struct ssh_transport_session {
     uint64_t inbound_rekey_bytes;
     uint64_t outbound_rekey_bytes;
     int rekey_needed;
+    int rekey_in_progress;
 
     ssh_kex_negotiation_t negotiation;
 

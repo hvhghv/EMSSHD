@@ -69,17 +69,15 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 - `max_workers`
 - `use_conpty`
 - `auth_backend`：`internal` 或 `passwd`。`passwd` 仅面向 Linux/POSIX 系统密码认证。
-- `panel_enabled`：是否开启全局只读面板端口，默认关闭。
+- `panel_enabled`：是否开启全局只读面板端口，默认开启。
 - `panel_listen_address`：面板监听地址，默认 `127.0.0.1`。
-- `panel_port`：面板监听端口；开启 `panel_enabled` 时必填，且不能与任务端口冲突。
-- `panel_auth`：面板鉴权模式，默认 `none`。可选：`none`、`token`、`otp`、`both`/`token+otp`。
+- `panel_port`：面板监听端口，默认 `6024`；开启 `panel_enabled` 时不能与任务端口冲突。
+- `panel_auth`：面板鉴权模式，默认 `token+otp`。可选：`none`、`token`、`otp`、`both`/`token+otp`。
 - `panel_auth_file`：面板鉴权材料文件，默认 `emtask_panel_auth.keys`，相对路径按配置文件目录解析。启用 token/OTP 后，`panel_token` 和 `panel_otp_secret` 放在该独立密钥文件中；若文件不存在或缺少当前鉴权模式需要的字段，会自动随机生成并写回该文件。请求可通过 `Authorization: Bearer <token>`、`X-Panel-Token`、查询参数 `?token=` 以及 `X-Panel-OTP`/`?otp=` 提供凭据。
-- `panel_qr_file`：面板导入二维码 SVG 文件，默认 `emtask_panel_connect.svg`，相对路径按配置文件目录解析。启用 token/OTP 后若文件不存在会自动创建，二维码 payload 会内置面板主机、端口、鉴权模式、token、OTP 参数和启动/停止提示。
-- `panel_qr_host`：写入二维码的主机名/IP；为空时使用 `panel_listen_address`，通配地址会回退为 `127.0.0.1`。
-- `panel_qr_start_command`：写入二维码的启动提示命令，默认 `emtask`。
-- `panel_qr_stop_command`：写入二维码的停止提示命令，默认 `Ctrl-C`。
+- `panel_qr_file`：面板导入二维码 SVG 文件，默认 `emtask_panel_connect.svg`，相对路径按配置文件目录解析。启用 token/OTP 后若文件不存在会自动创建，二维码 payload 会内置面板主机、端口、鉴权模式、token 和 OTP 参数。
+- `panel_qr_host`：写入二维码的主机名/IP，默认 `127.0.0.1`；为空时使用 `panel_listen_address`，通配地址会回退为 `127.0.0.1`。
 - `panel_otp_digits`：TOTP 位数，默认 `6`。
-- `panel_otp_step_sec`：TOTP 时间步长秒数，默认 `30`。
+- `panel_otp_step_sec`：TOTP 时间步长秒数，默认 `60`。
 - `panel_otp_window`：允许的前后时间窗口数量，默认 `1`。
 
 使用 `auth_backend = passwd` 时，CMake 构建需同时开启 `-DEMSSH_BUILD_POSIX_PASSWD_AUTH=ON`；该模式通过 `/etc/passwd` 和 `/etc/shadow` 校验系统用户密码。
@@ -97,7 +95,7 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 - `screen_snapshot`：维护一个轻量 ANSI/VT 屏幕模型，新连接接入时优先发送当前屏幕快照，默认开启；支持常见光标移动、清屏清行、滚动区域、插入/删除行列等序列。
 - `replay_buffer_bytes`：每任务保留的输出回放缓冲区大小，默认 1048576，设为 0 可关闭缓冲。
 - `use_conpty`：Windows 优先使用 ConPTY，默认开启；Linux 侧使用 PTY，该项可保留默认值。
-- `use_sftp`：是否在该任务端口启用 SFTP subsystem，默认关闭；启用后 SFTP 根目录为该任务解析后的 `working_dir`，`working_dir` 为空时使用 `emtask` 进程当前目录。
+- `use_sftp`：是否在该任务端口启用 SFTP subsystem，默认开启；启用后 SFTP 根目录为该任务解析后的 `working_dir`，`working_dir` 为空时使用 `emtask` 进程当前目录。
 
 示例：
 
@@ -109,16 +107,14 @@ authorized_keys_file = authorized_keys
 max_workers = 16
 panel_enabled = true
 panel_listen_address = 127.0.0.1
-panel_port = 8080
+panel_port = 6024
 panel_auth = token+otp
 # panel_token 和 panel_otp_secret 不写在 emtask.conf；首次启动会自动生成到 panel_auth_file。
 panel_auth_file = emtask_panel_auth.keys
 panel_qr_file = emtask_panel_connect.svg
 panel_qr_host = 127.0.0.1
-panel_qr_start_command = emtask --config emtask.conf
-panel_qr_stop_command = Ctrl-C
 # panel_otp_digits = 6
-# panel_otp_step_sec = 30
+# panel_otp_step_sec = 60
 # panel_otp_window = 1
 
 [task shell]
@@ -159,18 +155,18 @@ command = powershell.exe -NoLogo
 
 ```powershell
 # 无鉴权或 panel_auth = none
-Invoke-RestMethod http://127.0.0.1:8080/status
-Invoke-RestMethod http://127.0.0.1:8080/tasks
+Invoke-RestMethod http://127.0.0.1:6024/status
+Invoke-RestMethod http://127.0.0.1:6024/tasks
 
 # token 鉴权
-Invoke-RestMethod http://127.0.0.1:8080/status -Headers @{ Authorization = 'Bearer change-me' }
-Invoke-RestMethod 'http://127.0.0.1:8080/tasks?token=change-me'
+Invoke-RestMethod http://127.0.0.1:6024/status -Headers @{ Authorization = 'Bearer change-me' }
+Invoke-RestMethod 'http://127.0.0.1:6024/tasks?token=change-me'
 
 # OTP 鉴权；<code> 为当前 TOTP 动态码
-Invoke-RestMethod http://127.0.0.1:8080/status -Headers @{ 'X-Panel-OTP' = '<code>' }
+Invoke-RestMethod http://127.0.0.1:6024/status -Headers @{ 'X-Panel-OTP' = '<code>' }
 
 # token + OTP 双因素
-Invoke-RestMethod http://127.0.0.1:8080/status -Headers @{ Authorization = 'Bearer change-me'; 'X-Panel-OTP' = '<code>' }
+Invoke-RestMethod http://127.0.0.1:6024/status -Headers @{ Authorization = 'Bearer change-me'; 'X-Panel-OTP' = '<code>' }
 ```
 
 面板接口：
@@ -191,7 +187,7 @@ panel_token = <random-token>
 panel_otp_secret = <base32-totp-secret>
 ```
 
-自动生成的二维码是 SVG 文件，`<desc>` 中同时保留一份便于 Flutter/移动端读取的紧凑 payload，格式为 `emtask1|key=value|...`。当前字段包括：`h` 面板主机、`pp` 面板端口、`sp` 首个任务 SSH/SFTP 端口、`sn` 首个任务名、`sf` 是否支持 SFTP、`a` 鉴权位图、`t` token、`o` OTP secret、`d/i/w` OTP 位数/步长/窗口、`start/stop` 启停提示。二维码不会在文件已存在时覆盖，避免误刷新客户端仍在使用的密钥。
+自动生成的二维码是 SVG 文件，`<desc>` 中同时保留一份便于 Flutter/移动端读取的紧凑 payload，格式为 `emtask1|key=value|...`。当前字段包括：`h` 面板主机、`pp` 面板端口、`sp` 首个任务 SSH/SFTP 端口、`sn` 首个任务名、`sf` 是否支持 SFTP、`a` 鉴权位图、`t` token、`o` OTP secret、`d/i/w` OTP 位数/步长/窗口。二维码不会在文件已存在时覆盖，避免误刷新客户端仍在使用的密钥。
 
 SFTP 示例：
 

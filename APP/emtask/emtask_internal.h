@@ -28,12 +28,14 @@
 #define EMTASK_DEFAULT_TIMEOUT_MS 30000u
 #define EMTASK_DEFAULT_MAX_WORKERS 8u
 #define EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS "127.0.0.1"
+#define EMTASK_DEFAULT_PANEL_PORT 6024u
 #define EMTASK_DEFAULT_PANEL_AUTH_FILE "emtask_panel_auth.keys"
 #define EMTASK_DEFAULT_PANEL_QR_FILE "emtask_panel_connect.svg"
+#define EMTASK_DEFAULT_PANEL_QR_HOST "127.0.0.1"
 #define EMTASK_PANEL_AUTH_TOKEN 0x01u
 #define EMTASK_PANEL_AUTH_OTP 0x02u
 #define EMTASK_DEFAULT_PANEL_OTP_DIGITS 6u
-#define EMTASK_DEFAULT_PANEL_OTP_STEP_SEC 30u
+#define EMTASK_DEFAULT_PANEL_OTP_STEP_SEC 60u
 #define EMTASK_DEFAULT_PANEL_OTP_WINDOW 1u
 #define EMTASK_DEFAULT_RESTART_LIMIT 8u
 #define EMTASK_DEFAULT_RESTART_WINDOW_SEC 60u
@@ -61,8 +63,6 @@ typedef struct emtask_global_config {
     char panel_auth_file[EMTASK_MAX_PATH];
     char panel_qr_file[EMTASK_MAX_PATH];
     char panel_qr_host[EMTASK_MAX_TEXT];
-    char panel_qr_start_command[EMTASK_MAX_TEXT];
-    char panel_qr_stop_command[EMTASK_MAX_TEXT];
     uint32_t timeout_ms;
     unsigned max_workers;
     unsigned panel_auth;

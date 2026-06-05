@@ -52,7 +52,7 @@ class EmTaskProfileStore {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getStringList(_panelsKey);
     if (saved == null || saved.isEmpty) {
-      return const <EmTaskPanelProfile>[];
+      return <EmTaskPanelProfile>[];
     }
 
     final panels = <EmTaskPanelProfile>[];

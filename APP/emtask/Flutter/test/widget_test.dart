@@ -4,6 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:emtask_client/main.dart';
+import 'package:emtask_client/src/emtask_connection.dart';
+import 'package:emtask_client/src/models.dart';
+import 'package:emtask_client/src/profile_store.dart';
 
 void main() {
   testWidgets('home screen only shows sessions', (WidgetTester tester) async {
@@ -27,8 +30,7 @@ void main() {
     await tester.tap(find.text('emtask shell'));
     await tester.pumpAndSettle();
 
-    expect(find.text('请先点击会话项里的“连接”，连接成功后再进入终端。'),
-        findsOneWidget);
+    expect(find.text('请先点击会话项里的“连接”，连接成功后再进入终端。'), findsOneWidget);
     expect(find.text('输入命令后回车发送到 emtask 终端'), findsNothing);
     expect(find.text('SFTP'), findsNothing);
   });
@@ -61,7 +63,7 @@ void main() {
     expect(find.text('添加并获取会话'), findsOneWidget);
   });
 
-  testWidgets('qr import options include camera image and file',
+  testWidgets('qr import options include camera screenshot and file',
       (WidgetTester tester) async {
     await _pumpClient(tester, const Size(390, 844));
 
@@ -69,8 +71,47 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('拍照扫描二维码'), findsOneWidget);
-    expect(find.text('选择截图图片识别'), findsOneWidget);
+    expect(find.text('框选屏幕截图识别'), findsOneWidget);
     expect(find.text('选择二维码文件导入'), findsOneWidget);
+  });
+
+  test('empty panel store returns mutable list for QR import', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+
+    final panels = await EmTaskProfileStore().loadPanels();
+    panels.add(EmTaskPanelProfile.defaults());
+
+    expect(panels, hasLength(1));
+  });
+
+  test('panel defaults match emtask server auth defaults', () {
+    final panel = EmTaskPanelProfile.defaults();
+
+    expect(panel.port, 6024);
+    expect(panel.authMode, EmTaskPanelAuthMode.tokenOtp);
+    expect(panel.otpStepSeconds, 60);
+  });
+
+  test('sftp virtual path is limited to working directory tree', () {
+    expect(EmTaskConnection.normalizeSftpVirtualPath(''), '.');
+    expect(EmTaskConnection.normalizeSftpVirtualPath('/'), '.');
+    expect(EmTaskConnection.normalizeSftpVirtualPath('logs/./app.log'),
+        'logs/app.log');
+    expect(
+        EmTaskConnection.normalizeSftpVirtualPath(r'logs\today'), 'logs/today');
+
+    expect(
+      () => EmTaskConnection.normalizeSftpVirtualPath('../secret.txt'),
+      throwsStateError,
+    );
+    expect(
+      () => EmTaskConnection.normalizeSftpVirtualPath(r'C:\secret.txt'),
+      throwsStateError,
+    );
+    expect(
+      () => EmTaskConnection.normalizeSftpVirtualPath('/opt/emtask'),
+      throwsStateError,
+    );
   });
 }
 

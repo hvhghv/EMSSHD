@@ -3,10 +3,8 @@
 #include "emssh/crypto_mbedtls.h"
 #include "emssh/ssh_crypto.h"
 #include "emssh/ssh_transport.h"
-
-#if defined(EMSSH_USE_MBEDTLS) || defined(MBEDTLS_MD_C)
 #include "mbedtls/md.h"
-#endif
+
 
 #include <time.h>
 
@@ -210,6 +208,7 @@ static void emtask_task_config_defaults(emtask_task_config_t *task)
     task->replay_on_attach = 1;
     task->repaint_on_attach = 1;
     task->screen_snapshot = EMTASK_DEFAULT_SCREEN_SNAPSHOT;
+    task->use_sftp = 1;
 }
 
 static void emtask_config_defaults(emtask_config_t *config)
@@ -223,6 +222,9 @@ static void emtask_config_defaults(emtask_config_t *config)
     config->global.max_workers = EMTASK_DEFAULT_MAX_WORKERS;
     config->global.use_conpty = emtask_platform_default_use_conpty();
     config->global.auth_backend = EMTASK_AUTH_BACKEND_INTERNAL;
+    config->global.panel_enabled = 1;
+    config->global.panel_port = (uint16_t)EMTASK_DEFAULT_PANEL_PORT;
+    config->global.panel_auth = EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP;
     (void)emtask_copy_text(config->global.hostkey_file, sizeof(config->global.hostkey_file), "emtask_hostkey_p256.raw");
     (void)emtask_copy_text(
         config->global.panel_listen_address,
@@ -236,6 +238,10 @@ static void emtask_config_defaults(emtask_config_t *config)
         config->global.panel_qr_file,
         sizeof(config->global.panel_qr_file),
         EMTASK_DEFAULT_PANEL_QR_FILE);
+    (void)emtask_copy_text(
+        config->global.panel_qr_host,
+        sizeof(config->global.panel_qr_host),
+        EMTASK_DEFAULT_PANEL_QR_HOST);
     config->global.panel_otp_digits = EMTASK_DEFAULT_PANEL_OTP_DIGITS;
     config->global.panel_otp_step_sec = EMTASK_DEFAULT_PANEL_OTP_STEP_SEC;
     config->global.panel_otp_window = EMTASK_DEFAULT_PANEL_OTP_WINDOW;
@@ -425,12 +431,6 @@ static int emtask_apply_global_config_pair(
     }
     if (emtask_key_equals(key, "panel_qr_host") || emtask_key_equals(key, "panel_qrcode_host")) {
         return emtask_copy_text(global->panel_qr_host, sizeof(global->panel_qr_host), value);
-    }
-    if (emtask_key_equals(key, "panel_qr_start_command") || emtask_key_equals(key, "panel_start_command")) {
-        return emtask_copy_text(global->panel_qr_start_command, sizeof(global->panel_qr_start_command), value);
-    }
-    if (emtask_key_equals(key, "panel_qr_stop_command") || emtask_key_equals(key, "panel_stop_command")) {
-        return emtask_copy_text(global->panel_qr_stop_command, sizeof(global->panel_qr_stop_command), value);
     }
     if (emtask_key_equals(key, "panel_otp_digits")) {
         status = emtask_parse_unsigned(value, &u);
@@ -1365,12 +1365,10 @@ static const char *emtask_panel_qr_host(const emtask_global_config_t *global)
     return host;
 }
 
-static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *out, size_t out_capacity, int include_commands)
+static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *out, size_t out_capacity)
 {
     const emtask_global_config_t *global;
     const emtask_task_config_t *first_task;
-    const char *start_command;
-    const char *stop_command;
     char value[64];
     size_t len;
     int status;
@@ -1440,18 +1438,6 @@ static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *ou
         }
         (void)snprintf(value, sizeof(value), "%u", global->panel_otp_window);
         status = emtask_panel_payload_append_field(out, out_capacity, &len, "w", value, 0u);
-        if (status != SSH_OK) {
-            return status;
-        }
-    }
-    if (include_commands) {
-        start_command = global->panel_qr_start_command[0] != '\0' ? global->panel_qr_start_command : "emtask";
-        stop_command = global->panel_qr_stop_command[0] != '\0' ? global->panel_qr_stop_command : "Ctrl-C";
-        status = emtask_panel_payload_append_field(out, out_capacity, &len, "start", start_command, 64u);
-        if (status != SSH_OK) {
-            return status;
-        }
-        status = emtask_panel_payload_append_field(out, out_capacity, &len, "stop", stop_command, 64u);
         if (status != SSH_OK) {
             return status;
         }
@@ -1990,13 +1976,7 @@ static int emtask_panel_materialize_qr(const emtask_config_t *config)
         return status;
     }
 
-    status = emtask_panel_build_qr_payload(config, payload, sizeof(payload), 1);
-    if (status == SSH_OK && strlen(payload) > 271u) {
-        status = SSH_ERR_BUFFER_TOO_SMALL;
-    }
-    if (status == SSH_ERR_BUFFER_TOO_SMALL) {
-        status = emtask_panel_build_qr_payload(config, payload, sizeof(payload), 0);
-    }
+    status = emtask_panel_build_qr_payload(config, payload, sizeof(payload));
     if (status != SSH_OK) {
         memset(payload, 0, sizeof(payload));
         return status;
