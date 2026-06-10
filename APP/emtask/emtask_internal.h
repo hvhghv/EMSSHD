@@ -159,14 +159,17 @@ typedef struct emtask_term {
     emtask_mutex_t lock;
     char command[EMTASK_MAX_TEXT];
     char working_dir[EMTASK_MAX_PATH];
+    char last_error[EMTASK_MAX_TEXT];
     char term_type[64];
     uint64_t restart_history[EMTASK_MAX_RESTART_HISTORY];
+    uint64_t last_error_ms;
     size_t restart_history_len;
     uint32_t cols;
     uint32_t rows;
     uint32_t width_px;
     uint32_t height_px;
     uint32_t last_exit_status;
+    int last_error_status;
     unsigned restart_limit;
     uint64_t restart_window_ms;
     uint64_t interrupt_restart_deadline_ms;

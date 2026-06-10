@@ -40,39 +40,3 @@ password = emtask
 # Linux only: use /etc/passwd + /etc/shadow password verification instead of password above.
 # auth_backend = passwd
 
-[task shell]
-listen_address = 0.0.0.0
-port = 2222
-# working_dir may be absolute, or relative to this config file directory.
-# working_dir = .
-# SFTP subsystem is enabled by default on this task port. Its root is working_dir (or current dir if empty).
-# use_sftp = true
-command = cmd.exe /Q /K
-# restart_limit = 8
-# restart_window_sec = 60
-# TUI/reconnect recovery options are enabled by default; keep them here for easy tuning.
-# replay_on_attach = true
-# repaint_on_attach = true
-# screen_snapshot = true
-# replay_buffer_bytes = 1048576
-# use_conpty = true
-
-[task powershell]
-listen_address = 127.0.0.1
-port = 2223
-# working_dir = C:\\work
-# use_sftp = true
-command = powershell.exe -NoLogo
-# restart_limit = 8
-# restart_window_sec = 60
-# replay_on_attach = true
-# repaint_on_attach = true
-# screen_snapshot = true
-# replay_buffer_bytes = 1048576
-# use_conpty = true
-
-# WindowMsys2 版本建议把 command 配成 MSYS2 shell / 业务命令，例如：
-# [task msys2]
-# listen_address = 127.0.0.1
-# port = 2224
-# command = bash -li

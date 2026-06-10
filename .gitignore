@@ -13,19 +13,6 @@ build.ninja
 .ninja_deps
 .ninja_log
 
-# Generic binaries/libraries
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.dylib
-*.dll
-*.exe
-!/tools/emtask-service-wrapper.exe
-!/File/sqlite-runtime/win-x64/sqlite3.dll
-!/File/sqlite-runtime/linux-x64/libsqlite3.so
-!/File/sqlite-runtime/linux-x64/libsqlite3.so.0
 *.pdb
 
 # Logs and runtime outputs

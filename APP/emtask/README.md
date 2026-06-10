@@ -184,10 +184,11 @@ Invoke-RestMethod http://127.0.0.1:6024/status -Headers @{ Authorization = 'Bear
 - `GET /status`：完整状态 JSON，包含配置路径、auth backend、worker pool、panel 状态和全部任务状态。
 - `GET /tasks`：仅返回任务数组。
 - `POST /tasks`：添加动态子任务并写入 `panel_tasks_db_file`。JSON 字段包括必填 `name`、`port`、`command`，可选 `listen_address`、`working_dir`、`use_sftp`、`use_conpty`、`restart_limit`、`restart_window_sec`、`replay_buffer_bytes`、`replay_on_attach`、`repaint_on_attach`、`screen_snapshot`。成功返回 `201 Created` 和 `task` 对象；名称/端口冲突返回 `409`。
+- `POST /tasks/restart?name=<task>`：重新运行指定子任务命令。任务正在使用中返回 `409`；命令再次启动失败时接口仍返回最新 `task` 状态，`terminal.last_error` 会包含失败日志。
 - `PATCH /tasks?name=<task>`：修改 Flutter 面板创建的动态子任务并同步更新 `panel_tasks_db_file`。`name` 是唯一标识，不支持通过 PATCH 修改；JSON 可只包含需要修改的字段，例如 `listen_address`、`port`、`command`、`working_dir`、`use_sftp`、`use_conpty`。任务正在使用中返回 `409`；修改会重建该动态任务的运行时监听和终端进程。
 - `DELETE /tasks?name=<task>`：删除 Flutter 面板创建的动态子任务，并同步删除 `panel_tasks_db_file` 中的记录；任务正在使用中返回 `409`，不存在或非动态任务返回 `404`。
 
-`/status` 输出会包含任务 `name`、`listen_address`、`port`、`command`、`working_dir`、`use_sftp`、`listener_open`、终端 `running/attached/faulted/last_exit_status` 等状态，也会输出面板鉴权模式和 OTP 参数。面板不会输出 `password`、私钥内容、`panel_token` 或 `panel_otp_secret`。建议保持默认 `127.0.0.1` 监听；如需对外暴露，应在外部增加 TLS、反向代理或访问控制。
+`/status` 输出会包含任务 `name`、`listen_address`、`port`、`command`、`working_dir`、`use_sftp`、`listener_open`、任务 `status/status_message`、终端 `running/attached/faulted/exited/last_exit_status/last_error` 等状态，也会输出面板鉴权模式和 OTP 参数。子任务命令启动失败时不会再导致整个 `emtask` 退出；该任务会保留为 `failed` 状态，其他任务和面板继续运行，可通过面板重跑。面板不会输出 `password`、私钥内容、`panel_token` 或 `panel_otp_secret`。建议保持默认 `127.0.0.1` 监听；如需对外暴露，应在外部增加 TLS、反向代理或访问控制。
 
 SQLite 运行库位于 `File/sqlite-runtime`。CMake 构建 `emtask` 后不会自动复制 SQLite；服务端运行时只会先搜索当前目录下的 `sqlite3.dll` / `libsqlite3.so(.0)`，再回退系统库路径。若最终加载的是系统 SQLite，会输出 warning。启用面板动态任务存储时，启动阶段会检查 SQLite runtime；若当前目录和系统库路径都找不到 SQLite，`emtask` 会直接报错退出。请把 `File/sqlite-runtime/win-x64/sqlite3.dll` 复制到运行 `emtask.exe` 的当前目录，或把 SQLite 安装到系统库路径；同时确认 `panel_tasks_db_file` 所在目录可写。
 

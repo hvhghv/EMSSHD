@@ -817,6 +817,13 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       panelTaskWorkingDir: local.panelTaskSyncWorkingDir
           ? remote.panelTaskWorkingDir
           : local.panelTaskWorkingDir,
+      panelTaskStatus: remote.panelTaskStatus,
+      panelTaskStatusMessage: remote.panelTaskStatusMessage,
+      panelTaskFailureLog: remote.panelTaskFailureLog,
+      panelTaskListenerOpen: remote.panelTaskListenerOpen,
+      panelTaskTerminalRunning: remote.panelTaskTerminalRunning,
+      panelTaskTerminalFaulted: remote.panelTaskTerminalFaulted,
+      panelTaskLastExitStatus: remote.panelTaskLastExitStatus,
     );
   }
 
@@ -841,6 +848,13 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       panelTaskName: taskName,
       panelTaskCommand: profile.panelTaskCommand,
       panelTaskWorkingDir: profile.panelTaskWorkingDir,
+      panelTaskStatus: profile.panelTaskStatus,
+      panelTaskStatusMessage: profile.panelTaskStatusMessage,
+      panelTaskFailureLog: profile.panelTaskFailureLog,
+      panelTaskListenerOpen: profile.panelTaskListenerOpen,
+      panelTaskTerminalRunning: profile.panelTaskTerminalRunning,
+      panelTaskTerminalFaulted: profile.panelTaskTerminalFaulted,
+      panelTaskLastExitStatus: profile.panelTaskLastExitStatus,
     );
   }
 
@@ -892,6 +906,23 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     return _connections
         .where((connection) => _isPanelConnection(connection, panel))
         .toList(growable: false);
+  }
+
+  EmTaskConnection? _panelConnectionByTask(
+    EmTaskPanelProfile panel,
+    String taskName,
+  ) {
+    final key = _normalizeTaskNameKey(taskName);
+    if (key.isEmpty) {
+      return null;
+    }
+    for (final connection in _panelConnections(panel)) {
+      if (_normalizeTaskNameKey(_panelTaskNameForProfile(connection.profile)) ==
+          key) {
+        return connection;
+      }
+    }
+    return null;
   }
 
   bool _isSamePanelEndpoint(
@@ -963,6 +994,75 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       await _refreshPanel(panel, showSnackBar: false);
       if (mounted) {
         _showHomeSnackBar('已删除服务端子任务 “$panelTaskName”。');
+      }
+    }
+  }
+
+  Future<void> _showPanelTaskStatus(EmTaskConnection connection) async {
+    final panel = _panelForProfile(connection.profile);
+    final taskName = _panelTaskNameForProfile(connection.profile);
+    if (panel == null || taskName.isEmpty) {
+      _showHomeSnackBar('无法确定面板子任务，请先刷新面板。');
+      return;
+    }
+
+    var profile = connection.profile;
+    try {
+      final sessions = await _panelClient.fetchSessions(panel);
+      if (!mounted || !_panels.any((item) => item.id == panel.id)) {
+        return;
+      }
+      setState(() => _upsertPanelProfiles(panel, sessions));
+      await _saveProfiles();
+      profile = _panelConnectionByTask(panel, taskName)?.profile ?? profile;
+    } catch (error) {
+      if (mounted) {
+        _showHomeSnackBar('刷新子任务状态失败，将显示本地缓存：${_formatError(error)}');
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => _PanelTaskStatusDialog(profile: profile),
+    );
+  }
+
+  Future<void> _rerunPanelTask(EmTaskConnection connection) async {
+    final panel = _panelForProfile(connection.profile);
+    final taskName = _panelTaskNameForProfile(connection.profile);
+    if (panel == null || taskName.isEmpty) {
+      _showHomeSnackBar('无法确定面板子任务，请先刷新面板。');
+      return;
+    }
+
+    try {
+      final session = await _panelClient.rerunTask(panel, taskName);
+      if (!mounted || !_panels.any((item) => item.id == panel.id)) {
+        return;
+      }
+      setState(() => _upsertPanelProfiles(panel, <EmTaskSessionProfile>[
+            _normalizePanelSession(panel, session),
+          ]));
+      await _saveProfiles();
+      await _refreshPanel(panel, showSnackBar: false);
+      if (!mounted) {
+        return;
+      }
+      if (session.panelTaskStatus == 'failed' ||
+          session.panelTaskTerminalFaulted) {
+        final detail = session.panelTaskFailureLog.trim().isEmpty
+            ? session.panelTaskStatusMessage
+            : session.panelTaskFailureLog;
+        _showHomeSnackBar('已请求重新运行，但子任务仍失败：${_formatError(detail)}');
+      } else {
+        _showHomeSnackBar('已重新运行子任务 “$taskName”。');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showHomeSnackBar('重新运行子任务失败：${_formatError(error)}');
       }
     }
   }
@@ -1271,6 +1371,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
           onOpen: () => _openSession(connection),
           onToggle: () => _toggleConnection(connection),
           onEdit: () => _addOrEditProfile(connection: connection),
+          onShowPanelTaskStatus:
+              panel == null ? null : () => _showPanelTaskStatus(connection),
+          onRerunPanelTask:
+              panel == null ? null : () => _rerunPanelTask(connection),
           onCreatePanelTaskFromTemplate: panel == null
               ? null
               : () => _addPanelTask(panel, template: connection.profile),
@@ -3280,6 +3384,8 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
 }
 
 enum _SessionMenuAction {
+  status,
+  rerun,
   edit,
   createPanelTaskFromTemplate,
   delete,
@@ -4300,12 +4406,134 @@ class _PanelDialogState extends State<_PanelDialog> {
   }
 }
 
+class _PanelTaskStatusDialog extends StatelessWidget {
+  const _PanelTaskStatusDialog({required this.profile});
+
+  final EmTaskSessionProfile profile;
+
+  @override
+  Widget build(BuildContext context) {
+    final failureLog = profile.panelTaskFailureLog.trim();
+    return AlertDialog(
+      title: Text('子任务状态：${profile.panelTaskName}'),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              _StatusLine(label: '状态', value: _statusLabel(profile)),
+              _StatusLine(
+                label: '监听',
+                value: profile.panelTaskListenerOpen ? '已打开' : '未打开/等待重试',
+              ),
+              _StatusLine(
+                label: '终端',
+                value: profile.panelTaskTerminalRunning
+                    ? '运行中'
+                    : profile.panelTaskTerminalFaulted
+                        ? '失败'
+                        : '未运行',
+              ),
+              _StatusLine(
+                label: '退出码',
+                value: '${profile.panelTaskLastExitStatus}',
+              ),
+              if (profile.panelTaskStatusMessage.trim().isNotEmpty)
+                _StatusLine(
+                  label: '说明',
+                  value: profile.panelTaskStatusMessage.trim(),
+                ),
+              const SizedBox(height: 12),
+              Text(
+                '失败日志',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(minHeight: 96),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xff020617),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xff334155)),
+                ),
+                child: SelectableText(
+                  failureLog.isEmpty ? '暂无失败日志。' : failureLog,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+
+  static String _statusLabel(EmTaskSessionProfile profile) {
+    switch (profile.panelTaskStatus) {
+      case 'running':
+        return '运行中';
+      case 'failed':
+        return '失败';
+      case 'exited':
+        return '已退出';
+      case 'pending':
+        return '等待启动';
+      case 'stopped':
+        return '已停止';
+      default:
+        return profile.panelTaskStatus.isEmpty ? '未知' : profile.panelTaskStatus;
+    }
+  }
+}
+
+class _StatusLine extends StatelessWidget {
+  const _StatusLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 72,
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ),
+          Expanded(child: SelectableText(value)),
+        ],
+      ),
+    );
+  }
+}
+
 class _SessionTile extends StatelessWidget {
   const _SessionTile({
     required this.connection,
     required this.onOpen,
     required this.onToggle,
     required this.onEdit,
+    this.onShowPanelTaskStatus,
+    this.onRerunPanelTask,
     this.onCreatePanelTaskFromTemplate,
     required this.onDelete,
   });
@@ -4314,15 +4542,21 @@ class _SessionTile extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onToggle;
   final VoidCallback onEdit;
+  final VoidCallback? onShowPanelTaskStatus;
+  final VoidCallback? onRerunPanelTask;
   final VoidCallback? onCreatePanelTaskFromTemplate;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final taskFailed = _isPanelTaskFailed(connection.profile);
+    final statusLabel = _panelTaskStatusLabel(connection.profile);
     final borderColor = connection.isConnected
         ? colors.primary.withOpacity(0.72)
-        : const Color(0xff1f2937);
+        : taskFailed
+            ? colors.error.withOpacity(0.75)
+            : const Color(0xff1f2937);
     return InkWell(
       onTap: onOpen,
       mouseCursor: connection.isConnected
@@ -4336,7 +4570,9 @@ class _SessionTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           color: connection.isConnected
               ? colors.primary.withOpacity(0.10)
-              : const Color(0xff0f172a),
+              : taskFailed
+                  ? colors.error.withOpacity(0.08)
+                  : const Color(0xff0f172a),
           border: Border.all(color: borderColor),
         ),
         child: Row(
@@ -4359,10 +4595,14 @@ class _SessionTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    '${connection.profile.host}:${connection.profile.port}',
+                    statusLabel == null
+                        ? '${connection.profile.host}:${connection.profile.port}'
+                        : '${connection.profile.host}:${connection.profile.port} · $statusLabel',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: taskFailed ? colors.error : null,
+                        ),
                   ),
                   const SizedBox(height: 5),
                   Text(
@@ -4394,6 +4634,10 @@ class _SessionTile extends StatelessWidget {
               tooltip: '会话操作',
               onSelected: (action) {
                 switch (action) {
+                  case _SessionMenuAction.status:
+                    onShowPanelTaskStatus?.call();
+                  case _SessionMenuAction.rerun:
+                    onRerunPanelTask?.call();
                   case _SessionMenuAction.edit:
                     onEdit();
                   case _SessionMenuAction.createPanelTaskFromTemplate:
@@ -4403,6 +4647,18 @@ class _SessionTile extends StatelessWidget {
                 }
               },
               itemBuilder: (context) => <PopupMenuEntry<_SessionMenuAction>>[
+                if (onShowPanelTaskStatus != null)
+                  const PopupMenuItem<_SessionMenuAction>(
+                    value: _SessionMenuAction.status,
+                    child: Text('查看子任务状态/失败日志'),
+                  ),
+                if (onRerunPanelTask != null)
+                  const PopupMenuItem<_SessionMenuAction>(
+                    value: _SessionMenuAction.rerun,
+                    child: Text('重新运行子任务'),
+                  ),
+                if (onShowPanelTaskStatus != null || onRerunPanelTask != null)
+                  const PopupMenuDivider(),
                 const PopupMenuItem<_SessionMenuAction>(
                   value: _SessionMenuAction.edit,
                   child: Text('编辑'),
@@ -4434,7 +4690,42 @@ class _SessionTile extends StatelessWidget {
     if (connection.status == EmTaskConnectionStatus.error) {
       return '连接失败，点击连接重试';
     }
+    if (_isPanelTaskFailed(connection.profile)) {
+      return '服务端子任务失败，可在菜单查看日志/重跑';
+    }
     return '先连接，成功后可进入终端';
+  }
+
+  static bool _isPanelTaskFailed(EmTaskSessionProfile profile) {
+    return profile.panelTaskStatus == 'failed' ||
+        profile.panelTaskTerminalFaulted;
+  }
+
+  static String? _panelTaskStatusLabel(EmTaskSessionProfile profile) {
+    if (profile.panelId.trim().isEmpty &&
+        profile.panelTaskName.trim().isEmpty) {
+      return null;
+    }
+    switch (profile.panelTaskStatus) {
+      case 'running':
+        return '运行中';
+      case 'failed':
+        return '失败';
+      case 'exited':
+        return '已退出(${profile.panelTaskLastExitStatus})';
+      case 'pending':
+        return '等待启动';
+      case 'stopped':
+        return '已停止';
+      default:
+        if (profile.panelTaskTerminalRunning) {
+          return '运行中';
+        }
+        if (profile.panelTaskTerminalFaulted) {
+          return '失败';
+        }
+        return profile.panelTaskListenerOpen ? '监听中' : '状态未知';
+    }
   }
 }
 
@@ -5530,6 +5821,13 @@ class _ProfileDialogState extends State<_ProfileDialog> {
         panelTaskSyncWorkingDir:
             widget.isPanelSession ? _syncPanelWorkingDir : true,
         panelTaskSyncSftp: widget.isPanelSession ? _syncPanelSftp : true,
+        panelTaskStatus: original?.panelTaskStatus ?? 'unknown',
+        panelTaskStatusMessage: original?.panelTaskStatusMessage ?? '',
+        panelTaskFailureLog: original?.panelTaskFailureLog ?? '',
+        panelTaskListenerOpen: original?.panelTaskListenerOpen ?? false,
+        panelTaskTerminalRunning: original?.panelTaskTerminalRunning ?? false,
+        panelTaskTerminalFaulted: original?.panelTaskTerminalFaulted ?? false,
+        panelTaskLastExitStatus: original?.panelTaskLastExitStatus ?? 0,
       ),
     );
   }

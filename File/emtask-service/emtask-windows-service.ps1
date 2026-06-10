@@ -26,6 +26,17 @@
         -Force
 
 .EXAMPLE
+    # If .\emtask.exe and .\emtask.conf exist in the current directory, both paths can be omitted.
+    .\tools\emtask-windows-service.ps1 install `
+        -Force
+
+.EXAMPLE
+    # Run the service as the current Windows user. This prompts for the user's password.
+    .\tools\emtask-windows-service.ps1 install `
+        -CurrentUser `
+        -Force
+
+.EXAMPLE
     .\tools\emtask-windows-service.ps1 start
 
 .EXAMPLE
@@ -63,6 +74,8 @@ param(
     [string]$StartupType = 'Automatic',
 
     [System.Management.Automation.PSCredential]$Credential,
+
+    [switch]$CurrentUser,
 
     [switch]$Force,
 
@@ -103,14 +116,15 @@ Common options:
     -ServiceName <name>       Service name. Default: emtask
     -DisplayName <text>       Service display name.
     -Description <text>       Service description.
-    -EmtaskExe <path>         Path to emtask.exe. Required for install.
-    -Config <path>            Path to emtask.conf. Required for install.
+    -EmtaskExe <path>         Path to emtask.exe. If omitted, install tries .\emtask.exe in the current directory.
+    -Config <path>            Path to emtask.conf. If omitted, install tries .\emtask.conf in the current directory.
     -ServiceDir <path>        Service files directory. Default: %ProgramData%\emtask
     -LogDir <path>            Log directory. Default: <ServiceDir>\logs
     -WrapperExe <path>        Prebuilt wrapper exe. Default: script directory\emtask-service-wrapper.exe
     -WrapperSource <path>     Wrapper C# source. Default: script directory\emtask-service-wrapper.cs
     -StartupType <type>       Automatic, Manual, or Disabled. Default: Automatic
     -Credential <credential>  Service account credential.
+    -CurrentUser              Run the service as the current Windows user. Prompts for the user's password.
     -Force                    Replace an existing service during install.
     -RemoveFiles              Remove ServiceDir during uninstall.
     -CompileIfMissing         Compile wrapper if prebuilt exe is missing.
@@ -119,6 +133,8 @@ Common options:
 Examples:
     .\$scriptName build-wrapper
     .\$scriptName install -EmtaskExe .\emtask.exe -Config .\emtask.conf -Force
+    .\$scriptName install -Force
+    .\$scriptName install -CurrentUser -Force
     .\$scriptName start
     .\$scriptName status
     .\$scriptName uninstall -RemoveFiles
@@ -182,6 +198,41 @@ function Get-WrapperSourcePath {
         return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $WrapperSourceName))
     }
     return Resolve-FullPath $WrapperSource
+}
+
+function Get-EmtaskExePath {
+    if (-not [string]::IsNullOrWhiteSpace($EmtaskExe)) {
+        return Resolve-FullPath $EmtaskExe
+    }
+
+    $currentDirectoryExe = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) 'emtask.exe'))
+    if (Test-Path -LiteralPath $currentDirectoryExe -PathType Leaf) {
+        return $currentDirectoryExe
+    }
+
+    throw "Missing -EmtaskExe and emtask.exe was not found in the current directory: $(Get-Location)"
+}
+
+function Get-EmtaskConfigPath {
+    if (-not [string]::IsNullOrWhiteSpace($Config)) {
+        return Resolve-FullPath $Config
+    }
+
+    $currentDirectoryConfig = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) 'emtask.conf'))
+    if (Test-Path -LiteralPath $currentDirectoryConfig -PathType Leaf) {
+        return $currentDirectoryConfig
+    }
+
+    throw "Missing -Config and emtask.conf was not found in the current directory: $(Get-Location)"
+}
+
+function Get-CurrentUserCredential {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $userName = $identity.Name
+    if ([string]::IsNullOrWhiteSpace($userName)) {
+        throw 'Cannot determine the current Windows user name.'
+    }
+    return Get-Credential -UserName $userName -Message "Enter the Windows password for $userName to run the '$ServiceName' service."
 }
 
 function Get-CSharpCompiler {
@@ -287,15 +338,17 @@ function Stop-EmtaskService {
 function Install-EmtaskService {
     Assert-Administrator
 
-    if ([string]::IsNullOrWhiteSpace($EmtaskExe)) {
-        throw 'Missing -EmtaskExe. Provide the full path to emtask.exe.'
-    }
-    if ([string]::IsNullOrWhiteSpace($Config)) {
-        throw 'Missing -Config. Provide the full path to emtask.conf.'
+    if ($CurrentUser -and $Credential) {
+        throw 'Use either -CurrentUser or -Credential, not both.'
     }
 
-    $exePath = Resolve-FullPath $EmtaskExe
-    $configPath = Resolve-FullPath $Config
+    $serviceCredential = $Credential
+    if ($CurrentUser) {
+        $serviceCredential = Get-CurrentUserCredential
+    }
+
+    $exePath = Get-EmtaskExePath
+    $configPath = Get-EmtaskConfigPath
     $sourceWrapperExe = Get-WrapperExePath
     $sourceWrapperSource = Get-WrapperSourcePath
     $serviceRoot = Resolve-FullPath $ServiceDir
@@ -357,8 +410,8 @@ function Install-EmtaskService {
         DisplayName = $DisplayName
         StartupType = $StartupType
     }
-    if ($Credential) {
-        $newServiceParams.Credential = $Credential
+    if ($serviceCredential) {
+        $newServiceParams.Credential = $serviceCredential
     }
 
     New-Service @newServiceParams | Out-Null
@@ -366,6 +419,11 @@ function Install-EmtaskService {
     & sc.exe failure $ServiceName reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
     Write-Host "Installed service: $ServiceName"
+    if ($serviceCredential) {
+        Write-Host "Run as: $($serviceCredential.UserName)"
+    } else {
+        Write-Host 'Run as: LocalSystem'
+    }
     Write-Host "Wrapper: $wrapperExe"
     Write-Host "Wrapper config: $wrapperConfig"
     Write-Host "Logs: $runtimeLogDir"

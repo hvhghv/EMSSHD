@@ -37,8 +37,10 @@ static int emtask_panel_tasks_db_delete(const emtask_global_config_t *global, co
 static int emtask_panel_create_task_from_json(emtask_app_t *app, const char *json, char *out, size_t out_capacity);
 static int emtask_panel_update_task_from_json(emtask_app_t *app, const char *task_name, const char *json, char *out, size_t out_capacity);
 static int emtask_panel_delete_task_by_name(emtask_app_t *app, const char *task_name, char *out, size_t out_capacity);
+static int emtask_panel_restart_task_by_name(emtask_app_t *app, const char *task_name, char *out, size_t out_capacity);
 static int emtask_task_init(emtask_app_t *app, emtask_task_t *task, const emtask_task_config_t *config);
 static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task);
+static int emtask_term_restart_manual(emtask_term_t *term);
 
 static const ssh_net_api_t g_emtask_net_api = {
     emtask_net_read,
@@ -59,6 +61,31 @@ void emtask_logf(const char *fmt, ...)
     (void)vfprintf(stderr, fmt, args);
     (void)fprintf(stderr, "\n");
     va_end(args);
+}
+
+static void emtask_term_clear_last_error_locked(emtask_term_t *term)
+{
+    if (term == NULL) {
+        return;
+    }
+    term->last_error[0] = '\0';
+    term->last_error_status = 0u;
+    term->last_error_ms = 0u;
+}
+
+static void emtask_term_set_last_error_locked(emtask_term_t *term, int status, const char *fmt, ...)
+{
+    va_list args;
+
+    if (term == NULL || fmt == NULL) {
+        return;
+    }
+    va_start(args, fmt);
+    (void)vsnprintf(term->last_error, sizeof(term->last_error), fmt, args);
+    va_end(args);
+    term->last_error[sizeof(term->last_error) - 1u] = '\0';
+    term->last_error_status = status;
+    term->last_error_ms = emtask_platform_monotonic_ms();
 }
 
 static int emtask_copy_text(char *dst, size_t dst_capacity, const char *src)
@@ -3849,13 +3876,20 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     int term_running;
     int term_attached;
     int term_faulted;
+    int term_exited;
+    int term_started_once;
     uint32_t last_exit_status;
+    int last_error_status;
     uint32_t cols;
     uint32_t rows;
     uint32_t screen_cols;
     uint32_t screen_rows;
     size_t replay_len;
     size_t replay_capacity;
+    uint64_t last_error_ms;
+    char last_error[EMTASK_MAX_TEXT];
+    const char *task_status;
+    const char *task_status_message;
 
     if (json == NULL || task == NULL) {
         return;
@@ -3870,19 +3904,29 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     term_running = 0;
     term_attached = 0;
     term_faulted = 0;
+    term_exited = 0;
+    term_started_once = 0;
     last_exit_status = 0u;
+    last_error_status = 0u;
     cols = 0u;
     rows = 0u;
     screen_cols = 0u;
     screen_rows = 0u;
     replay_len = 0u;
     replay_capacity = 0u;
+    last_error_ms = 0u;
+    last_error[0] = '\0';
     emtask_mutex_lock(&task->term.lock);
     term_initialized = task->term.initialized;
     term_running = task->term.running;
     term_attached = task->term.attached;
     term_faulted = task->term.faulted;
+    term_exited = task->term.exited;
+    term_started_once = task->term.started_once;
     last_exit_status = task->term.last_exit_status;
+    last_error_status = task->term.last_error_status;
+    last_error_ms = task->term.last_error_ms;
+    (void)snprintf(last_error, sizeof(last_error), "%s", task->term.last_error);
     cols = task->term.cols;
     rows = task->term.rows;
     screen_cols = task->term.screen_cols;
@@ -3890,6 +3934,23 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     replay_len = task->term.replay_len;
     replay_capacity = task->term.replay_capacity;
     emtask_mutex_unlock(&task->term.lock);
+
+    if (term_faulted) {
+        task_status = "failed";
+        task_status_message = "task command failed; rerun is required";
+    } else if (term_running) {
+        task_status = "running";
+        task_status_message = "task command is running";
+    } else if (term_exited) {
+        task_status = "exited";
+        task_status_message = "task command exited";
+    } else if (term_initialized && !term_started_once) {
+        task_status = "pending";
+        task_status_message = "task command has not started yet";
+    } else {
+        task_status = "stopped";
+        task_status_message = "task command is stopped";
+    }
 
     emtask_panel_appendf(json, "{");
     emtask_panel_appendf(json, "\"name\":");
@@ -3906,21 +3967,31 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     emtask_panel_appendf(json, ",\"restart_limit\":%u", task->config.restart_limit);
     emtask_panel_appendf(json, ",\"restart_window_sec\":%u", task->config.restart_window_sec);
     emtask_panel_appendf(json, ",\"listener_open\":%s", task->listener_open ? "true" : "false");
+    emtask_panel_appendf(json, ",\"status\":");
+    emtask_panel_append_json_string(json, task_status);
+    emtask_panel_appendf(json, ",\"status_message\":");
+    emtask_panel_append_json_string(json, task_status_message);
     emtask_panel_appendf(json, ",\"session\":{\"terminal_active\":%s}", session_active ? "true" : "false");
     emtask_panel_appendf(
         json,
-        ",\"terminal\":{\"initialized\":%s,\"running\":%s,\"attached\":%s,\"faulted\":%s,\"last_exit_status\":%u,\"cols\":%u,\"rows\":%u,\"screen_cols\":%u,\"screen_rows\":%u,\"replay_len\":%u,\"replay_capacity\":%u}",
+        ",\"terminal\":{\"initialized\":%s,\"running\":%s,\"attached\":%s,\"faulted\":%s,\"exited\":%s,\"started_once\":%s,\"last_exit_status\":%u,\"last_error_status\":%d,\"last_error_ms\":%llu,\"cols\":%u,\"rows\":%u,\"screen_cols\":%u,\"screen_rows\":%u,\"replay_len\":%u,\"replay_capacity\":%u,\"last_error\":",
         term_initialized ? "true" : "false",
         term_running ? "true" : "false",
         term_attached ? "true" : "false",
         term_faulted ? "true" : "false",
+        term_exited ? "true" : "false",
+        term_started_once ? "true" : "false",
         (unsigned)last_exit_status,
+        last_error_status,
+        (unsigned long long)last_error_ms,
         (unsigned)cols,
         (unsigned)rows,
         (unsigned)screen_cols,
         (unsigned)screen_rows,
         (unsigned)replay_len,
         (unsigned)replay_capacity);
+    emtask_panel_append_json_string(json, last_error);
+    emtask_panel_appendf(json, "}");
     emtask_panel_appendf(json, "}");
 }
 
@@ -4628,6 +4699,54 @@ static int emtask_panel_delete_task_by_name(emtask_app_t *app, const char *task_
     return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
 }
 
+static int emtask_panel_restart_task_by_name(emtask_app_t *app, const char *task_name, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t response;
+    emtask_task_t *task;
+    size_t i;
+    int restart_status;
+
+    if (app == NULL || task_name == NULL || task_name[0] == '\0' || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!app->task_lock_initialized) {
+        return SSH_ERR_PLATFORM;
+    }
+
+    emtask_mutex_lock(&app->task_lock);
+    task = NULL;
+    for (i = 0u; i < app->task_count; ++i) {
+        if (app->tasks[i].initialized && !app->tasks[i].deleted && emtask_key_equals(app->tasks[i].config.name, task_name)) {
+            task = &app->tasks[i];
+            break;
+        }
+    }
+    if (task == NULL) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_NOT_FOUND;
+    }
+    if (task->worker_count != 0u) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_READ_ONLY;
+    }
+
+    restart_status = emtask_term_restart_manual(&task->term);
+    if (restart_status == SSH_OK) {
+        emtask_logf("dynamic task %s rerun requested from panel", task_name);
+    } else {
+        emtask_logf("dynamic task %s rerun failed from panel: %s", task_name, ssh_status_string(restart_status));
+    }
+
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(&response, "{\"rerun\":%s,\"restart_status\":", restart_status == SSH_OK ? "true" : "false");
+    emtask_panel_append_json_string(&response, ssh_status_string(restart_status));
+    emtask_panel_appendf(&response, ",\"task\":");
+    emtask_panel_append_task_json(&response, task);
+    emtask_panel_appendf(&response, "}\n");
+    emtask_mutex_unlock(&app->task_lock);
+    return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
+}
+
 static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, char *out, size_t out_capacity)
 {
     emtask_panel_buffer_t json;
@@ -4814,6 +4933,24 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "{\"error\":\"unauthorized\"}\n");
     }
     if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/tasks/restart") == 0 || strcmp(path, "/tasks/rerun") == 0) {
+            char task_name[EMTASK_MAX_TASK_NAME];
+
+            if (!emtask_panel_query_value(query, "name", task_name, sizeof(task_name)) || task_name[0] == '\0') {
+                return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"missing_task_name\"}\n");
+            }
+            status = emtask_panel_restart_task_by_name(app, task_name, response_body, sizeof(response_body));
+            if (status == SSH_OK) {
+                return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", response_body);
+            }
+            if (status == SSH_ERR_NOT_FOUND) {
+                return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"task_not_found\"}\n");
+            }
+            if (status == SSH_ERR_READ_ONLY) {
+                return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_in_use\"}\n");
+            }
+            return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"rerun_task_failed\"}\n");
+        }
         if (strcmp(path, "/tasks") != 0) {
             return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
         }
@@ -4911,6 +5048,7 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "<li>POST /tasks 添加动态子任务</li>"
             "<li>PATCH /tasks?name=&lt;task&gt; 修改动态子任务</li>"
             "<li>DELETE /tasks?name=&lt;task&gt; 删除动态子任务</li>"
+            "<li>POST /tasks/restart?name=&lt;task&gt; 重新运行子任务命令</li>"
             "<li><a href=\"/health\">/health</a></li>"
             "</ul></body></html>\n");
     }
@@ -5116,6 +5254,12 @@ static int emtask_term_note_restart_locked(emtask_term_t *term)
     emtask_term_prune_restart_locked(term, now_ms);
     if (term->restart_history_len >= term->restart_limit) {
         term->faulted = 1;
+        emtask_term_set_last_error_locked(
+            term,
+            SSH_ERR_UNSUPPORTED,
+            "restart limit reached for command: %u restarts within %llu ms",
+            term->restart_limit,
+            (unsigned long long)term->restart_window_ms);
         emtask_logf(
             "restart limit reached for command: %u restarts within %llu ms",
             term->restart_limit,
@@ -5152,9 +5296,16 @@ static int emtask_term_spawn_locked(emtask_term_t *term, int count_as_restart)
     if (status == SSH_OK) {
         term->exited = 0;
         term->interrupt_restart_deadline_ms = 0u;
+        emtask_term_clear_last_error_locked(term);
         emtask_logf("started task command: %s", term->command);
     } else {
         term->faulted = 1;
+        emtask_term_set_last_error_locked(
+            term,
+            status,
+            "failed to start task command: %s (%s)",
+            term->command,
+            ssh_status_string(status));
         emtask_logf("failed to start task command: %s", term->command);
     }
     return status;
@@ -5253,6 +5404,29 @@ static int emtask_term_start_initial(emtask_term_t *term)
     return status;
 }
 
+static int emtask_term_restart_manual(emtask_term_t *term)
+{
+    int status;
+
+    if (term == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    emtask_mutex_lock(&term->lock);
+    if (!term->initialized) {
+        emtask_mutex_unlock(&term->lock);
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    term->faulted = 0;
+    term->exited = 0;
+    term->interrupt_restart_deadline_ms = 0u;
+    term->restart_history_len = 0u;
+    emtask_term_close_handles_locked(term, 1);
+    status = emtask_term_spawn_locked(term, 0);
+    emtask_mutex_unlock(&term->lock);
+    return status;
+}
+
 static int emtask_term_watchdog_step_locked(emtask_term_t *term)
 {
     int exited;
@@ -5277,6 +5451,12 @@ static int emtask_term_watchdog_step_locked(emtask_term_t *term)
         return SSH_OK;
     }
     term->faulted = 1;
+    emtask_term_set_last_error_locked(
+        term,
+        exit_status,
+        "task command stopped after exit status=%u; restart failed: %s",
+        exit_status,
+        ssh_status_string(status));
     emtask_logf("task command stopped after exit status=%u", exit_status);
     return SSH_OK;
 }
@@ -6864,10 +7044,7 @@ static int emtask_task_init(emtask_app_t *app, emtask_task_t *task, const emtask
     }
     status = emtask_term_start_initial(&task->term);
     if (status != SSH_OK) {
-        emtask_logf("task %s command start failed: %s", task->config.name, ssh_status_string(status));
-        emtask_term_deinit(&task->term);
-        emtask_session_manager_deinit(&task->session_manager);
-        return status;
+        emtask_logf("task %s command start failed; task will stay available for manual rerun: %s", task->config.name, ssh_status_string(status));
     }
     status = emtask_task_open_listener(task);
     if (status != SSH_OK) {

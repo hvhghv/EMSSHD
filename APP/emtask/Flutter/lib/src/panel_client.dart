@@ -17,9 +17,22 @@ class EmTaskPanelTask {
     required this.workingDir,
     required this.useSftp,
     required this.listenerOpen,
+    required this.status,
+    required this.statusMessage,
+    required this.failureLog,
+    required this.terminalRunning,
+    required this.terminalFaulted,
+    required this.lastExitStatus,
   });
 
   factory EmTaskPanelTask.fromJson(Map<String, Object?> json) {
+    final terminal = json['terminal'];
+    final terminalJson =
+        terminal is Map<String, Object?> ? terminal : const <String, Object?>{};
+    final listenerOpen = json['listener_open'] as bool? ?? false;
+    final terminalRunning = terminalJson['running'] as bool? ?? false;
+    final terminalFaulted = terminalJson['faulted'] as bool? ?? false;
+    final terminalExited = terminalJson['exited'] as bool? ?? false;
     return EmTaskPanelTask(
       name: json['name'] as String? ?? 'task',
       listenAddress: json['listen_address'] as String? ?? '0.0.0.0',
@@ -27,7 +40,19 @@ class EmTaskPanelTask {
       command: json['command'] as String? ?? '',
       workingDir: json['working_dir'] as String? ?? '.',
       useSftp: json['use_sftp'] as bool? ?? false,
-      listenerOpen: json['listener_open'] as bool? ?? false,
+      listenerOpen: listenerOpen,
+      status: json['status'] as String? ??
+          _inferStatus(
+            listenerOpen: listenerOpen,
+            terminalRunning: terminalRunning,
+            terminalFaulted: terminalFaulted,
+            terminalExited: terminalExited,
+          ),
+      statusMessage: json['status_message'] as String? ?? '',
+      failureLog: terminalJson['last_error'] as String? ?? '',
+      terminalRunning: terminalRunning,
+      terminalFaulted: terminalFaulted,
+      lastExitStatus: terminalJson['last_exit_status'] as int? ?? 0,
     );
   }
 
@@ -38,6 +63,30 @@ class EmTaskPanelTask {
   final String workingDir;
   final bool useSftp;
   final bool listenerOpen;
+  final String status;
+  final String statusMessage;
+  final String failureLog;
+  final bool terminalRunning;
+  final bool terminalFaulted;
+  final int lastExitStatus;
+
+  static String _inferStatus({
+    required bool listenerOpen,
+    required bool terminalRunning,
+    required bool terminalFaulted,
+    required bool terminalExited,
+  }) {
+    if (terminalFaulted) {
+      return 'failed';
+    }
+    if (terminalRunning) {
+      return 'running';
+    }
+    if (terminalExited) {
+      return 'exited';
+    }
+    return listenerOpen ? 'stopped' : 'pending';
+  }
 }
 
 class EmTaskPanelCreateTaskRequest {
@@ -344,6 +393,57 @@ class EmTaskPanelClient {
     }
   }
 
+  Future<EmTaskSessionProfile> rerunTask(
+    EmTaskPanelProfile panel,
+    String taskName,
+  ) async {
+    final normalizedName = taskName.trim();
+    if (normalizedName.isEmpty) {
+      throw StateError('缺少要重新运行的子任务名称。');
+    }
+
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final uri = panel.tasksUri.replace(
+        path: '/tasks/restart',
+        queryParameters: <String, String>{'name': normalizedName},
+      );
+      final request = await client.postUrl(uri).timeout(timeout);
+      _addAuthHeaders(request, panel);
+      request.contentLength = 0;
+      final response = await request.close().timeout(timeout);
+      final responseBody =
+          await utf8.decoder.bind(response).join().timeout(timeout);
+      if (response.statusCode == HttpStatus.unauthorized) {
+        throw StateError('面板鉴权失败（HTTP 401）：请重新检查 Token/OTP。');
+      }
+      if (response.statusCode == HttpStatus.notFound) {
+        throw StateError('服务端没有找到动态子任务 “$normalizedName”。');
+      }
+      if (response.statusCode == HttpStatus.conflict) {
+        throw StateError('子任务 “$normalizedName” 正在使用中，请先断开连接后再重新运行。');
+      }
+      if (response.statusCode != HttpStatus.ok) {
+        throw StateError('重新运行子任务失败：HTTP ${response.statusCode} $responseBody');
+      }
+
+      final decoded = jsonDecode(responseBody);
+      if (decoded is! Map<String, Object?>) {
+        throw StateError('面板返回不是 JSON 对象。');
+      }
+      final taskJson = decoded['task'];
+      if (taskJson is! Map<String, Object?>) {
+        throw StateError('面板返回中没有 task 对象。');
+      }
+      final panelTask = EmTaskPanelTask.fromJson(taskJson);
+      return _sessionFromTask(panel, panelTask);
+    } on TimeoutException catch (error) {
+      throw StateError('连接面板超时：${panel.host}:${panel.port}，$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   static void _addAuthHeaders(
     HttpClientRequest request,
     EmTaskPanelProfile panel,
@@ -389,6 +489,13 @@ class EmTaskPanelClient {
       panelTaskSyncCommand: true,
       panelTaskSyncWorkingDir: true,
       panelTaskSyncSftp: true,
+      panelTaskStatus: task.status,
+      panelTaskStatusMessage: task.statusMessage,
+      panelTaskFailureLog: task.failureLog,
+      panelTaskListenerOpen: task.listenerOpen,
+      panelTaskTerminalRunning: task.terminalRunning,
+      panelTaskTerminalFaulted: task.terminalFaulted,
+      panelTaskLastExitStatus: task.lastExitStatus,
     );
   }
 

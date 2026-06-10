@@ -446,6 +446,13 @@ class EmTaskSessionProfile {
     required this.panelTaskSyncCommand,
     required this.panelTaskSyncWorkingDir,
     required this.panelTaskSyncSftp,
+    this.panelTaskStatus = 'unknown',
+    this.panelTaskStatusMessage = '',
+    this.panelTaskFailureLog = '',
+    this.panelTaskListenerOpen = false,
+    this.panelTaskTerminalRunning = false,
+    this.panelTaskTerminalFaulted = false,
+    this.panelTaskLastExitStatus = 0,
   });
 
   factory EmTaskSessionProfile.defaults({
@@ -470,6 +477,13 @@ class EmTaskSessionProfile {
     bool panelTaskSyncCommand = true,
     bool panelTaskSyncWorkingDir = true,
     bool panelTaskSyncSftp = true,
+    String panelTaskStatus = 'unknown',
+    String panelTaskStatusMessage = '',
+    String panelTaskFailureLog = '',
+    bool panelTaskListenerOpen = false,
+    bool panelTaskTerminalRunning = false,
+    bool panelTaskTerminalFaulted = false,
+    int panelTaskLastExitStatus = 0,
   }) {
     return EmTaskSessionProfile(
       id: id,
@@ -493,6 +507,13 @@ class EmTaskSessionProfile {
       panelTaskSyncCommand: panelTaskSyncCommand,
       panelTaskSyncWorkingDir: panelTaskSyncWorkingDir,
       panelTaskSyncSftp: panelTaskSyncSftp,
+      panelTaskStatus: panelTaskStatus,
+      panelTaskStatusMessage: panelTaskStatusMessage,
+      panelTaskFailureLog: panelTaskFailureLog,
+      panelTaskListenerOpen: panelTaskListenerOpen,
+      panelTaskTerminalRunning: panelTaskTerminalRunning,
+      panelTaskTerminalFaulted: panelTaskTerminalFaulted,
+      panelTaskLastExitStatus: panelTaskLastExitStatus,
     );
   }
 
@@ -519,6 +540,15 @@ class EmTaskSessionProfile {
       panelTaskSyncCommand: json['panelTaskSyncCommand'] as bool? ?? true,
       panelTaskSyncWorkingDir: json['panelTaskSyncWorkingDir'] as bool? ?? true,
       panelTaskSyncSftp: json['panelTaskSyncSftp'] as bool? ?? true,
+      panelTaskStatus: json['panelTaskStatus'] as String? ?? 'unknown',
+      panelTaskStatusMessage: json['panelTaskStatusMessage'] as String? ?? '',
+      panelTaskFailureLog: json['panelTaskFailureLog'] as String? ?? '',
+      panelTaskListenerOpen: json['panelTaskListenerOpen'] as bool? ?? false,
+      panelTaskTerminalRunning:
+          json['panelTaskTerminalRunning'] as bool? ?? false,
+      panelTaskTerminalFaulted:
+          json['panelTaskTerminalFaulted'] as bool? ?? false,
+      panelTaskLastExitStatus: json['panelTaskLastExitStatus'] as int? ?? 0,
     );
   }
 
@@ -543,6 +573,13 @@ class EmTaskSessionProfile {
   final bool panelTaskSyncCommand;
   final bool panelTaskSyncWorkingDir;
   final bool panelTaskSyncSftp;
+  final String panelTaskStatus;
+  final String panelTaskStatusMessage;
+  final String panelTaskFailureLog;
+  final bool panelTaskListenerOpen;
+  final bool panelTaskTerminalRunning;
+  final bool panelTaskTerminalFaulted;
+  final int panelTaskLastExitStatus;
 
   bool get hasPrivateKey => privateKeyPath.trim().isNotEmpty;
 
@@ -569,6 +606,13 @@ class EmTaskSessionProfile {
       'panelTaskSyncCommand': panelTaskSyncCommand,
       'panelTaskSyncWorkingDir': panelTaskSyncWorkingDir,
       'panelTaskSyncSftp': panelTaskSyncSftp,
+      'panelTaskStatus': panelTaskStatus,
+      'panelTaskStatusMessage': panelTaskStatusMessage,
+      'panelTaskFailureLog': panelTaskFailureLog,
+      'panelTaskListenerOpen': panelTaskListenerOpen,
+      'panelTaskTerminalRunning': panelTaskTerminalRunning,
+      'panelTaskTerminalFaulted': panelTaskTerminalFaulted,
+      'panelTaskLastExitStatus': panelTaskLastExitStatus,
     };
   }
 
@@ -596,6 +640,13 @@ class EmTaskSessionProfile {
     bool? panelTaskSyncCommand,
     bool? panelTaskSyncWorkingDir,
     bool? panelTaskSyncSftp,
+    String? panelTaskStatus,
+    String? panelTaskStatusMessage,
+    String? panelTaskFailureLog,
+    bool? panelTaskListenerOpen,
+    bool? panelTaskTerminalRunning,
+    bool? panelTaskTerminalFaulted,
+    int? panelTaskLastExitStatus,
   }) {
     return EmTaskSessionProfile(
       id: id ?? this.id,
@@ -620,6 +671,18 @@ class EmTaskSessionProfile {
       panelTaskSyncWorkingDir:
           panelTaskSyncWorkingDir ?? this.panelTaskSyncWorkingDir,
       panelTaskSyncSftp: panelTaskSyncSftp ?? this.panelTaskSyncSftp,
+      panelTaskStatus: panelTaskStatus ?? this.panelTaskStatus,
+      panelTaskStatusMessage:
+          panelTaskStatusMessage ?? this.panelTaskStatusMessage,
+      panelTaskFailureLog: panelTaskFailureLog ?? this.panelTaskFailureLog,
+      panelTaskListenerOpen:
+          panelTaskListenerOpen ?? this.panelTaskListenerOpen,
+      panelTaskTerminalRunning:
+          panelTaskTerminalRunning ?? this.panelTaskTerminalRunning,
+      panelTaskTerminalFaulted:
+          panelTaskTerminalFaulted ?? this.panelTaskTerminalFaulted,
+      panelTaskLastExitStatus:
+          panelTaskLastExitStatus ?? this.panelTaskLastExitStatus,
     );
   }
 
