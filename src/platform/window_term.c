@@ -434,6 +434,39 @@ static int emtask_write_conpty_virtual_key(HANDLE handle, WORD virtual_key, DWOR
     return emtask_write_conpty_key_event(handle, virtual_key, scan_code, 0u, 0, control_state);
 }
 
+static int emtask_write_conpty_ctrl_letter(HANDLE handle, uint8_t control_ch)
+{
+    WORD virtual_key;
+    WORD scan_code;
+    WCHAR char_code;
+    int status;
+
+    if (handle == NULL || control_ch < 1u || control_ch > 26u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    virtual_key = (WORD)(L'A' + (WORD)control_ch - 1u);
+    scan_code = (WORD)MapVirtualKeyW((UINT)virtual_key, MAPVK_VK_TO_VSC);
+    char_code = (WCHAR)control_ch;
+    status = emtask_write_conpty_key_event(
+        handle,
+        virtual_key,
+        scan_code,
+        (WORD)char_code,
+        1,
+        LEFT_CTRL_PRESSED);
+    if (status != SSH_OK) {
+        return status;
+    }
+    return emtask_write_conpty_key_event(
+        handle,
+        virtual_key,
+        scan_code,
+        0u,
+        0,
+        LEFT_CTRL_PRESSED);
+}
+
 static DWORD emtask_conpty_csi_modifier_to_control_state(unsigned modifier)
 {
     DWORD control_state = 0u;
@@ -517,14 +550,10 @@ static int emtask_try_write_conpty_vt_key_sequence(
         *consumed_len = 1u;
         return emtask_write_conpty_virtual_key(handle, VK_BACK, 0u);
     }
-    if (buf[0] >= 1u && buf[0] <= 26u) {
-        WCHAR ch = (WCHAR)(L'a' + (WCHAR)buf[0] - 1u);
-        SHORT vk_state = VkKeyScanW(ch);
-        WORD vk = vk_state != (SHORT)-1 ? (WORD)(vk_state & 0xff) : 0u;
-        if (vk != 0u) {
-            *consumed_len = 1u;
-            return emtask_write_conpty_codepoint(handle, (WCHAR)buf[0]);
-        }
+    if (buf[0] >= 1u && buf[0] <= 26u &&
+        buf[0] != '\b' && buf[0] != '\t' && buf[0] != '\n' && buf[0] != '\r') {
+        *consumed_len = 1u;
+        return emtask_write_conpty_ctrl_letter(handle, buf[0]);
     }
     if (buf[0] != 0x1bu) {
         return SSH_ERR_NOT_FOUND;

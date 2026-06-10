@@ -74,10 +74,18 @@ option(EMSSH_MBEDTLS_CLASSIC_LAYOUT "Use Mbed TLS classic layout (2.x/3.x with l
 set(EMSSH_MBEDTLS_CLASSIC_SOURCE_DIR "${_emssh_default_mbedtls_classic_source}" CACHE PATH "Path to Mbed TLS classic source tree (must contain include/ and library/)")
 
 set(_emssh_default_mbedtls_legacy_config "")
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/File/mbedtls-legacy/mbedtls_config_port.h")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/APP/emtask/mbedtls_config_port.h")
+    set(_emssh_default_mbedtls_legacy_config "${CMAKE_CURRENT_SOURCE_DIR}/APP/emtask/mbedtls_config_port.h")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/File/mbedtls-legacy/mbedtls_config_port.h")
     set(_emssh_default_mbedtls_legacy_config "${CMAKE_CURRENT_SOURCE_DIR}/File/mbedtls-legacy/mbedtls_config_port.h")
 endif()
 set(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE "${_emssh_default_mbedtls_legacy_config}" CACHE FILEPATH "Legacy mbedTLS config header file used by EMSSH_MBEDTLS_LEGACY_EMBED_CORE")
+if(_emssh_default_mbedtls_legacy_config AND
+   EMSSH_MBEDTLS_LEGACY_CONFIG_FILE AND
+   NOT EXISTS "${EMSSH_MBEDTLS_LEGACY_CONFIG_FILE}")
+    message(STATUS "EMSSH_MBEDTLS_LEGACY_CONFIG_FILE not found; using ${_emssh_default_mbedtls_legacy_config}")
+    set(EMSSH_MBEDTLS_LEGACY_CONFIG_FILE "${_emssh_default_mbedtls_legacy_config}" CACHE FILEPATH "Legacy mbedTLS config header file used by EMSSH_MBEDTLS_LEGACY_EMBED_CORE" FORCE)
+endif()
 
 if(EMSSH_MBEDTLS_CLASSIC_LAYOUT)
     if(NOT EMSSH_USE_MBEDTLS)
@@ -544,7 +552,7 @@ if(EMSSH_BUILD_EXAMPLES)
             target_link_libraries(emtask PRIVATE advapi32)
         else()
             find_package(Threads REQUIRED)
-            target_link_libraries(emtask PRIVATE Threads::Threads util)
+            target_link_libraries(emtask PRIVATE Threads::Threads util ${CMAKE_DL_LIBS})
         endif()
     endif()
 endif()

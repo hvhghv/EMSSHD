@@ -5,8 +5,12 @@ password = emtask
 # authorized_keys_file = authorized_keys
 # timeout_ms = 30000
 # max_workers = 16
+# Bind retry is enabled by default. Useful when a configured NIC/IP appears later.
+# Retry interval grows as 1, 2, 4, 8, ... seconds and is capped by bind_retry_max_sec.
+# bind_retry = true
+# bind_retry_max_sec = 300
 # auth_backend = internal
-# Read-only HTTP/JSON panel. Enabled by default; keep bound to 127.0.0.1 unless protected externally.
+# HTTP/JSON panel. Enabled by default; keep bound to 127.0.0.1 unless protected externally.
 # panel_enabled = true
 # panel_listen_address = 127.0.0.1
 # panel_port = 6024
@@ -18,12 +22,17 @@ password = emtask
 # When token/OTP is enabled, emtask loads them from this separate key file.
 # If the key file is missing or lacks required keys, random values are generated and saved.
 # panel_auth_file = emtask_panel_auth.keys
+# Flutter 面板动态添加的子任务会保存到 SQLite；没有 [task ...] 时也可只启动面板后再添加。
+# panel_tasks_db_file = emtask_tasks.sqlite3
 # Key file format:
 #   panel_token = <random-token>
 #   panel_otp_secret = <base32-totp-secret>
-# If token/OTP is enabled, emtask creates this SVG QR file when it is missing.
+# If token/OTP is enabled, emtask creates this SVG QR file for client import.
 # It embeds token/OTP material and should be protected like a password.
 # panel_qr_file = emtask_panel_connect.svg
+# panel_qr_mode = always      # default: overwrite/regenerate on every start
+# panel_qr_mode = if_missing  # preserve existing file; create only when missing
+# panel_qr_mode = disabled    # do not generate QR file
 # panel_qr_host = 127.0.0.1
 # panel_otp_digits = 6
 # panel_otp_step_sec = 60

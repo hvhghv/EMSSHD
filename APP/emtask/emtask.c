@@ -21,14 +21,24 @@ typedef ssh_crypto_context_mbedtls_legacy_t emtask_crypto_context_t;
 #define EMTASK_QR_ECC_CODEWORDS 18u
 #define EMTASK_QR_BLOCK_COUNT 4u
 #define EMTASK_QR_PAYLOAD_MAX 512u
+#define EMTASK_TERMINAL_RESTART_GRACE_MS 5000u
 
 static int emtask_net_read(void *ctx, void *conn, uint8_t *buf, size_t len, uint32_t timeout_ms);
 static int emtask_net_write(void *ctx, void *conn, const uint8_t *buf, size_t len, uint32_t timeout_ms);
 static int emtask_net_close(void *ctx, void *conn);
-static int emtask_start_panel_thread(emtask_app_t *app);
 static int emtask_panel_decode_base32_secret(const char *text, uint8_t *out, size_t out_capacity, size_t *out_len);
 static int emtask_panel_materialize_auth(emtask_config_t *config);
 static int emtask_panel_materialize_qr(const emtask_config_t *config);
+static int emtask_panel_tasks_db_check_runtime(const emtask_global_config_t *global);
+static int emtask_panel_tasks_db_load(emtask_config_t *config);
+static int emtask_panel_tasks_db_insert(const emtask_global_config_t *global, const emtask_task_config_t *task);
+static int emtask_panel_tasks_db_update(const emtask_global_config_t *global, const char *old_task_name, const emtask_task_config_t *task);
+static int emtask_panel_tasks_db_delete(const emtask_global_config_t *global, const char *task_name);
+static int emtask_panel_create_task_from_json(emtask_app_t *app, const char *json, char *out, size_t out_capacity);
+static int emtask_panel_update_task_from_json(emtask_app_t *app, const char *task_name, const char *json, char *out, size_t out_capacity);
+static int emtask_panel_delete_task_by_name(emtask_app_t *app, const char *task_name, char *out, size_t out_capacity);
+static int emtask_task_init(emtask_app_t *app, emtask_task_t *task, const emtask_task_config_t *config);
+static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task);
 
 static const ssh_net_api_t g_emtask_net_api = {
     emtask_net_read,
@@ -239,12 +249,19 @@ static void emtask_config_defaults(emtask_config_t *config)
         sizeof(config->global.panel_qr_file),
         EMTASK_DEFAULT_PANEL_QR_FILE);
     (void)emtask_copy_text(
+        config->global.panel_tasks_db_file,
+        sizeof(config->global.panel_tasks_db_file),
+        EMTASK_DEFAULT_PANEL_TASKS_DB_FILE);
+    (void)emtask_copy_text(
         config->global.panel_qr_host,
         sizeof(config->global.panel_qr_host),
         EMTASK_DEFAULT_PANEL_QR_HOST);
+    config->global.panel_qr_mode = EMTASK_PANEL_QR_ALWAYS;
     config->global.panel_otp_digits = EMTASK_DEFAULT_PANEL_OTP_DIGITS;
     config->global.panel_otp_step_sec = EMTASK_DEFAULT_PANEL_OTP_STEP_SEC;
     config->global.panel_otp_window = EMTASK_DEFAULT_PANEL_OTP_WINDOW;
+    config->global.bind_retry_enabled = 1;
+    config->global.bind_retry_max_sec = EMTASK_DEFAULT_BIND_RETRY_MAX_SEC;
 }
 
 static void emtask_extract_dirname(const char *path, char out[EMTASK_MAX_PATH])
@@ -364,6 +381,44 @@ static int emtask_parse_panel_auth(const char *value, unsigned *auth_out)
     return SSH_ERR_INVALID_ARGUMENT;
 }
 
+static int emtask_parse_panel_qr_mode(const char *value, emtask_panel_qr_mode_t *mode_out)
+{
+    if (value == NULL || mode_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_key_equals(value, "none") ||
+        emtask_key_equals(value, "off") ||
+        emtask_key_equals(value, "no") ||
+        emtask_key_equals(value, "false") ||
+        emtask_key_equals(value, "0") ||
+        emtask_key_equals(value, "never") ||
+        emtask_key_equals(value, "disabled")) {
+        *mode_out = EMTASK_PANEL_QR_DISABLED;
+        return SSH_OK;
+    }
+    if (emtask_key_equals(value, "missing") ||
+        emtask_key_equals(value, "if_missing") ||
+        emtask_key_equals(value, "if-missing") ||
+        emtask_key_equals(value, "create_if_missing") ||
+        emtask_key_equals(value, "create-if-missing") ||
+        emtask_key_equals(value, "no_overwrite") ||
+        emtask_key_equals(value, "no-overwrite") ||
+        emtask_key_equals(value, "preserve")) {
+        *mode_out = EMTASK_PANEL_QR_IF_MISSING;
+        return SSH_OK;
+    }
+    if (emtask_key_equals(value, "always") ||
+        emtask_key_equals(value, "overwrite") ||
+        emtask_key_equals(value, "replace") ||
+        emtask_key_equals(value, "regenerate") ||
+        emtask_key_equals(value, "true") ||
+        emtask_key_equals(value, "1")) {
+        *mode_out = EMTASK_PANEL_QR_ALWAYS;
+        return SSH_OK;
+    }
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
 static int emtask_apply_global_config_pair(
     emtask_global_config_t *global,
     const char *key,
@@ -375,6 +430,7 @@ static int emtask_apply_global_config_pair(
     int status;
     emtask_auth_backend_t backend;
     unsigned panel_auth;
+    emtask_panel_qr_mode_t panel_qr_mode;
 
     if (global == NULL || key == NULL || value == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -429,8 +485,24 @@ static int emtask_apply_global_config_pair(
         emtask_key_equals(key, "panel_qr_code_file")) {
         return emtask_copy_text(global->panel_qr_file, sizeof(global->panel_qr_file), value);
     }
+    if (emtask_key_equals(key, "panel_tasks_db_file") ||
+        emtask_key_equals(key, "panel_task_db_file") ||
+        emtask_key_equals(key, "panel_sqlite_file") ||
+        emtask_key_equals(key, "tasks_db_file")) {
+        return emtask_copy_text(global->panel_tasks_db_file, sizeof(global->panel_tasks_db_file), value);
+    }
     if (emtask_key_equals(key, "panel_qr_host") || emtask_key_equals(key, "panel_qrcode_host")) {
         return emtask_copy_text(global->panel_qr_host, sizeof(global->panel_qr_host), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_mode") ||
+        emtask_key_equals(key, "panel_qr_policy") ||
+        emtask_key_equals(key, "panel_qr_generate") ||
+        emtask_key_equals(key, "panel_qrcode_mode")) {
+        status = emtask_parse_panel_qr_mode(value, &panel_qr_mode);
+        if (status == SSH_OK) {
+            global->panel_qr_mode = panel_qr_mode;
+        }
+        return status;
     }
     if (emtask_key_equals(key, "panel_otp_digits")) {
         status = emtask_parse_unsigned(value, &u);
@@ -452,6 +524,29 @@ static int emtask_apply_global_config_pair(
         status = emtask_parse_unsigned(value, &u);
         if (status == SSH_OK && u <= 10u) {
             global->panel_otp_window = u;
+            return SSH_OK;
+        }
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_key_equals(key, "bind_retry") ||
+        emtask_key_equals(key, "bind_retry_enabled") ||
+        emtask_key_equals(key, "listen_retry") ||
+        emtask_key_equals(key, "listen_retry_enabled") ||
+        emtask_key_equals(key, "listener_retry_enabled")) {
+        status = emtask_parse_bool(value, &flag);
+        if (status == SSH_OK) {
+            global->bind_retry_enabled = flag;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "bind_retry_max_sec") ||
+        emtask_key_equals(key, "bind_retry_max_seconds") ||
+        emtask_key_equals(key, "bind_retry_max_interval_sec") ||
+        emtask_key_equals(key, "listen_retry_max_sec") ||
+        emtask_key_equals(key, "listener_retry_max_sec")) {
+        status = emtask_parse_unsigned(value, &u);
+        if (status == SSH_OK && u != 0u && u <= 86400u) {
+            global->bind_retry_max_sec = u;
             return SSH_OK;
         }
         return SSH_ERR_INVALID_ARGUMENT;
@@ -758,6 +853,18 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
     if (status != SSH_OK) {
         return status;
     }
+    status = emtask_resolve_path(config->global.config_dir, config->global.panel_tasks_db_file, config->global.panel_tasks_db_file);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_tasks_db_check_runtime(&config->global);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_tasks_db_load(config);
+    if (status != SSH_OK) {
+        return status;
+    }
     for (size_t i = 0u; i < config->task_count; ++i) {
         status = emtask_resolve_path(config->global.config_dir, config->tasks[i].working_dir, config->tasks[i].working_dir);
         if (status != SSH_OK) {
@@ -778,7 +885,7 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
         config->global.authorized_keys_file[0] == '\0') {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    if (config->global.max_workers == 0u || config->task_count == 0u) {
+    if (config->global.max_workers == 0u || (config->task_count == 0u && !config->global.panel_enabled)) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
     if (config->global.panel_enabled && config->global.panel_port == 0u) {
@@ -810,6 +917,12 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
     for (size_t i = 0u; i < config->task_count; ++i) {
         if (config->tasks[i].name[0] == '\0' || config->tasks[i].command[0] == '\0' || config->tasks[i].port == 0u) {
             return SSH_ERR_INVALID_ARGUMENT;
+        }
+        for (size_t j = i + 1u; j < config->task_count; ++j) {
+            if (emtask_key_equals(config->tasks[i].name, config->tasks[j].name) ||
+                config->tasks[i].port == config->tasks[j].port) {
+                return SSH_ERR_ALREADY_EXISTS;
+            }
         }
         if (config->global.panel_enabled && config->tasks[i].port == config->global.panel_port) {
             const char *task_addr = config->tasks[i].listen_address[0] != '\0' ? config->tasks[i].listen_address : "0.0.0.0";
@@ -934,6 +1047,448 @@ static int emtask_panel_file_exists(const char *path, int *exists_out)
     (void)fclose(file);
     *exists_out = 1;
     return SSH_OK;
+}
+
+typedef struct emtask_sqlite3 emtask_sqlite3_t;
+typedef struct emtask_sqlite3_stmt emtask_sqlite3_stmt_t;
+
+#define EMTASK_SQLITE_OK 0
+#define EMTASK_SQLITE_ROW 100
+#define EMTASK_SQLITE_DONE 101
+#define EMTASK_SQLITE_OPEN_READWRITE 0x00000002
+#define EMTASK_SQLITE_OPEN_CREATE 0x00000004
+#define EMTASK_SQLITE_TRANSIENT ((void (*)(void *))-1)
+
+typedef struct emtask_sqlite_api {
+    void *library;
+    int (*open_v2)(const char *, emtask_sqlite3_t **, int, const char *);
+    int (*close)(emtask_sqlite3_t *);
+    int (*exec)(emtask_sqlite3_t *, const char *, int (*)(void *, int, char **, char **), void *, char **);
+    void (*free_mem)(void *);
+    const char *(*errmsg)(emtask_sqlite3_t *);
+    int (*prepare_v2)(emtask_sqlite3_t *, const char *, int, emtask_sqlite3_stmt_t **, const char **);
+    int (*bind_text)(emtask_sqlite3_stmt_t *, int, const char *, int, void (*)(void *));
+    int (*bind_int)(emtask_sqlite3_stmt_t *, int, int);
+    int (*step)(emtask_sqlite3_stmt_t *);
+    int (*finalize)(emtask_sqlite3_stmt_t *);
+    const unsigned char *(*column_text)(emtask_sqlite3_stmt_t *, int);
+    int (*column_int)(emtask_sqlite3_stmt_t *, int);
+    int (*changes)(emtask_sqlite3_t *);
+} emtask_sqlite_api_t;
+
+static void emtask_sqlite_close_library(emtask_sqlite_api_t *api)
+{
+    if (api == NULL || api->library == NULL) {
+        return;
+    }
+    emtask_platform_library_close(api->library);
+    memset(api, 0, sizeof(*api));
+}
+
+static void *emtask_sqlite_symbol(emtask_sqlite_api_t *api, const char *name)
+{
+    if (api == NULL || api->library == NULL || name == NULL) {
+        return NULL;
+    }
+    return emtask_platform_library_symbol(api->library, name);
+}
+
+static int emtask_sqlite_load_library(emtask_sqlite_api_t *api)
+{
+    int status;
+    int using_system_sqlite;
+
+    if (api == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(api, 0, sizeof(*api));
+    using_system_sqlite = 0;
+    status = emtask_platform_sqlite_library_open(&api->library, &using_system_sqlite);
+    if (status != SSH_OK) {
+        emtask_logf("sqlite runtime not found; place sqlite3.dll/libsqlite3.so in the current directory or install SQLite system-wide");
+        return status;
+    }
+    if (using_system_sqlite) {
+        emtask_logf("warning: using system SQLite runtime; place sqlite3.dll/libsqlite3.so in the current directory to use the bundled runtime");
+    }
+
+    api->open_v2 = (int (*)(const char *, emtask_sqlite3_t **, int, const char *))emtask_sqlite_symbol(api, "sqlite3_open_v2");
+    api->close = (int (*)(emtask_sqlite3_t *))emtask_sqlite_symbol(api, "sqlite3_close");
+    api->exec = (int (*)(emtask_sqlite3_t *, const char *, int (*)(void *, int, char **, char **), void *, char **))emtask_sqlite_symbol(api, "sqlite3_exec");
+    api->free_mem = (void (*)(void *))emtask_sqlite_symbol(api, "sqlite3_free");
+    api->errmsg = (const char *(*)(emtask_sqlite3_t *))emtask_sqlite_symbol(api, "sqlite3_errmsg");
+    api->prepare_v2 = (int (*)(emtask_sqlite3_t *, const char *, int, emtask_sqlite3_stmt_t **, const char **))emtask_sqlite_symbol(api, "sqlite3_prepare_v2");
+    api->bind_text = (int (*)(emtask_sqlite3_stmt_t *, int, const char *, int, void (*)(void *)))emtask_sqlite_symbol(api, "sqlite3_bind_text");
+    api->bind_int = (int (*)(emtask_sqlite3_stmt_t *, int, int))emtask_sqlite_symbol(api, "sqlite3_bind_int");
+    api->step = (int (*)(emtask_sqlite3_stmt_t *))emtask_sqlite_symbol(api, "sqlite3_step");
+    api->finalize = (int (*)(emtask_sqlite3_stmt_t *))emtask_sqlite_symbol(api, "sqlite3_finalize");
+    api->column_text = (const unsigned char *(*)(emtask_sqlite3_stmt_t *, int))emtask_sqlite_symbol(api, "sqlite3_column_text");
+    api->column_int = (int (*)(emtask_sqlite3_stmt_t *, int))emtask_sqlite_symbol(api, "sqlite3_column_int");
+    api->changes = (int (*)(emtask_sqlite3_t *))emtask_sqlite_symbol(api, "sqlite3_changes");
+
+    if (api->open_v2 == NULL || api->close == NULL || api->exec == NULL ||
+        api->free_mem == NULL || api->errmsg == NULL || api->prepare_v2 == NULL ||
+        api->bind_text == NULL || api->bind_int == NULL || api->step == NULL ||
+        api->finalize == NULL || api->column_text == NULL || api->column_int == NULL ||
+        api->changes == NULL) {
+        emtask_logf("sqlite runtime missing required sqlite3 symbols");
+        emtask_sqlite_close_library(api);
+        return SSH_ERR_UNSUPPORTED;
+    }
+    return SSH_OK;
+}
+
+static int emtask_sqlite_open_database(const char *path, emtask_sqlite_api_t *api, emtask_sqlite3_t **db_out)
+{
+    int status;
+
+    if (path == NULL || path[0] == '\0' || api == NULL || db_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *db_out = NULL;
+    status = emtask_sqlite_load_library(api);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (api->open_v2(path, db_out, EMTASK_SQLITE_OPEN_READWRITE | EMTASK_SQLITE_OPEN_CREATE, NULL) != EMTASK_SQLITE_OK) {
+        const char *msg = *db_out != NULL ? api->errmsg(*db_out) : "open failed";
+        emtask_logf("sqlite open %s failed: %s", path, msg != NULL ? msg : "unknown");
+        if (*db_out != NULL) {
+            (void)api->close(*db_out);
+            *db_out = NULL;
+        }
+        emtask_sqlite_close_library(api);
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+static void emtask_sqlite_close_database(emtask_sqlite_api_t *api, emtask_sqlite3_t *db)
+{
+    if (api != NULL && db != NULL && api->close != NULL) {
+        (void)api->close(db);
+    }
+    emtask_sqlite_close_library(api);
+}
+
+static int emtask_panel_tasks_db_init(emtask_sqlite_api_t *api, emtask_sqlite3_t *db)
+{
+    static const char k_schema[] =
+        "CREATE TABLE IF NOT EXISTS tasks ("
+        "name TEXT PRIMARY KEY NOT NULL,"
+        "listen_address TEXT NOT NULL DEFAULT '',"
+        "port INTEGER NOT NULL UNIQUE,"
+        "command TEXT NOT NULL,"
+        "working_dir TEXT NOT NULL DEFAULT '.',"
+        "use_sftp INTEGER NOT NULL DEFAULT 1,"
+        "use_conpty INTEGER NOT NULL DEFAULT 1,"
+        "restart_limit INTEGER NOT NULL DEFAULT 8,"
+        "restart_window_sec INTEGER NOT NULL DEFAULT 60,"
+        "replay_buffer_bytes INTEGER NOT NULL DEFAULT 1048576,"
+        "replay_on_attach INTEGER NOT NULL DEFAULT 1,"
+        "repaint_on_attach INTEGER NOT NULL DEFAULT 1,"
+        "screen_snapshot INTEGER NOT NULL DEFAULT 1,"
+        "created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+        "updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
+        ");";
+    char *error = NULL;
+    int rc;
+
+    if (api == NULL || db == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    rc = api->exec(db, k_schema, NULL, NULL, &error);
+    if (rc != EMTASK_SQLITE_OK) {
+        emtask_logf("sqlite schema init failed: %s", error != NULL ? error : api->errmsg(db));
+        if (error != NULL) {
+            api->free_mem(error);
+        }
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+static const char *emtask_sqlite_column_string(emtask_sqlite_api_t *api, emtask_sqlite3_stmt_t *stmt, int column)
+{
+    const unsigned char *text;
+
+    if (api == NULL || stmt == NULL) {
+        return "";
+    }
+    text = api->column_text(stmt, column);
+    return text != NULL ? (const char *)text : "";
+}
+
+static int emtask_panel_tasks_db_check_runtime(const emtask_global_config_t *global)
+{
+    emtask_sqlite_api_t api;
+    int status;
+
+    if (global == NULL || !global->panel_enabled || global->panel_tasks_db_file[0] == '\0') {
+        return SSH_OK;
+    }
+    memset(&api, 0, sizeof(api));
+    status = emtask_sqlite_load_library(&api);
+    if (status != SSH_OK) {
+        emtask_logf("sqlite runtime required at startup because panel dynamic tasks use %s", global->panel_tasks_db_file);
+        return status == SSH_ERR_NOT_FOUND ? SSH_ERR_PLATFORM : status;
+    }
+    emtask_sqlite_close_library(&api);
+    return SSH_OK;
+}
+
+static int emtask_panel_tasks_db_load(emtask_config_t *config)
+{
+    static const char k_select[] =
+        "SELECT name, listen_address, port, command, working_dir, use_sftp, use_conpty, "
+        "restart_limit, restart_window_sec, replay_buffer_bytes, replay_on_attach, repaint_on_attach, screen_snapshot "
+        "FROM tasks ORDER BY name";
+    emtask_sqlite_api_t api;
+    emtask_sqlite3_t *db;
+    emtask_sqlite3_stmt_t *stmt;
+    int exists;
+    int status;
+    int rc;
+
+    if (config == NULL || !config->global.panel_enabled || config->global.panel_tasks_db_file[0] == '\0') {
+        return SSH_OK;
+    }
+    status = emtask_panel_file_exists(config->global.panel_tasks_db_file, &exists);
+    if (status != SSH_OK || !exists) {
+        return status;
+    }
+
+    memset(&api, 0, sizeof(api));
+    db = NULL;
+    status = emtask_sqlite_open_database(config->global.panel_tasks_db_file, &api, &db);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_tasks_db_init(&api, db);
+    if (status != SSH_OK) {
+        emtask_sqlite_close_database(&api, db);
+        return status;
+    }
+
+    stmt = NULL;
+    rc = api.prepare_v2(db, k_select, -1, &stmt, NULL);
+    if (rc != EMTASK_SQLITE_OK) {
+        emtask_logf("sqlite select tasks failed: %s", api.errmsg(db));
+        emtask_sqlite_close_database(&api, db);
+        return SSH_ERR_PLATFORM;
+    }
+
+    while ((rc = api.step(stmt)) == EMTASK_SQLITE_ROW) {
+        emtask_task_config_t *task;
+
+        if (config->task_count >= EMTASK_MAX_TASKS) {
+            (void)api.finalize(stmt);
+            emtask_sqlite_close_database(&api, db);
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+
+        task = &config->tasks[config->task_count];
+        emtask_task_config_defaults(task);
+        task->use_conpty = config->global.use_conpty;
+        status = emtask_copy_text(task->name, sizeof(task->name), emtask_sqlite_column_string(&api, stmt, 0));
+        if (status == SSH_OK) {
+            status = emtask_copy_text(task->listen_address, sizeof(task->listen_address), emtask_sqlite_column_string(&api, stmt, 1));
+        }
+        if (status == SSH_OK) {
+            int port = api.column_int(stmt, 2);
+            if (port <= 0 || port > 65535) {
+                status = SSH_ERR_INVALID_ARGUMENT;
+            } else {
+                task->port = (uint16_t)port;
+            }
+        }
+        if (status == SSH_OK) {
+            status = emtask_copy_text(task->command, sizeof(task->command), emtask_sqlite_column_string(&api, stmt, 3));
+        }
+        if (status == SSH_OK) {
+            status = emtask_copy_text(task->working_dir, sizeof(task->working_dir), emtask_sqlite_column_string(&api, stmt, 4));
+        }
+        if (status == SSH_OK) {
+            task->use_sftp = api.column_int(stmt, 5) != 0;
+            task->use_conpty = api.column_int(stmt, 6) != 0;
+            task->restart_limit = (unsigned)api.column_int(stmt, 7);
+            task->restart_window_sec = (unsigned)api.column_int(stmt, 8);
+            task->replay_buffer_bytes = (size_t)api.column_int(stmt, 9);
+            task->replay_on_attach = api.column_int(stmt, 10) != 0;
+            task->repaint_on_attach = api.column_int(stmt, 11) != 0;
+            task->screen_snapshot = api.column_int(stmt, 12) != 0;
+        }
+        if (status != SSH_OK) {
+            (void)api.finalize(stmt);
+            emtask_sqlite_close_database(&api, db);
+            return status;
+        }
+        config->task_count += 1u;
+    }
+    status = rc == EMTASK_SQLITE_DONE ? SSH_OK : SSH_ERR_PLATFORM;
+    (void)api.finalize(stmt);
+    emtask_sqlite_close_database(&api, db);
+    return status;
+}
+
+static int emtask_panel_tasks_db_insert(const emtask_global_config_t *global, const emtask_task_config_t *task)
+{
+    static const char k_insert[] =
+        "INSERT INTO tasks (name, listen_address, port, command, working_dir, use_sftp, use_conpty, "
+        "restart_limit, restart_window_sec, replay_buffer_bytes, replay_on_attach, repaint_on_attach, screen_snapshot, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))";
+    emtask_sqlite_api_t api;
+    emtask_sqlite3_t *db;
+    emtask_sqlite3_stmt_t *stmt;
+    int status;
+    int rc;
+
+    if (global == NULL || task == NULL || global->panel_tasks_db_file[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(&api, 0, sizeof(api));
+    db = NULL;
+    status = emtask_sqlite_open_database(global->panel_tasks_db_file, &api, &db);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_tasks_db_init(&api, db);
+    if (status != SSH_OK) {
+        emtask_sqlite_close_database(&api, db);
+        return status;
+    }
+
+    stmt = NULL;
+    rc = api.prepare_v2(db, k_insert, -1, &stmt, NULL);
+    if (rc != EMTASK_SQLITE_OK) {
+        emtask_sqlite_close_database(&api, db);
+        return SSH_ERR_PLATFORM;
+    }
+    rc = api.bind_text(stmt, 1, task->name, -1, EMTASK_SQLITE_TRANSIENT);
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 2, task->listen_address, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 3, (int)task->port) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 4, task->command, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 5, task->working_dir, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 6, task->use_sftp != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 7, task->use_conpty != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 8, (int)task->restart_limit) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 9, (int)task->restart_window_sec) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 10, (int)task->replay_buffer_bytes) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 11, task->replay_on_attach != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 12, task->repaint_on_attach != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 13, task->screen_snapshot != 0) : rc;
+    if (rc == EMTASK_SQLITE_OK) {
+        rc = api.step(stmt);
+    }
+    status = rc == EMTASK_SQLITE_DONE ? SSH_OK : SSH_ERR_PLATFORM;
+    if (status != SSH_OK) {
+        emtask_logf("sqlite insert task %s failed: %s", task->name, api.errmsg(db));
+    }
+    (void)api.finalize(stmt);
+    emtask_sqlite_close_database(&api, db);
+    return status;
+}
+
+static int emtask_panel_tasks_db_update(const emtask_global_config_t *global, const char *old_task_name, const emtask_task_config_t *task)
+{
+    static const char k_update[] =
+        "UPDATE tasks SET name = ?, listen_address = ?, port = ?, command = ?, working_dir = ?, "
+        "use_sftp = ?, use_conpty = ?, restart_limit = ?, restart_window_sec = ?, replay_buffer_bytes = ?, "
+        "replay_on_attach = ?, repaint_on_attach = ?, screen_snapshot = ?, updated_at = strftime('%s','now') "
+        "WHERE name = ?";
+    emtask_sqlite_api_t api;
+    emtask_sqlite3_t *db;
+    emtask_sqlite3_stmt_t *stmt;
+    int status;
+    int rc;
+
+    if (global == NULL || old_task_name == NULL || old_task_name[0] == '\0' || task == NULL || global->panel_tasks_db_file[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(&api, 0, sizeof(api));
+    db = NULL;
+    status = emtask_sqlite_open_database(global->panel_tasks_db_file, &api, &db);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_tasks_db_init(&api, db);
+    if (status != SSH_OK) {
+        emtask_sqlite_close_database(&api, db);
+        return status;
+    }
+
+    stmt = NULL;
+    rc = api.prepare_v2(db, k_update, -1, &stmt, NULL);
+    if (rc == EMTASK_SQLITE_OK) {
+        rc = api.bind_text(stmt, 1, task->name, -1, EMTASK_SQLITE_TRANSIENT);
+    }
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 2, task->listen_address, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 3, (int)task->port) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 4, task->command, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 5, task->working_dir, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 6, task->use_sftp != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 7, task->use_conpty != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 8, (int)task->restart_limit) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 9, (int)task->restart_window_sec) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 10, (int)task->replay_buffer_bytes) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 11, task->replay_on_attach != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 12, task->repaint_on_attach != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_int(stmt, 13, task->screen_snapshot != 0) : rc;
+    rc = rc == EMTASK_SQLITE_OK ? api.bind_text(stmt, 14, old_task_name, -1, EMTASK_SQLITE_TRANSIENT) : rc;
+    if (rc == EMTASK_SQLITE_OK) {
+        rc = api.step(stmt);
+    }
+    if (rc == EMTASK_SQLITE_DONE) {
+        status = api.changes(db) > 0 ? SSH_OK : SSH_ERR_NOT_FOUND;
+    } else {
+        status = SSH_ERR_PLATFORM;
+    }
+    if (status != SSH_OK) {
+        emtask_logf("sqlite update task %s failed: %s", old_task_name, api.errmsg(db));
+    }
+    if (stmt != NULL) {
+        (void)api.finalize(stmt);
+    }
+    emtask_sqlite_close_database(&api, db);
+    return status;
+}
+
+static int emtask_panel_tasks_db_delete(const emtask_global_config_t *global, const char *task_name)
+{
+    static const char k_delete[] = "DELETE FROM tasks WHERE name = ?";
+    emtask_sqlite_api_t api;
+    emtask_sqlite3_t *db;
+    emtask_sqlite3_stmt_t *stmt;
+    int status;
+    int rc;
+
+    if (global == NULL || task_name == NULL || task_name[0] == '\0' || global->panel_tasks_db_file[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(&api, 0, sizeof(api));
+    db = NULL;
+    status = emtask_sqlite_open_database(global->panel_tasks_db_file, &api, &db);
+    if (status != SSH_OK) {
+        return status;
+    }
+    stmt = NULL;
+    rc = api.prepare_v2(db, k_delete, -1, &stmt, NULL);
+    if (rc == EMTASK_SQLITE_OK) {
+        rc = api.bind_text(stmt, 1, task_name, -1, EMTASK_SQLITE_TRANSIENT);
+    }
+    if (rc == EMTASK_SQLITE_OK) {
+        rc = api.step(stmt);
+    }
+    if (rc == EMTASK_SQLITE_DONE) {
+        status = api.changes(db) > 0 ? SSH_OK : SSH_ERR_NOT_FOUND;
+    } else {
+        status = SSH_ERR_PLATFORM;
+    }
+    if (stmt != NULL) {
+        (void)api.finalize(stmt);
+    }
+    emtask_sqlite_close_database(&api, db);
+    return status;
 }
 
 static int emtask_panel_fill_random(uint8_t *data, size_t data_len)
@@ -1967,13 +2522,18 @@ static int emtask_panel_materialize_qr(const emtask_config_t *config)
     if (config == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    if (!config->global.panel_enabled || config->global.panel_auth == 0u || config->global.panel_qr_file[0] == '\0') {
+    if (!config->global.panel_enabled ||
+        config->global.panel_auth == 0u ||
+        config->global.panel_qr_file[0] == '\0' ||
+        config->global.panel_qr_mode == EMTASK_PANEL_QR_DISABLED) {
         return SSH_OK;
     }
 
-    status = emtask_panel_file_exists(config->global.panel_qr_file, &exists);
-    if (status != SSH_OK || exists) {
-        return status;
+    if (config->global.panel_qr_mode == EMTASK_PANEL_QR_IF_MISSING) {
+        status = emtask_panel_file_exists(config->global.panel_qr_file, &exists);
+        if (status != SSH_OK || exists) {
+            return status;
+        }
     }
 
     status = emtask_panel_build_qr_payload(config, payload, sizeof(payload));
@@ -3177,6 +3737,111 @@ static int emtask_panel_send_response(
     return emtask_panel_send_all(socket_handle, body, body_len);
 }
 
+static char *emtask_panel_find_header_end(char *request, size_t request_len, size_t *header_bytes_out)
+{
+    char *end;
+
+    if (request == NULL || header_bytes_out == NULL) {
+        return NULL;
+    }
+    end = strstr(request, "\r\n\r\n");
+    if (end != NULL) {
+        *header_bytes_out = (size_t)(end - request) + 4u;
+        return request + *header_bytes_out;
+    }
+    end = strstr(request, "\n\n");
+    if (end != NULL) {
+        *header_bytes_out = (size_t)(end - request) + 2u;
+        return request + *header_bytes_out;
+    }
+    (void)request_len;
+    return NULL;
+}
+
+static int emtask_panel_content_length(const char *request, size_t *length_out)
+{
+    char header[64];
+    unsigned length;
+
+    if (request == NULL || length_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *length_out = 0u;
+    if (!emtask_panel_header_value(request, "Content-Length", header, sizeof(header))) {
+        return SSH_OK;
+    }
+    if (emtask_parse_unsigned(header, &length) != SSH_OK) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *length_out = (size_t)length;
+    return SSH_OK;
+}
+
+static int emtask_panel_read_http_request(
+    uintptr_t socket_handle,
+    char *request,
+    size_t request_capacity,
+    char **body_out,
+    size_t *body_len_out)
+{
+    size_t request_len;
+    size_t header_bytes;
+    size_t content_length;
+    char *body;
+    int status;
+
+    if (request == NULL || request_capacity < 2u || body_out == NULL || body_len_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    request_len = 0u;
+    header_bytes = 0u;
+    content_length = 0u;
+    body = NULL;
+    request[0] = '\0';
+    *body_out = NULL;
+    *body_len_out = 0u;
+
+    for (;;) {
+        int n;
+
+        switch (emtask_wait_for_socket(socket_handle, 0, 5000u)) {
+        case 0:
+            return SSH_ERR_PLATFORM;
+        case -1:
+            return SSH_ERR_PLATFORM;
+        default:
+            break;
+        }
+        if (request_len + 1u >= request_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        n = emtask_platform_net_recv(socket_handle, (uint8_t *)request + request_len, request_capacity - request_len - 1u);
+        if (n <= 0) {
+            return SSH_ERR_PLATFORM;
+        }
+        request_len += (size_t)n;
+        request[request_len] = '\0';
+
+        body = emtask_panel_find_header_end(request, request_len, &header_bytes);
+        if (body == NULL) {
+            continue;
+        }
+        status = emtask_panel_content_length(request, &content_length);
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (content_length > 32768u) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        if (request_len >= header_bytes + content_length) {
+            body[content_length] = '\0';
+            *body_out = body;
+            *body_len_out = content_length;
+            return SSH_OK;
+        }
+    }
+}
+
 static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_task_t *task)
 {
     int session_active;
@@ -3259,6 +3924,710 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     emtask_panel_appendf(json, "}");
 }
 
+static const char *emtask_json_skip_ws(const char *p)
+{
+    while (p != NULL && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+        ++p;
+    }
+    return p;
+}
+
+static const char *emtask_json_find_member_value(const char *json, const char *key)
+{
+    size_t key_len;
+    const char *p;
+
+    if (json == NULL || key == NULL || key[0] == '\0') {
+        return NULL;
+    }
+    key_len = strlen(key);
+    p = json;
+    while ((p = strchr(p, '"')) != NULL) {
+        if (strncmp(p + 1, key, key_len) == 0 && p[1 + key_len] == '"') {
+            const char *q = emtask_json_skip_ws(p + 2 + key_len);
+            if (q != NULL && *q == ':') {
+                return emtask_json_skip_ws(q + 1);
+            }
+        }
+        ++p;
+    }
+    return NULL;
+}
+
+static int emtask_json_read_string_value(const char *value, char *out, size_t out_capacity)
+{
+    size_t out_len;
+    const char *p;
+
+    if (value == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    p = emtask_json_skip_ws(value);
+    if (p == NULL || *p != '"') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    ++p;
+    out_len = 0u;
+    while (*p != '\0' && *p != '"') {
+        unsigned char ch = (unsigned char)*p++;
+        if (ch == '\\') {
+            ch = (unsigned char)*p++;
+            switch (ch) {
+            case '"':
+            case '\\':
+            case '/':
+                break;
+            case 'b':
+                ch = '\b';
+                break;
+            case 'f':
+                ch = '\f';
+                break;
+            case 'n':
+                ch = '\n';
+                break;
+            case 'r':
+                ch = '\r';
+                break;
+            case 't':
+                ch = '\t';
+                break;
+            default:
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+        }
+        if (out_len + 1u >= out_capacity) {
+            return SSH_ERR_BUFFER_TOO_SMALL;
+        }
+        out[out_len++] = (char)ch;
+    }
+    if (*p != '"') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    out[out_len] = '\0';
+    return SSH_OK;
+}
+
+static int emtask_json_get_string(const char *json, const char *key, char *out, size_t out_capacity, int required)
+{
+    const char *value;
+
+    if (out != NULL && out_capacity != 0u) {
+        out[0] = '\0';
+    }
+    value = emtask_json_find_member_value(json, key);
+    if (value == NULL) {
+        return required ? SSH_ERR_INVALID_ARGUMENT : SSH_OK;
+    }
+    return emtask_json_read_string_value(value, out, out_capacity);
+}
+
+static int emtask_json_get_uint(const char *json, const char *key, unsigned *out, int required)
+{
+    const char *value;
+    char text[64];
+    char *end;
+    unsigned long parsed;
+
+    if (out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    value = emtask_json_find_member_value(json, key);
+    if (value == NULL) {
+        return required ? SSH_ERR_INVALID_ARGUMENT : SSH_OK;
+    }
+    value = emtask_json_skip_ws(value);
+    if (value == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (*value == '"') {
+        int status = emtask_json_read_string_value(value, text, sizeof(text));
+        if (status != SSH_OK) {
+            return status;
+        }
+        value = text;
+    }
+    parsed = strtoul(value, &end, 10);
+    if (end == value || parsed > 100000000ul) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *out = (unsigned)parsed;
+    return SSH_OK;
+}
+
+static int emtask_json_get_bool(const char *json, const char *key, int *out, int required)
+{
+    const char *value;
+    char text[16];
+
+    if (out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    value = emtask_json_find_member_value(json, key);
+    if (value == NULL) {
+        return required ? SSH_ERR_INVALID_ARGUMENT : SSH_OK;
+    }
+    value = emtask_json_skip_ws(value);
+    if (value == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (*value == '"') {
+        int status = emtask_json_read_string_value(value, text, sizeof(text));
+        if (status != SSH_OK) {
+            return status;
+        }
+        return emtask_parse_bool(text, out);
+    }
+    if (strncmp(value, "true", 4u) == 0) {
+        *out = 1;
+        return SSH_OK;
+    }
+    if (strncmp(value, "false", 5u) == 0) {
+        *out = 0;
+        return SSH_OK;
+    }
+    if (*value == '1' || *value == '0') {
+        *out = *value == '1';
+        return SSH_OK;
+    }
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
+static int emtask_json_has_member(const char *json, const char *key)
+{
+    return emtask_json_find_member_value(json, key) != NULL;
+}
+
+static int emtask_json_parse_task(const emtask_app_t *app, const char *json, emtask_task_config_t *task)
+{
+    unsigned value;
+    int flag;
+    int status;
+
+    if (app == NULL || json == NULL || task == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    emtask_task_config_defaults(task);
+    task->use_conpty = app->config.global.use_conpty;
+    status = emtask_json_get_string(json, "name", task->name, sizeof(task->name), 1);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_json_get_string(json, "command", task->command, sizeof(task->command), 1);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_json_get_uint(json, "port", &value, 1);
+    if (status != SSH_OK || value == 0u || value > 65535u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    task->port = (uint16_t)value;
+    status = emtask_json_get_string(json, "listen_address", task->listen_address, sizeof(task->listen_address), 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_json_get_string(json, "working_dir", task->working_dir, sizeof(task->working_dir), 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (task->working_dir[0] == '\0') {
+        status = emtask_copy_text(task->working_dir, sizeof(task->working_dir), ".");
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    flag = task->use_sftp;
+    status = emtask_json_get_bool(json, "use_sftp", &flag, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->use_sftp = flag;
+    flag = task->use_conpty;
+    status = emtask_json_get_bool(json, "use_conpty", &flag, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->use_conpty = flag;
+
+    value = task->restart_limit;
+    status = emtask_json_get_uint(json, "restart_limit", &value, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->restart_limit = value;
+    value = task->restart_window_sec;
+    status = emtask_json_get_uint(json, "restart_window_sec", &value, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->restart_window_sec = value;
+    value = (unsigned)task->replay_buffer_bytes;
+    status = emtask_json_get_uint(json, "replay_buffer_bytes", &value, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->replay_buffer_bytes = (size_t)value;
+
+    flag = task->replay_on_attach;
+    status = emtask_json_get_bool(json, "replay_on_attach", &flag, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->replay_on_attach = flag;
+    flag = task->repaint_on_attach;
+    status = emtask_json_get_bool(json, "repaint_on_attach", &flag, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->repaint_on_attach = flag;
+    flag = task->screen_snapshot;
+    status = emtask_json_get_bool(json, "screen_snapshot", &flag, 0);
+    if (status != SSH_OK) {
+        return status;
+    }
+    task->screen_snapshot = flag;
+    return SSH_OK;
+}
+
+static int emtask_json_patch_task(const emtask_app_t *app, const char *json, const emtask_task_config_t *base, emtask_task_config_t *task)
+{
+    unsigned value;
+    int flag;
+    int changed;
+    int status;
+
+    if (app == NULL || json == NULL || base == NULL || task == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *task = *base;
+    changed = 0;
+
+    if (emtask_json_has_member(json, "name")) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_json_has_member(json, "command")) {
+        status = emtask_json_get_string(json, "command", task->command, sizeof(task->command), 1);
+        if (status != SSH_OK || task->command[0] == '\0') {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "port")) {
+        status = emtask_json_get_uint(json, "port", &value, 1);
+        if (status != SSH_OK || value == 0u || value > 65535u) {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        task->port = (uint16_t)value;
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "listen_address")) {
+        status = emtask_json_get_string(json, "listen_address", task->listen_address, sizeof(task->listen_address), 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "working_dir")) {
+        status = emtask_json_get_string(json, "working_dir", task->working_dir, sizeof(task->working_dir), 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (task->working_dir[0] == '\0') {
+            status = emtask_copy_text(task->working_dir, sizeof(task->working_dir), ".");
+            if (status != SSH_OK) {
+                return status;
+            }
+        }
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "use_sftp")) {
+        flag = task->use_sftp;
+        status = emtask_json_get_bool(json, "use_sftp", &flag, 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        task->use_sftp = flag;
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "use_conpty")) {
+        flag = task->use_conpty;
+        status = emtask_json_get_bool(json, "use_conpty", &flag, 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        task->use_conpty = flag;
+        changed = 1;
+    }
+    return changed ? SSH_OK : SSH_ERR_INVALID_ARGUMENT;
+}
+
+static int emtask_task_conflicts_with_panel(const emtask_global_config_t *global, const emtask_task_config_t *task)
+{
+    const char *task_addr;
+    const char *panel_addr;
+
+    if (global == NULL || task == NULL || !global->panel_enabled || task->port != global->panel_port) {
+        return 0;
+    }
+    task_addr = task->listen_address[0] != '\0' ? task->listen_address : "0.0.0.0";
+    panel_addr = global->panel_listen_address[0] != '\0' ? global->panel_listen_address : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
+    return emtask_key_equals(task_addr, panel_addr) ||
+           emtask_key_equals(task_addr, "0.0.0.0") ||
+           emtask_key_equals(panel_addr, "0.0.0.0") ||
+           emtask_key_equals(task_addr, "::") ||
+           emtask_key_equals(panel_addr, "::");
+}
+
+static int emtask_validate_new_task_locked(const emtask_app_t *app, const emtask_task_config_t *task)
+{
+    size_t free_index;
+    size_t i;
+
+    if (app == NULL || task == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (task->name[0] == '\0' || task->command[0] == '\0' || task->port == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    free_index = EMTASK_MAX_TASKS;
+    for (i = 0u; i < app->task_capacity && i < EMTASK_MAX_TASKS; ++i) {
+        if (!app->tasks[i].initialized && !app->tasks[i].listener_thread_running) {
+            free_index = i;
+            break;
+        }
+    }
+    if (free_index == EMTASK_MAX_TASKS) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    if (emtask_task_conflicts_with_panel(&app->config.global, task)) {
+        return SSH_ERR_ALREADY_EXISTS;
+    }
+    for (i = 0u; i < app->task_count; ++i) {
+        if (!app->tasks[i].initialized || app->tasks[i].deleted) {
+            continue;
+        }
+        if (emtask_key_equals(app->tasks[i].config.name, task->name) || app->tasks[i].config.port == task->port) {
+            return SSH_ERR_ALREADY_EXISTS;
+        }
+    }
+    return SSH_OK;
+}
+
+static int emtask_validate_updated_task_locked(const emtask_app_t *app, const emtask_task_config_t *task, size_t current_index)
+{
+    size_t i;
+
+    if (app == NULL || task == NULL || current_index >= app->task_count) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (task->name[0] == '\0' || task->command[0] == '\0' || task->port == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (emtask_task_conflicts_with_panel(&app->config.global, task)) {
+        return SSH_ERR_ALREADY_EXISTS;
+    }
+    for (i = 0u; i < app->task_count; ++i) {
+        if (i == current_index || !app->tasks[i].initialized || app->tasks[i].deleted) {
+            continue;
+        }
+        if (emtask_key_equals(app->tasks[i].config.name, task->name) || app->tasks[i].config.port == task->port) {
+            return SSH_ERR_ALREADY_EXISTS;
+        }
+    }
+    return SSH_OK;
+}
+
+static void emtask_panel_write_error_json(char *out, size_t out_capacity, const char *error, const char *message, const char *db_file)
+{
+    emtask_panel_buffer_t response;
+
+    if (out == NULL || out_capacity == 0u || error == NULL) {
+        return;
+    }
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(&response, "{\"error\":");
+    emtask_panel_append_json_string(&response, error);
+    if (message != NULL && message[0] != '\0') {
+        emtask_panel_appendf(&response, ",\"message\":");
+        emtask_panel_append_json_string(&response, message);
+    }
+    if (db_file != NULL && db_file[0] != '\0') {
+        emtask_panel_appendf(&response, ",\"db_file\":");
+        emtask_panel_append_json_string(&response, db_file);
+    }
+    emtask_panel_appendf(&response, "}\n");
+}
+
+static int emtask_panel_create_task_from_json(emtask_app_t *app, const char *json, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t response;
+    emtask_task_config_t config;
+    emtask_task_config_t runtime_config;
+    emtask_task_t *task;
+    emtask_task_t *new_task;
+    size_t index;
+    size_t free_index;
+    size_t i;
+    int status;
+
+    if (app == NULL || json == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    status = emtask_json_parse_task(app, json, &config);
+    if (status != SSH_OK) {
+        return status;
+    }
+    runtime_config = config;
+    status = emtask_resolve_path(app->config.global.config_dir, runtime_config.working_dir, runtime_config.working_dir);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    if (!app->task_lock_initialized) {
+        return SSH_ERR_PLATFORM;
+    }
+    emtask_mutex_lock(&app->task_lock);
+    status = emtask_validate_new_task_locked(app, &runtime_config);
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    status = emtask_panel_tasks_db_insert(&app->config.global, &config);
+    if (status != SSH_OK) {
+        const char *error = "task_store_unavailable";
+        const char *message = "SQLite task database could not be opened or written; check panel_tasks_db_file and directory permissions.";
+        if (status == SSH_ERR_NOT_FOUND) {
+            error = "sqlite_runtime_missing";
+            message = "SQLite runtime not found; place sqlite3.dll/libsqlite3.so in the emtask current directory or install SQLite system-wide.";
+        } else if (status == SSH_ERR_UNSUPPORTED) {
+            error = "sqlite_runtime_incompatible";
+            message = "SQLite runtime is incompatible; missing required sqlite3 symbols.";
+        }
+        emtask_logf("dynamic task store unavailable while adding %s: %s (db=%s)", config.name, message, app->config.global.panel_tasks_db_file);
+        emtask_panel_write_error_json(out, out_capacity, error, message, app->config.global.panel_tasks_db_file);
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    index = EMTASK_MAX_TASKS;
+    for (i = 0u; i < app->task_capacity && i < EMTASK_MAX_TASKS; ++i) {
+        if (!app->tasks[i].initialized && !app->tasks[i].listener_thread_running) {
+            index = i;
+            break;
+        }
+    }
+    if (index == EMTASK_MAX_TASKS) {
+        (void)emtask_panel_tasks_db_delete(&app->config.global, config.name);
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    task = &app->tasks[index];
+    status = emtask_task_init(app, task, &runtime_config);
+    if (status != SSH_OK) {
+        (void)emtask_panel_tasks_db_delete(&app->config.global, config.name);
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    task->listener_thread_running = 1;
+    status = emtask_platform_start_listener_thread(task);
+    if (status != SSH_OK) {
+        task->listener_thread_running = 0;
+        emtask_task_deinit(app, task);
+        (void)emtask_panel_tasks_db_delete(&app->config.global, config.name);
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    app->config.tasks[index] = runtime_config;
+    if (app->config.task_count < index + 1u) {
+        app->config.task_count = index + 1u;
+    }
+    if (app->task_count < index + 1u) {
+        app->task_count = index + 1u;
+    }
+
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(&response, "{\"task\":");
+    emtask_panel_append_task_json(&response, task);
+    emtask_panel_appendf(&response, "}\n");
+    emtask_mutex_unlock(&app->task_lock);
+    return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
+}
+
+static int emtask_panel_update_task_from_json(emtask_app_t *app, const char *task_name, const char *json, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t response;
+    emtask_task_config_t config;
+    emtask_task_config_t runtime_config;
+    emtask_task_t *task;
+    emtask_task_t *new_task;
+    size_t index;
+    size_t free_index;
+    size_t i;
+    int status;
+
+    if (app == NULL || task_name == NULL || task_name[0] == '\0' || json == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!app->task_lock_initialized) {
+        return SSH_ERR_PLATFORM;
+    }
+
+    emtask_mutex_lock(&app->task_lock);
+    task = NULL;
+    index = EMTASK_MAX_TASKS;
+    free_index = EMTASK_MAX_TASKS;
+    for (i = 0u; i < app->task_count; ++i) {
+        if (app->tasks[i].initialized && !app->tasks[i].deleted && emtask_key_equals(app->tasks[i].config.name, task_name)) {
+            task = &app->tasks[i];
+            index = i;
+            break;
+        }
+    }
+    if (task == NULL) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_NOT_FOUND;
+    }
+    if (task->worker_count != 0u) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_READ_ONLY;
+    }
+    for (i = 0u; i < app->task_capacity && i < EMTASK_MAX_TASKS; ++i) {
+        if (i != index && !app->tasks[i].initialized && !app->tasks[i].listener_thread_running) {
+            free_index = i;
+            break;
+        }
+    }
+    if (free_index == EMTASK_MAX_TASKS) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    status = emtask_json_patch_task(app, json, &task->config, &config);
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    runtime_config = config;
+    status = emtask_resolve_path(app->config.global.config_dir, runtime_config.working_dir, runtime_config.working_dir);
+    if (status == SSH_OK) {
+        status = emtask_validate_updated_task_locked(app, &runtime_config, index);
+    }
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    status = emtask_panel_tasks_db_update(&app->config.global, task_name, &config);
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+
+    task->deleted = 1;
+    task->stop_requested = 1;
+    emtask_task_deinit(app, task);
+    memset(&app->config.tasks[index], 0, sizeof(app->config.tasks[index]));
+
+    new_task = &app->tasks[free_index];
+    status = emtask_task_init(app, new_task, &runtime_config);
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    new_task->listener_thread_running = 1;
+    status = emtask_platform_start_listener_thread(new_task);
+    if (status != SSH_OK) {
+        new_task->listener_thread_running = 0;
+        emtask_task_deinit(app, new_task);
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+    app->config.tasks[free_index] = runtime_config;
+    if (app->config.task_count < free_index + 1u) {
+        app->config.task_count = free_index + 1u;
+    }
+    if (app->task_count < free_index + 1u) {
+        app->task_count = free_index + 1u;
+    }
+
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(&response, "{\"task\":");
+    emtask_panel_append_task_json(&response, new_task);
+    emtask_panel_appendf(&response, "}\n");
+    emtask_logf("dynamic task %s updated from panel store", task_name);
+    emtask_mutex_unlock(&app->task_lock);
+    return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
+}
+
+static size_t emtask_active_task_count_locked(const emtask_app_t *app)
+{
+    size_t count;
+    size_t i;
+
+    if (app == NULL) {
+        return 0u;
+    }
+    count = 0u;
+    for (i = 0u; i < app->task_count; ++i) {
+        if (app->tasks[i].initialized && !app->tasks[i].deleted) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static int emtask_panel_delete_task_by_name(emtask_app_t *app, const char *task_name, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t response;
+    emtask_task_t *task;
+    size_t index;
+    size_t i;
+    int status;
+
+    if (app == NULL || task_name == NULL || task_name[0] == '\0' || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!app->task_lock_initialized) {
+        return SSH_ERR_PLATFORM;
+    }
+
+    emtask_mutex_lock(&app->task_lock);
+    task = NULL;
+    index = EMTASK_MAX_TASKS;
+    for (i = 0u; i < app->task_count; ++i) {
+        if (app->tasks[i].initialized && !app->tasks[i].deleted && emtask_key_equals(app->tasks[i].config.name, task_name)) {
+            task = &app->tasks[i];
+            index = i;
+            break;
+        }
+    }
+    if (task == NULL) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_NOT_FOUND;
+    }
+    if (task->worker_count != 0u) {
+        emtask_mutex_unlock(&app->task_lock);
+        return SSH_ERR_READ_ONLY;
+    }
+
+    status = emtask_panel_tasks_db_delete(&app->config.global, task_name);
+    if (status != SSH_OK) {
+        emtask_mutex_unlock(&app->task_lock);
+        return status;
+    }
+
+    task->deleted = 1;
+    task->stop_requested = 1;
+    emtask_task_deinit(app, task);
+    memset(&app->config.tasks[index], 0, sizeof(app->config.tasks[index]));
+
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(&response, "{\"deleted\":true,\"task\":");
+    emtask_panel_append_json_string(&response, task_name);
+    emtask_panel_appendf(&response, "}\n");
+    emtask_logf("dynamic task %s deleted from panel store", task_name);
+    emtask_mutex_unlock(&app->task_lock);
+    return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
+}
+
 static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, char *out, size_t out_capacity)
 {
     emtask_panel_buffer_t json;
@@ -3267,6 +4636,8 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
     uint64_t now_ms;
     uint64_t uptime_ms;
     size_t i;
+    size_t emitted_tasks;
+    int task_lock_held;
 
     if (app == NULL || out == NULL || out_capacity == 0u) {
         return SSH_ERR_INVALID_ARGUMENT;
@@ -3279,6 +4650,8 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
     emtask_mutex_unlock(&app->pool.lock);
     now_ms = emtask_platform_monotonic_ms();
     uptime_ms = app->started_ms != 0u && now_ms >= app->started_ms ? now_ms - app->started_ms : 0u;
+    task_lock_held = 0;
+    emitted_tasks = 0u;
 
     if (!tasks_only) {
         emtask_panel_appendf(&json, "{");
@@ -3330,6 +4703,14 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
         emtask_panel_append_json_string(&json, app->config.global.panel_auth_file);
         emtask_panel_appendf(&json, ",\"qr_file\":");
         emtask_panel_append_json_string(&json, app->config.global.panel_qr_file);
+        emtask_panel_appendf(&json, ",\"qr_mode\":");
+        if (app->config.global.panel_qr_mode == EMTASK_PANEL_QR_DISABLED) {
+            emtask_panel_append_json_string(&json, "disabled");
+        } else if (app->config.global.panel_qr_mode == EMTASK_PANEL_QR_IF_MISSING) {
+            emtask_panel_append_json_string(&json, "if_missing");
+        } else {
+            emtask_panel_append_json_string(&json, "always");
+        }
         emtask_panel_appendf(&json, ",\"qr_host\":");
         emtask_panel_append_json_string(&json, emtask_panel_qr_host(&app->config.global));
         emtask_panel_appendf(
@@ -3343,16 +4724,31 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
             ",\"worker_pool\":{\"max_workers\":%u,\"active_workers\":%u}",
             pool_max,
             pool_active);
-        emtask_panel_appendf(&json, ",\"task_count\":%u", (unsigned)app->task_count);
+        if (app->task_lock_initialized) {
+            emtask_mutex_lock(&app->task_lock);
+            task_lock_held = 1;
+        }
+        emtask_panel_appendf(&json, ",\"task_count\":%u", (unsigned)emtask_active_task_count_locked(app));
         emtask_panel_appendf(&json, ",\"tasks\":[");
     } else {
+        if (app->task_lock_initialized) {
+            emtask_mutex_lock(&app->task_lock);
+            task_lock_held = 1;
+        }
         emtask_panel_appendf(&json, "{\"tasks\":[");
     }
     for (i = 0u; i < app->task_count; ++i) {
-        if (i != 0u) {
+        if (!app->tasks[i].initialized || app->tasks[i].deleted) {
+            continue;
+        }
+        if (emitted_tasks != 0u) {
             emtask_panel_appendf(&json, ",");
         }
         emtask_panel_append_task_json(&json, &app->tasks[i]);
+        ++emitted_tasks;
+    }
+    if (task_lock_held) {
+        emtask_mutex_unlock(&app->task_lock);
     }
     emtask_panel_appendf(&json, "]}\n");
     if (json.truncated) {
@@ -3363,13 +4759,14 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
 
 static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *conn)
 {
-    char request[1024];
+    char request[65536];
     char method[16];
     char target[512];
     char *path;
     char *query;
-    char body[32768];
-    int n;
+    char *request_body;
+    char response_body[32768];
+    size_t request_body_len;
     int status;
     uintptr_t socket_handle;
 
@@ -3377,20 +4774,16 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
         return SSH_ERR_INVALID_ARGUMENT;
     }
     socket_handle = conn->socket_handle;
-    memset(request, 0, sizeof(request));
-    switch (emtask_wait_for_socket(socket_handle, 0, 5000u)) {
-    case 0:
-        return SSH_ERR_PLATFORM;
-    case -1:
-        return SSH_ERR_PLATFORM;
-    default:
-        break;
+    request_body = NULL;
+    request_body_len = 0u;
+    response_body[0] = '\0';
+    status = emtask_panel_read_http_request(socket_handle, request, sizeof(request), &request_body, &request_body_len);
+    if (status == SSH_ERR_BUFFER_TOO_SMALL) {
+        return emtask_panel_send_response(socket_handle, 413, "Payload Too Large", "application/json", "{\"error\":\"payload_too_large\"}\n");
     }
-    n = emtask_platform_net_recv(socket_handle, (uint8_t *)request, sizeof(request) - 1u);
-    if (n <= 0) {
+    if (status != SSH_OK) {
         return SSH_ERR_PLATFORM;
     }
-    request[n] = '\0';
     method[0] = '\0';
     target[0] = '\0';
     if (sscanf(request, "%15s %511s", method, target) != 2) {
@@ -3404,7 +4797,7 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
     } else {
         query = "";
     }
-    if (strcmp(method, "GET") != 0) {
+    if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0) {
         return emtask_panel_send_response(
             socket_handle,
             405,
@@ -3420,6 +4813,88 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "application/json",
             "{\"error\":\"unauthorized\"}\n");
     }
+    if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/tasks") != 0) {
+            return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
+        }
+        if (request_body == NULL || request_body_len == 0u) {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"empty_body\"}\n");
+        }
+        status = emtask_panel_create_task_from_json(app, request_body, response_body, sizeof(response_body));
+        if (status == SSH_OK) {
+            return emtask_panel_send_response(socket_handle, 201, "Created", "application/json", response_body);
+        }
+        if (status == SSH_ERR_ALREADY_EXISTS) {
+            return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_conflict\"}\n");
+        }
+        if (status == SSH_ERR_BUFFER_TOO_SMALL) {
+            return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_capacity_full\"}\n");
+        }
+        if (status == SSH_ERR_INVALID_ARGUMENT || status == SSH_ERR_MALFORMED_PACKET) {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"invalid_task\"}\n");
+        }
+        if (status == SSH_ERR_NOT_FOUND || status == SSH_ERR_UNSUPPORTED || status == SSH_ERR_PLATFORM) {
+            if (response_body[0] != '\0') {
+                return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", response_body);
+            }
+            return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"create_task_failed\"}\n");
+        }
+        return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"create_task_failed\"}\n");
+    }
+    if (strcmp(method, "PATCH") == 0) {
+        char task_name[EMTASK_MAX_TASK_NAME];
+
+        if (strcmp(path, "/tasks") != 0) {
+            return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
+        }
+        if (!emtask_panel_query_value(query, "name", task_name, sizeof(task_name)) || task_name[0] == '\0') {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"missing_task_name\"}\n");
+        }
+        if (request_body == NULL || request_body_len == 0u) {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"empty_body\"}\n");
+        }
+        status = emtask_panel_update_task_from_json(app, task_name, request_body, response_body, sizeof(response_body));
+        if (status == SSH_OK) {
+            return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", response_body);
+        }
+        if (status == SSH_ERR_NOT_FOUND) {
+            return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"task_not_found\"}\n");
+        }
+        if (status == SSH_ERR_ALREADY_EXISTS || status == SSH_ERR_BUFFER_TOO_SMALL) {
+            return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_conflict\"}\n");
+        }
+        if (status == SSH_ERR_READ_ONLY) {
+            return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_in_use\"}\n");
+        }
+        if (status == SSH_ERR_INVALID_ARGUMENT || status == SSH_ERR_MALFORMED_PACKET) {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"invalid_task\"}\n");
+        }
+        return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"update_task_failed\"}\n");
+    }
+    if (strcmp(method, "DELETE") == 0) {
+        char task_name[EMTASK_MAX_TASK_NAME];
+
+        if (strcmp(path, "/tasks") != 0) {
+            return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
+        }
+        if (!emtask_panel_query_value(query, "name", task_name, sizeof(task_name)) || task_name[0] == '\0') {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"missing_task_name\"}\n");
+        }
+        status = emtask_panel_delete_task_by_name(app, task_name, response_body, sizeof(response_body));
+        if (status == SSH_OK) {
+            return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", response_body);
+        }
+        if (status == SSH_ERR_NOT_FOUND) {
+            return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"task_not_found\"}\n");
+        }
+        if (status == SSH_ERR_READ_ONLY) {
+            return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"task_in_use\"}\n");
+        }
+        if (status == SSH_ERR_INVALID_ARGUMENT || status == SSH_ERR_MALFORMED_PACKET) {
+            return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"invalid_task\"}\n");
+        }
+        return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"delete_task_failed\"}\n");
+    }
     if (strcmp(path, "/health") == 0) {
         return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", "{\"status\":\"ok\"}\n");
     }
@@ -3433,11 +4908,14 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "<body><h1>emtask panel</h1><ul>"
             "<li><a href=\"/status\">/status</a></li>"
             "<li><a href=\"/tasks\">/tasks</a></li>"
+            "<li>POST /tasks 添加动态子任务</li>"
+            "<li>PATCH /tasks?name=&lt;task&gt; 修改动态子任务</li>"
+            "<li>DELETE /tasks?name=&lt;task&gt; 删除动态子任务</li>"
             "<li><a href=\"/health\">/health</a></li>"
             "</ul></body></html>\n");
     }
     if (strcmp(path, "/status") == 0 || strcmp(path, "/tasks") == 0) {
-        status = emtask_panel_build_status_json(app, strcmp(path, "/tasks") == 0, body, sizeof(body));
+        status = emtask_panel_build_status_json(app, strcmp(path, "/tasks") == 0, response_body, sizeof(response_body));
         if (status != SSH_OK) {
             return emtask_panel_send_response(
                 socket_handle,
@@ -3446,21 +4924,129 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
                 "application/json",
                 "{\"error\":\"status_too_large\"}\n");
         }
-        return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", body);
+            return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", response_body);
     }
     return emtask_panel_send_response(socket_handle, 404, "Not Found", "application/json", "{\"error\":\"not_found\"}\n");
+}
+
+static unsigned emtask_bind_retry_max_sec(const emtask_global_config_t *global)
+{
+    if (global == NULL || global->bind_retry_max_sec == 0u) {
+        return 1u;
+    }
+    return global->bind_retry_max_sec;
+}
+
+static unsigned emtask_bind_retry_delay_sec(const emtask_global_config_t *global, unsigned attempt)
+{
+    unsigned max_sec;
+    unsigned delay;
+
+    max_sec = emtask_bind_retry_max_sec(global);
+    delay = 1u;
+    while (attempt > 0u && delay < max_sec) {
+        if (delay > max_sec / 2u) {
+            delay = max_sec;
+            break;
+        }
+        delay *= 2u;
+        --attempt;
+    }
+    return delay > max_sec ? max_sec : delay;
+}
+
+static void emtask_bind_retry_sleep(const emtask_global_config_t *global, unsigned *attempt_inout)
+{
+    unsigned attempt;
+    unsigned delay_sec;
+
+    attempt = attempt_inout != NULL ? *attempt_inout : 0u;
+    delay_sec = emtask_bind_retry_delay_sec(global, attempt);
+    if (attempt_inout != NULL) {
+        *attempt_inout = attempt + 1u;
+    }
+    emtask_platform_sleep_ms((uint32_t)(delay_sec * 1000u));
+}
+
+static int emtask_bind_retry_enabled(const emtask_app_t *app)
+{
+    return app != NULL && app->config.global.bind_retry_enabled;
+}
+
+static int emtask_panel_open_listener(emtask_app_t *app)
+{
+    const char *listen_address;
+    int status;
+
+    if (app == NULL || !app->config.global.panel_enabled) {
+        return SSH_OK;
+    }
+    if (app->panel_listener_open) {
+        return SSH_OK;
+    }
+
+    listen_address = app->config.global.panel_listen_address[0] != '\0'
+                         ? app->config.global.panel_listen_address
+                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
+    status = ssh_tcp_listen(
+        &app->tcp,
+        listen_address,
+        app->config.global.panel_port,
+        16,
+        &app->panel_listener);
+    if (status != SSH_OK) {
+        emtask_logf(
+            "panel listen failed on %s:%u: %s",
+            listen_address,
+            (unsigned)app->config.global.panel_port,
+            ssh_status_string(status));
+        return status;
+    }
+    app->panel_listener_open = 1;
+    return SSH_OK;
 }
 
 void emtask_panel_thread_main(emtask_app_t *app)
 {
     int status;
+    unsigned bind_attempt;
 
     if (app == NULL) {
         return;
     }
+    bind_attempt = 0u;
 
     for (;;) {
         ssh_tcp_conn_t accepted;
+
+        if (!app->panel_listener_open) {
+            status = emtask_panel_open_listener(app);
+            if (status != SSH_OK) {
+                unsigned delay_sec;
+
+                if (!emtask_bind_retry_enabled(app)) {
+                    emtask_logf("panel listener disabled after bind failure");
+                    return;
+                }
+                delay_sec = emtask_bind_retry_delay_sec(&app->config.global, bind_attempt);
+                emtask_logf(
+                    "panel listen retry in %u second(s), attempt=%u, max=%us",
+                    delay_sec,
+                    bind_attempt + 1u,
+                    emtask_bind_retry_max_sec(&app->config.global));
+                emtask_bind_retry_sleep(&app->config.global, &bind_attempt);
+                continue;
+            }
+            if (bind_attempt != 0u) {
+                emtask_logf(
+                    "panel listener recovered on %s:%u",
+                    app->config.global.panel_listen_address[0] != '\0'
+                        ? app->config.global.panel_listen_address
+                        : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
+                    (unsigned)app->config.global.panel_port);
+                bind_attempt = 0u;
+            }
+        }
 
         memset(&accepted, 0, sizeof(accepted));
         status = ssh_tcp_accept(&app->tcp, &app->panel_listener, &accepted, 0u);
@@ -3564,6 +5150,8 @@ static int emtask_term_spawn_locked(emtask_term_t *term, int count_as_restart)
 
     status = emtask_platform_term_spawn_locked(term);
     if (status == SSH_OK) {
+        term->exited = 0;
+        term->interrupt_restart_deadline_ms = 0u;
         emtask_logf("started task command: %s", term->command);
     } else {
         term->faulted = 1;
@@ -3574,17 +5162,59 @@ static int emtask_term_spawn_locked(emtask_term_t *term, int count_as_restart)
 
 static int emtask_term_poll_exit_locked(emtask_term_t *term, int *exited, uint32_t *exit_status)
 {
+    int observed_exited;
+    uint32_t observed_exit_status;
+    int status;
+
     if (exited != NULL) {
         *exited = 0;
     }
     if (exit_status != NULL) {
         *exit_status = term != NULL ? term->last_exit_status : 0u;
     }
-    if (term == NULL || !term->running) {
+    if (term == NULL) {
         return SSH_OK;
     }
 
-    return emtask_platform_term_poll_exit_locked(term, exited, exit_status);
+    if (!term->running) {
+        if (term->exited) {
+            if (exited != NULL) {
+                *exited = 1;
+            }
+            if (exit_status != NULL) {
+                *exit_status = term->last_exit_status;
+            }
+        }
+        return SSH_OK;
+    }
+
+    observed_exited = 0;
+    observed_exit_status = term->last_exit_status;
+    status = emtask_platform_term_poll_exit_locked(term, &observed_exited, &observed_exit_status);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (observed_exited) {
+        term->exited = 1;
+        term->last_exit_status = observed_exit_status;
+        if (exited != NULL) {
+            *exited = 1;
+        }
+        if (exit_status != NULL) {
+            *exit_status = observed_exit_status;
+        }
+    }
+    return SSH_OK;
+}
+
+static int emtask_term_signal_requests_restart(const char *signal_name)
+{
+    if (signal_name == NULL || signal_name[0] == '\0') {
+        return 0;
+    }
+    return emtask_key_equals(signal_name, "TERM") ||
+           emtask_key_equals(signal_name, "INT") ||
+           emtask_key_equals(signal_name, "KILL");
 }
 
 static int emtask_term_ensure_running_locked(emtask_term_t *term)
@@ -4461,6 +6091,9 @@ static int emtask_term_write(
     }
 
     emtask_mutex_lock(&term->lock);
+    if (memchr(buf, 0x03, len) != NULL) {
+        term->interrupt_restart_deadline_ms = emtask_monotonic_ms() + EMTASK_TERMINAL_RESTART_GRACE_MS;
+    }
     (void)emtask_term_poll_exit_locked(term, NULL, NULL);
     if (!term->running) {
         emtask_mutex_unlock(&term->lock);
@@ -4563,21 +6196,46 @@ static int emtask_term_signal(void *ctx, void *handle_ptr, const char *signal_na
 {
     emtask_term_attachment_t *attachment = (emtask_term_attachment_t *)handle_ptr;
     emtask_term_t *term = (emtask_term_t *)ctx;
-
-    (void)signal_name;
+    int restart_requested;
 
     if (term == NULL || attachment == NULL || !attachment->active) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    restart_requested = emtask_term_signal_requests_restart(signal_name);
     emtask_mutex_lock(&term->lock);
     if (!term->running) {
         emtask_mutex_unlock(&term->lock);
         return SSH_OK;
     }
+    if (restart_requested) {
+        term->interrupt_restart_deadline_ms = emtask_monotonic_ms() + EMTASK_TERMINAL_RESTART_GRACE_MS;
+    }
 
     {
         int status = emtask_platform_term_signal_locked(term, signal_name);
+        if (status == SSH_OK && restart_requested) {
+            int exited = 0;
+            uint32_t observed_exit_status = 0u;
+            int poll_status = emtask_term_poll_exit_locked(term, &exited, &observed_exit_status);
+            if (poll_status == SSH_OK && exited != 0 && !term->faulted) {
+                int restart_status = emtask_term_spawn_locked(term, 1);
+                if (restart_status == SSH_OK) {
+                    term->interrupt_restart_deadline_ms = 0u;
+                    emtask_logf(
+                        "attached task command restarted after signal %s exit status=%u",
+                        signal_name != NULL ? signal_name : "",
+                        observed_exit_status);
+                } else {
+                    term->interrupt_restart_deadline_ms = 0u;
+                    status = restart_status;
+                    emtask_logf(
+                        "attached task command failed to restart after signal %s exit status=%u",
+                        signal_name != NULL ? signal_name : "",
+                        observed_exit_status);
+                }
+            }
+        }
         emtask_mutex_unlock(&term->lock);
         return status;
     }
@@ -4641,6 +6299,22 @@ static int emtask_term_wait_exit(
 
     emtask_mutex_lock(&term->lock);
     status = emtask_term_poll_exit_locked(term, exited, exit_status);
+    if (status == SSH_OK && *exited != 0 &&
+        (*exit_status != 0u ||
+         (term->interrupt_restart_deadline_ms != 0u && emtask_monotonic_ms() <= term->interrupt_restart_deadline_ms)) &&
+        !term->faulted) {
+        uint32_t observed_exit_status = *exit_status;
+        int restart_status = emtask_term_spawn_locked(term, 1);
+        if (restart_status == SSH_OK) {
+            *exited = 0;
+            *exit_status = 0u;
+            term->interrupt_restart_deadline_ms = 0u;
+            emtask_logf("attached task command restarted after exit status=%u", observed_exit_status);
+        } else {
+            term->interrupt_restart_deadline_ms = 0u;
+            emtask_logf("attached task command failed to restart after exit status=%u", observed_exit_status);
+        }
+    }
     if (status == SSH_OK && *exited == 0) {
         status = emtask_term_update_for_wait_locked(term);
     }
@@ -5006,6 +6680,13 @@ void emtask_worker_thread_main(emtask_worker_t *worker)
                 emtask_endpoint_peer(&worker->endpoint),
                 ssh_status_string(status));
         }
+        if (worker->task != NULL && worker->app != NULL && worker->app->task_lock_initialized) {
+            emtask_mutex_lock(&worker->app->task_lock);
+            if (worker->task->worker_count > 0u) {
+                --worker->task->worker_count;
+            }
+            emtask_mutex_unlock(&worker->app->task_lock);
+        }
         emtask_worker_pool_release(&worker->app->pool);
         free(worker);
     }
@@ -5016,28 +6697,98 @@ static int emtask_start_worker_thread(emtask_worker_t *worker)
     return emtask_platform_start_worker_thread(worker);
 }
 
-static int emtask_start_panel_thread(emtask_app_t *app)
+static int emtask_task_open_listener(emtask_task_t *task)
 {
-    return emtask_platform_start_panel_thread(app);
+    emtask_app_t *app;
+    const char *listen_address;
+    int status;
+
+    if (task == NULL || task->app == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (task->listener_open) {
+        return SSH_OK;
+    }
+
+    app = task->app;
+    listen_address = task->config.listen_address[0] != '\0' ? task->config.listen_address : NULL;
+    status = ssh_tcp_listen(
+        &app->tcp,
+        listen_address,
+        task->config.port,
+        (int)app->config.global.max_workers,
+        &task->listener);
+    if (status != SSH_OK) {
+        emtask_logf(
+            "task %s listen failed on %s:%u: %s",
+            task->config.name,
+            listen_address != NULL ? listen_address : "0.0.0.0",
+            (unsigned)task->config.port,
+            ssh_status_string(status));
+        return status;
+    }
+    task->listener_open = 1;
+    return SSH_OK;
 }
 
 void emtask_listener_thread_main(emtask_task_t *task)
 {
     int status;
+    unsigned bind_attempt;
 
     if (task == NULL || task->app == NULL) {
         return;
     }
+    bind_attempt = 0u;
+    task->listener_thread_running = 1;
 
     for (;;) {
         ssh_tcp_conn_t accepted;
         emtask_worker_t *worker;
+
+        if (task->stop_requested || task->deleted) {
+            break;
+        }
+        if (!task->listener_open) {
+            status = emtask_task_open_listener(task);
+            if (status != SSH_OK) {
+                unsigned delay_sec;
+
+                if (task->stop_requested || task->deleted) {
+                    break;
+                }
+                if (!emtask_bind_retry_enabled(task->app)) {
+                    emtask_logf("task %s listener disabled after bind failure", task->config.name);
+                    break;
+                }
+                delay_sec = emtask_bind_retry_delay_sec(&task->app->config.global, bind_attempt);
+                emtask_logf(
+                    "task %s listen retry in %u second(s), attempt=%u, max=%us",
+                    task->config.name,
+                    delay_sec,
+                    bind_attempt + 1u,
+                    emtask_bind_retry_max_sec(&task->app->config.global));
+                emtask_bind_retry_sleep(&task->app->config.global, &bind_attempt);
+                continue;
+            }
+            if (bind_attempt != 0u) {
+                emtask_logf(
+                    "task %s listener recovered on %s:%u",
+                    task->config.name,
+                    task->config.listen_address[0] != '\0' ? task->config.listen_address : "0.0.0.0",
+                    (unsigned)task->config.port);
+                bind_attempt = 0u;
+            }
+        }
 
         memset(&accepted, 0, sizeof(accepted));
         emtask_worker_pool_reserve(&task->app->pool);
         status = ssh_tcp_accept(&task->app->tcp, &task->listener, &accepted, 0u);
         if (status != SSH_OK) {
             emtask_worker_pool_release(&task->app->pool);
+            if (task->stop_requested || task->deleted) {
+                break;
+            }
             emtask_logf("task %s accept failed: %s", task->config.name, ssh_status_string(status));
             continue;
         }
@@ -5053,6 +6804,18 @@ void emtask_listener_thread_main(emtask_task_t *task)
         worker->app = task->app;
         worker->task = task;
         emtask_endpoint_init(&worker->endpoint, &accepted);
+        if (task->app->task_lock_initialized) {
+            emtask_mutex_lock(&task->app->task_lock);
+            if (task->stop_requested || task->deleted) {
+                emtask_mutex_unlock(&task->app->task_lock);
+                (void)emtask_endpoint_close(&worker->endpoint);
+                emtask_worker_pool_release(&task->app->pool);
+                free(worker);
+                break;
+            }
+            ++task->worker_count;
+            emtask_mutex_unlock(&task->app->task_lock);
+        }
         emtask_logf(
             "task %s accepted connection from %s",
             task->config.name,
@@ -5061,11 +6824,19 @@ void emtask_listener_thread_main(emtask_task_t *task)
         status = emtask_start_worker_thread(worker);
         if (status != SSH_OK) {
             (void)emtask_endpoint_close(&worker->endpoint);
+            if (task->app->task_lock_initialized) {
+                emtask_mutex_lock(&task->app->task_lock);
+                if (task->worker_count > 0u) {
+                    --task->worker_count;
+                }
+                emtask_mutex_unlock(&task->app->task_lock);
+            }
             emtask_worker_pool_release(&task->app->pool);
             free(worker);
             emtask_logf("task %s failed to start worker thread", task->config.name);
         }
     }
+    task->listener_thread_running = 0;
 }
 
 static int emtask_task_init(emtask_app_t *app, emtask_task_t *task, const emtask_task_config_t *config)
@@ -5098,25 +6869,19 @@ static int emtask_task_init(emtask_app_t *app, emtask_task_t *task, const emtask
         emtask_session_manager_deinit(&task->session_manager);
         return status;
     }
-    status = ssh_tcp_listen(
-        &app->tcp,
-        task->config.listen_address[0] != '\0' ? task->config.listen_address : NULL,
-        task->config.port,
-        (int)app->config.global.max_workers,
-        &task->listener);
+    status = emtask_task_open_listener(task);
     if (status != SSH_OK) {
+        if (!emtask_bind_retry_enabled(app)) {
+            emtask_term_deinit(&task->term);
+            emtask_session_manager_deinit(&task->session_manager);
+            return status;
+        }
         emtask_logf(
-            "task %s listen failed on %s:%u: %s",
+            "task %s listener pending; bind retry enabled, max interval=%us",
             task->config.name,
-            task->config.listen_address[0] != '\0' ? task->config.listen_address : "0.0.0.0",
-            (unsigned)task->config.port,
-            ssh_status_string(status));
-        emtask_term_deinit(&task->term);
-        emtask_session_manager_deinit(&task->session_manager);
-        return status;
+            emtask_bind_retry_max_sec(&app->config.global));
     }
 
-    task->listener_open = 1;
     task->initialized = 1;
     return SSH_OK;
 }
@@ -5126,6 +6891,7 @@ static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task)
     if (task == NULL || !task->initialized) {
         return;
     }
+    task->stop_requested = 1;
     if (task->listener_open) {
         (void)ssh_tcp_listener_close(app != NULL ? &app->tcp : NULL, &task->listener);
         task->listener_open = 0;
@@ -5137,31 +6903,21 @@ static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task)
 
 static int emtask_panel_init(emtask_app_t *app)
 {
-    const char *listen_address;
     int status;
 
     if (app == NULL || !app->config.global.panel_enabled) {
         return SSH_OK;
     }
 
-    listen_address = app->config.global.panel_listen_address[0] != '\0'
-                         ? app->config.global.panel_listen_address
-                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
-    status = ssh_tcp_listen(
-        &app->tcp,
-        listen_address,
-        app->config.global.panel_port,
-        16,
-        &app->panel_listener);
+    status = emtask_panel_open_listener(app);
     if (status != SSH_OK) {
+        if (!emtask_bind_retry_enabled(app)) {
+            return status;
+        }
         emtask_logf(
-            "panel listen failed on %s:%u: %s",
-            listen_address,
-            (unsigned)app->config.global.panel_port,
-            ssh_status_string(status));
-        return status;
+            "panel listener pending; bind retry enabled, max interval=%us",
+            emtask_bind_retry_max_sec(&app->config.global));
     }
-    app->panel_listener_open = 1;
     return SSH_OK;
 }
 
@@ -5228,12 +6984,24 @@ int main(int argc, char **argv)
         emtask_passwd_auth_deinit(&app);
         return 2;
     }
+    status = emtask_mutex_init(&app.task_lock);
+    if (status != SSH_OK) {
+        emtask_logf("task lock init failed: %s", ssh_status_string(status));
+        emtask_worker_pool_deinit(&app.pool);
+        ssh_tcp_platform_deinit(&app.tcp);
+        emtask_passwd_auth_deinit(&app);
+        return 2;
+    }
+    app.task_lock_initialized = 1;
     app.started_ms = emtask_platform_monotonic_ms();
 
     app.task_count = app.config.task_count;
-    app.tasks = (emtask_task_t *)calloc(app.task_count, sizeof(*app.tasks));
+    app.task_capacity = EMTASK_MAX_TASKS;
+    app.tasks = (emtask_task_t *)calloc(app.task_capacity, sizeof(*app.tasks));
     if (app.tasks == NULL) {
         emtask_logf("task array alloc failed");
+        emtask_mutex_deinit(&app.task_lock);
+        app.task_lock_initialized = 0;
         emtask_worker_pool_deinit(&app.pool);
         ssh_tcp_platform_deinit(&app.tcp);
         emtask_passwd_auth_deinit(&app);
@@ -5249,6 +7017,8 @@ int main(int argc, char **argv)
                 emtask_task_deinit(&app, &app.tasks[i]);
             }
             free(app.tasks);
+            emtask_mutex_deinit(&app.task_lock);
+            app.task_lock_initialized = 0;
             emtask_worker_pool_deinit(&app.pool);
             ssh_tcp_platform_deinit(&app.tcp);
             emtask_passwd_auth_deinit(&app);
@@ -5263,6 +7033,8 @@ int main(int argc, char **argv)
             emtask_task_deinit(&app, &app.tasks[i]);
         }
         free(app.tasks);
+        emtask_mutex_deinit(&app.task_lock);
+        app.task_lock_initialized = 0;
         emtask_worker_pool_deinit(&app.pool);
         ssh_tcp_platform_deinit(&app.tcp);
         emtask_passwd_auth_deinit(&app);
@@ -5276,8 +7048,9 @@ int main(int argc, char **argv)
         app.config.global.username[0] != '\0' ? app.config.global.username : "<system>");
     for (i = 0u; i < app.task_count; ++i) {
         printf(
-            "  task %s listening on %s:%u, restart_limit=%u/%us\n",
+            "  task %s %s on %s:%u, restart_limit=%u/%us\n",
             app.tasks[i].config.name,
+            app.tasks[i].listener_open ? "listening" : "listener pending",
             app.tasks[i].config.listen_address[0] != '\0' ? app.tasks[i].config.listen_address : "0.0.0.0",
             (unsigned)app.tasks[i].config.port,
             app.tasks[i].config.restart_limit,
@@ -5285,7 +7058,8 @@ int main(int argc, char **argv)
     }
     if (app.config.global.panel_enabled) {
         printf(
-            "  panel listening on %s:%u\n",
+            "  panel %s on %s:%u\n",
+            app.panel_listener_open ? "listening" : "listener pending",
             app.config.global.panel_listen_address[0] != '\0'
                 ? app.config.global.panel_listen_address
                 : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
@@ -5294,22 +7068,30 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     if (app.config.global.panel_enabled) {
-        status = emtask_start_panel_thread(&app);
-        if (status != SSH_OK) {
-            emtask_logf("panel thread start failed: %s", ssh_status_string(status));
-            emtask_panel_deinit(&app);
-            return 2;
+        for (i = 0u; i < app.task_count; ++i) {
+            app.tasks[i].listener_thread_running = 1;
+            status = emtask_platform_start_listener_thread(&app.tasks[i]);
+            if (status != SSH_OK) {
+                app.tasks[i].listener_thread_running = 0;
+                emtask_logf("task %s listener thread start failed: %s", app.tasks[i].config.name, ssh_status_string(status));
+                return 2;
+            }
         }
+        emtask_panel_thread_main(&app);
+        return 0;
     }
 
     for (i = 1u; i < app.task_count; ++i) {
+        app.tasks[i].listener_thread_running = 1;
         status = emtask_platform_start_listener_thread(&app.tasks[i]);
         if (status != SSH_OK) {
+            app.tasks[i].listener_thread_running = 0;
             emtask_logf("task %s listener thread start failed: %s", app.tasks[i].config.name, ssh_status_string(status));
             return 2;
         }
     }
 
+    app.tasks[0].listener_thread_running = 1;
     emtask_listener_thread_main(&app.tasks[0]);
     return 0;
 }

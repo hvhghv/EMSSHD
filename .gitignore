@@ -1,7 +1,7 @@
 # Build directories
 /build*/
 /cmake-build*/
-
+build*
 # CMake/Ninja artifacts
 CMakeCache.txt
 CMakeFiles/
@@ -23,6 +23,9 @@ build.ninja
 *.dll
 *.exe
 !/tools/emtask-service-wrapper.exe
+!/File/sqlite-runtime/win-x64/sqlite3.dll
+!/File/sqlite-runtime/linux-x64/libsqlite3.so
+!/File/sqlite-runtime/linux-x64/libsqlite3.so.0
 *.pdb
 
 # Logs and runtime outputs
@@ -38,7 +41,7 @@ emtask_panel_auth.keys
 emtask_panel_connect.svg
 
 # Cache/temp
-/.cache/
+**/.cache
 *.tmp
 *.temp
 *~

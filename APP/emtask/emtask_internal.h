@@ -31,12 +31,14 @@
 #define EMTASK_DEFAULT_PANEL_PORT 6024u
 #define EMTASK_DEFAULT_PANEL_AUTH_FILE "emtask_panel_auth.keys"
 #define EMTASK_DEFAULT_PANEL_QR_FILE "emtask_panel_connect.svg"
+#define EMTASK_DEFAULT_PANEL_TASKS_DB_FILE "emtask_tasks.sqlite3"
 #define EMTASK_DEFAULT_PANEL_QR_HOST "127.0.0.1"
 #define EMTASK_PANEL_AUTH_TOKEN 0x01u
 #define EMTASK_PANEL_AUTH_OTP 0x02u
 #define EMTASK_DEFAULT_PANEL_OTP_DIGITS 6u
 #define EMTASK_DEFAULT_PANEL_OTP_STEP_SEC 60u
 #define EMTASK_DEFAULT_PANEL_OTP_WINDOW 1u
+#define EMTASK_DEFAULT_BIND_RETRY_MAX_SEC 300u
 #define EMTASK_DEFAULT_RESTART_LIMIT 8u
 #define EMTASK_DEFAULT_RESTART_WINDOW_SEC 60u
 #define EMTASK_DEFAULT_TERM_COLS 80u
@@ -50,6 +52,12 @@ typedef enum emtask_auth_backend {
     EMTASK_AUTH_BACKEND_PASSWD = 1
 } emtask_auth_backend_t;
 
+typedef enum emtask_panel_qr_mode {
+    EMTASK_PANEL_QR_DISABLED = 0,
+    EMTASK_PANEL_QR_IF_MISSING = 1,
+    EMTASK_PANEL_QR_ALWAYS = 2
+} emtask_panel_qr_mode_t;
+
 typedef struct emtask_global_config {
     char config_path[EMTASK_MAX_PATH];
     char config_dir[EMTASK_MAX_PATH];
@@ -62,6 +70,7 @@ typedef struct emtask_global_config {
     char panel_otp_secret[EMTASK_MAX_TEXT];
     char panel_auth_file[EMTASK_MAX_PATH];
     char panel_qr_file[EMTASK_MAX_PATH];
+    char panel_tasks_db_file[EMTASK_MAX_PATH];
     char panel_qr_host[EMTASK_MAX_TEXT];
     uint32_t timeout_ms;
     unsigned max_workers;
@@ -69,9 +78,12 @@ typedef struct emtask_global_config {
     unsigned panel_otp_digits;
     unsigned panel_otp_step_sec;
     unsigned panel_otp_window;
+    unsigned bind_retry_max_sec;
     uint16_t panel_port;
     int use_conpty;
     int panel_enabled;
+    int bind_retry_enabled;
+    emtask_panel_qr_mode_t panel_qr_mode;
     emtask_auth_backend_t auth_backend;
 } emtask_global_config_t;
 
@@ -157,6 +169,7 @@ typedef struct emtask_term {
     uint32_t last_exit_status;
     unsigned restart_limit;
     uint64_t restart_window_ms;
+    uint64_t interrupt_restart_deadline_ms;
     uint8_t *replay_buffer;
     size_t replay_capacity;
     size_t replay_start;
@@ -181,6 +194,7 @@ typedef struct emtask_term {
     int repaint_on_attach;
     int initialized;
     int attached;
+    int exited;
     int started_once;
     int running;
     int faulted;
@@ -193,10 +207,13 @@ typedef struct emtask_app {
     ssh_tcp_platform_t tcp;
     ssh_tcp_listener_t panel_listener;
     emtask_worker_pool_t pool;
+    emtask_mutex_t task_lock;
     struct emtask_task *tasks;
     size_t task_count;
+    size_t task_capacity;
     uint64_t started_ms;
     int panel_listener_open;
+    int task_lock_initialized;
     uint8_t hostkey_private[EMTASK_MAX_HOSTKEY_PRIVATE];
     size_t hostkey_private_len;
 #if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
@@ -214,6 +231,10 @@ typedef struct emtask_task {
     emtask_term_t term;
     int initialized;
     int listener_open;
+    int stop_requested;
+    int deleted;
+    int listener_thread_running;
+    unsigned worker_count;
 } emtask_task_t;
 
 typedef struct emtask_worker {
@@ -240,6 +261,11 @@ int emtask_platform_net_close(uintptr_t socket_handle);
 int emtask_platform_net_recv(uintptr_t socket_handle, uint8_t *buf, size_t len);
 int emtask_platform_net_send(uintptr_t socket_handle, const uint8_t *buf, size_t len);
 uint64_t emtask_platform_monotonic_ms(void);
+int emtask_platform_library_open(const char *path, void **handle_out);
+void emtask_platform_library_close(void *handle);
+void *emtask_platform_library_symbol(void *handle, const char *name);
+int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out);
+void emtask_platform_sleep_ms(uint32_t timeout_ms);
 
 int emtask_mutex_init(emtask_mutex_t *lock);
 void emtask_mutex_deinit(emtask_mutex_t *lock);

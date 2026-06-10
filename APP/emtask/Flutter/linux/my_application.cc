@@ -47,6 +47,7 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_title(window, "emtask_client");
   }
 
+  gtk_window_set_icon_from_file(window, "data/flutter_assets/assets/icons/emtask_icon.png", nullptr);
   gtk_window_set_default_size(window, 1280, 720);
   gtk_widget_show(GTK_WIDGET(window));
 

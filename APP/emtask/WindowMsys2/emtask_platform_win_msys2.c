@@ -170,6 +170,62 @@ uint64_t emtask_platform_monotonic_ms(void)
     return (uint64_t)GetTickCount64();
 }
 
+void emtask_platform_sleep_ms(uint32_t timeout_ms)
+{
+    Sleep((DWORD)timeout_ms);
+}
+
+int emtask_platform_library_open(const char *path, void **handle_out)
+{
+    HMODULE handle;
+
+    if (path == NULL || path[0] == '\0' || handle_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    handle = LoadLibraryA(path);
+    if (handle == NULL) {
+        *handle_out = NULL;
+        return SSH_ERR_NOT_FOUND;
+    }
+    *handle_out = (void *)handle;
+    return SSH_OK;
+}
+
+void emtask_platform_library_close(void *handle)
+{
+    if (handle != NULL) {
+        FreeLibrary((HMODULE)handle);
+    }
+}
+
+void *emtask_platform_library_symbol(void *handle, const char *name)
+{
+    if (handle == NULL || name == NULL) {
+        return NULL;
+    }
+    return (void *)GetProcAddress((HMODULE)handle, name);
+}
+
+int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out)
+{
+    int status;
+
+    if (handle_out == NULL || using_system_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *handle_out = NULL;
+    *using_system_out = 0;
+    status = emtask_platform_library_open(".\\sqlite3.dll", handle_out);
+    if (status == SSH_OK) {
+        return SSH_OK;
+    }
+    status = emtask_platform_library_open("sqlite3.dll", handle_out);
+    if (status == SSH_OK) {
+        *using_system_out = 1;
+    }
+    return status;
+}
+
 int emtask_mutex_init(emtask_mutex_t *lock)
 {
     emtask_mutex_impl_t *impl;

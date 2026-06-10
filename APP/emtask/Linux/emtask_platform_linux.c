@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -123,6 +124,76 @@ uint64_t emtask_platform_monotonic_ms(void)
         return 0u;
     }
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000u);
+}
+
+void emtask_platform_sleep_ms(uint32_t timeout_ms)
+{
+    struct timespec req;
+
+    req.tv_sec = (time_t)(timeout_ms / 1000u);
+    req.tv_nsec = (long)((timeout_ms % 1000u) * 1000000u);
+    while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+    }
+}
+
+int emtask_platform_library_open(const char *path, void **handle_out)
+{
+    void *handle;
+
+    if (path == NULL || path[0] == '\0' || handle_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        *handle_out = NULL;
+        return SSH_ERR_NOT_FOUND;
+    }
+    *handle_out = handle;
+    return SSH_OK;
+}
+
+void emtask_platform_library_close(void *handle)
+{
+    if (handle != NULL) {
+        (void)dlclose(handle);
+    }
+}
+
+void *emtask_platform_library_symbol(void *handle, const char *name)
+{
+    if (handle == NULL || name == NULL) {
+        return NULL;
+    }
+    return dlsym(handle, name);
+}
+
+int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out)
+{
+    int status;
+
+    if (handle_out == NULL || using_system_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *handle_out = NULL;
+    *using_system_out = 0;
+    status = emtask_platform_library_open("./libsqlite3.so.0", handle_out);
+    if (status == SSH_OK) {
+        return SSH_OK;
+    }
+    status = emtask_platform_library_open("./libsqlite3.so", handle_out);
+    if (status == SSH_OK) {
+        return SSH_OK;
+    }
+    status = emtask_platform_library_open("libsqlite3.so.0", handle_out);
+    if (status == SSH_OK) {
+        *using_system_out = 1;
+        return SSH_OK;
+    }
+    status = emtask_platform_library_open("libsqlite3.so", handle_out);
+    if (status == SSH_OK) {
+        *using_system_out = 1;
+    }
+    return status;
 }
 
 int emtask_mutex_init(emtask_mutex_t *lock)

@@ -81,6 +81,105 @@ enum EmTaskPanelAuthMode {
   tokenOtp,
 }
 
+class EmTaskClientSettings {
+  const EmTaskClientSettings({
+    required this.shortcutKeysEnabled,
+    required this.terminalKeyboardButtonOnly,
+    required this.sftpSmallFileBytes,
+    required this.sftpPreviewHeight,
+  });
+
+  static const defaultSftpSmallFileBytes = 512 * 1024;
+  static const minSftpSmallFileBytes = 64 * 1024;
+  static const maxSftpSmallFileBytes = 4 * 1024 * 1024;
+  static const defaultSftpPreviewHeight = 640;
+  static const minSftpPreviewHeight = 420;
+  static const maxSftpPreviewHeight = 1400;
+
+  factory EmTaskClientSettings.defaults({
+    bool shortcutKeysEnabled = false,
+    bool terminalKeyboardButtonOnly = false,
+    int sftpSmallFileBytes = defaultSftpSmallFileBytes,
+    int sftpPreviewHeight = defaultSftpPreviewHeight,
+  }) {
+    return EmTaskClientSettings(
+      shortcutKeysEnabled: shortcutKeysEnabled,
+      terminalKeyboardButtonOnly: terminalKeyboardButtonOnly,
+      sftpSmallFileBytes: clampSftpSmallFileBytes(sftpSmallFileBytes),
+      sftpPreviewHeight: clampSftpPreviewHeight(sftpPreviewHeight),
+    );
+  }
+
+  factory EmTaskClientSettings.fromJson(Map<String, Object?> json) {
+    return EmTaskClientSettings(
+      shortcutKeysEnabled: json['shortcutKeysEnabled'] as bool? ?? false,
+      terminalKeyboardButtonOnly:
+          json['terminalKeyboardButtonOnly'] as bool? ?? false,
+      sftpSmallFileBytes: clampSftpSmallFileBytes(
+        json['sftpSmallFileBytes'] as int? ?? defaultSftpSmallFileBytes,
+      ),
+      sftpPreviewHeight: clampSftpPreviewHeight(
+        json['sftpPreviewHeight'] as int? ?? defaultSftpPreviewHeight,
+      ),
+    );
+  }
+
+  final bool shortcutKeysEnabled;
+  final bool terminalKeyboardButtonOnly;
+  final int sftpSmallFileBytes;
+  final int sftpPreviewHeight;
+
+  static int clampSftpSmallFileBytes(int value) {
+    if (value < minSftpSmallFileBytes) {
+      return minSftpSmallFileBytes;
+    }
+    if (value > maxSftpSmallFileBytes) {
+      return maxSftpSmallFileBytes;
+    }
+    return value;
+  }
+
+  static int clampSftpPreviewHeight(int value) {
+    if (value < minSftpPreviewHeight) {
+      return minSftpPreviewHeight;
+    }
+    if (value > maxSftpPreviewHeight) {
+      return maxSftpPreviewHeight;
+    }
+    return value;
+  }
+
+  Map<String, Object?> toJson() {
+    return <String, Object?>{
+      'shortcutKeysEnabled': shortcutKeysEnabled,
+      'terminalKeyboardButtonOnly': terminalKeyboardButtonOnly,
+      'sftpSmallFileBytes': sftpSmallFileBytes,
+      'sftpPreviewHeight': sftpPreviewHeight,
+    };
+  }
+
+  String encode() => jsonEncode(toJson());
+
+  EmTaskClientSettings copyWith({
+    bool? shortcutKeysEnabled,
+    bool? terminalKeyboardButtonOnly,
+    int? sftpSmallFileBytes,
+    int? sftpPreviewHeight,
+  }) {
+    return EmTaskClientSettings(
+      shortcutKeysEnabled: shortcutKeysEnabled ?? this.shortcutKeysEnabled,
+      terminalKeyboardButtonOnly:
+          terminalKeyboardButtonOnly ?? this.terminalKeyboardButtonOnly,
+      sftpSmallFileBytes: clampSftpSmallFileBytes(
+        sftpSmallFileBytes ?? this.sftpSmallFileBytes,
+      ),
+      sftpPreviewHeight: clampSftpPreviewHeight(
+        sftpPreviewHeight ?? this.sftpPreviewHeight,
+      ),
+    );
+  }
+}
+
 extension EmTaskPanelAuthModeX on EmTaskPanelAuthMode {
   String get wireName {
     switch (this) {
@@ -332,9 +431,21 @@ class EmTaskSessionProfile {
     required this.port,
     required this.username,
     required this.password,
+    required this.privateKeyPath,
+    required this.privateKeyPassphrase,
     required this.shellKind,
     required this.initialPath,
     required this.supportsSftp,
+    required this.panelId,
+    required this.panelTaskName,
+    required this.panelTaskCommand,
+    required this.panelTaskWorkingDir,
+    required this.panelTaskSyncName,
+    required this.panelTaskSyncHost,
+    required this.panelTaskSyncPort,
+    required this.panelTaskSyncCommand,
+    required this.panelTaskSyncWorkingDir,
+    required this.panelTaskSyncSftp,
   });
 
   factory EmTaskSessionProfile.defaults({
@@ -344,9 +455,21 @@ class EmTaskSessionProfile {
     int port = 2222,
     String username = 'emtask',
     String password = 'emtask',
+    String privateKeyPath = '',
+    String privateKeyPassphrase = '',
     EmTaskShellKind shellKind = EmTaskShellKind.cmd,
     String initialPath = '.',
     bool supportsSftp = false,
+    String panelId = '',
+    String panelTaskName = '',
+    String panelTaskCommand = '',
+    String panelTaskWorkingDir = '.',
+    bool panelTaskSyncName = true,
+    bool panelTaskSyncHost = true,
+    bool panelTaskSyncPort = true,
+    bool panelTaskSyncCommand = true,
+    bool panelTaskSyncWorkingDir = true,
+    bool panelTaskSyncSftp = true,
   }) {
     return EmTaskSessionProfile(
       id: id,
@@ -355,9 +478,21 @@ class EmTaskSessionProfile {
       port: port,
       username: username,
       password: password,
+      privateKeyPath: privateKeyPath,
+      privateKeyPassphrase: privateKeyPassphrase,
       shellKind: shellKind,
       initialPath: initialPath,
       supportsSftp: supportsSftp,
+      panelId: panelId,
+      panelTaskName: panelTaskName,
+      panelTaskCommand: panelTaskCommand,
+      panelTaskWorkingDir: panelTaskWorkingDir,
+      panelTaskSyncName: panelTaskSyncName,
+      panelTaskSyncHost: panelTaskSyncHost,
+      panelTaskSyncPort: panelTaskSyncPort,
+      panelTaskSyncCommand: panelTaskSyncCommand,
+      panelTaskSyncWorkingDir: panelTaskSyncWorkingDir,
+      panelTaskSyncSftp: panelTaskSyncSftp,
     );
   }
 
@@ -369,9 +504,21 @@ class EmTaskSessionProfile {
       port: json['port'] as int? ?? 2222,
       username: json['username'] as String? ?? 'emtask',
       password: json['password'] as String? ?? '',
+      privateKeyPath: json['privateKeyPath'] as String? ?? '',
+      privateKeyPassphrase: json['privateKeyPassphrase'] as String? ?? '',
       shellKind: EmTaskShellKindX.fromWireName(json['shellKind'] as String?),
       initialPath: json['initialPath'] as String? ?? '.',
       supportsSftp: json['supportsSftp'] as bool? ?? false,
+      panelId: json['panelId'] as String? ?? '',
+      panelTaskName: json['panelTaskName'] as String? ?? '',
+      panelTaskCommand: json['panelTaskCommand'] as String? ?? '',
+      panelTaskWorkingDir: json['panelTaskWorkingDir'] as String? ?? '.',
+      panelTaskSyncName: json['panelTaskSyncName'] as bool? ?? true,
+      panelTaskSyncHost: json['panelTaskSyncHost'] as bool? ?? true,
+      panelTaskSyncPort: json['panelTaskSyncPort'] as bool? ?? true,
+      panelTaskSyncCommand: json['panelTaskSyncCommand'] as bool? ?? true,
+      panelTaskSyncWorkingDir: json['panelTaskSyncWorkingDir'] as bool? ?? true,
+      panelTaskSyncSftp: json['panelTaskSyncSftp'] as bool? ?? true,
     );
   }
 
@@ -381,9 +528,23 @@ class EmTaskSessionProfile {
   final int port;
   final String username;
   final String password;
+  final String privateKeyPath;
+  final String privateKeyPassphrase;
   final EmTaskShellKind shellKind;
   final String initialPath;
   final bool supportsSftp;
+  final String panelId;
+  final String panelTaskName;
+  final String panelTaskCommand;
+  final String panelTaskWorkingDir;
+  final bool panelTaskSyncName;
+  final bool panelTaskSyncHost;
+  final bool panelTaskSyncPort;
+  final bool panelTaskSyncCommand;
+  final bool panelTaskSyncWorkingDir;
+  final bool panelTaskSyncSftp;
+
+  bool get hasPrivateKey => privateKeyPath.trim().isNotEmpty;
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -393,9 +554,21 @@ class EmTaskSessionProfile {
       'port': port,
       'username': username,
       'password': password,
+      'privateKeyPath': privateKeyPath,
+      'privateKeyPassphrase': privateKeyPassphrase,
       'shellKind': shellKind.wireName,
       'initialPath': initialPath,
       'supportsSftp': supportsSftp,
+      'panelId': panelId,
+      'panelTaskName': panelTaskName,
+      'panelTaskCommand': panelTaskCommand,
+      'panelTaskWorkingDir': panelTaskWorkingDir,
+      'panelTaskSyncName': panelTaskSyncName,
+      'panelTaskSyncHost': panelTaskSyncHost,
+      'panelTaskSyncPort': panelTaskSyncPort,
+      'panelTaskSyncCommand': panelTaskSyncCommand,
+      'panelTaskSyncWorkingDir': panelTaskSyncWorkingDir,
+      'panelTaskSyncSftp': panelTaskSyncSftp,
     };
   }
 
@@ -408,9 +581,21 @@ class EmTaskSessionProfile {
     int? port,
     String? username,
     String? password,
+    String? privateKeyPath,
+    String? privateKeyPassphrase,
     EmTaskShellKind? shellKind,
     String? initialPath,
     bool? supportsSftp,
+    String? panelId,
+    String? panelTaskName,
+    String? panelTaskCommand,
+    String? panelTaskWorkingDir,
+    bool? panelTaskSyncName,
+    bool? panelTaskSyncHost,
+    bool? panelTaskSyncPort,
+    bool? panelTaskSyncCommand,
+    bool? panelTaskSyncWorkingDir,
+    bool? panelTaskSyncSftp,
   }) {
     return EmTaskSessionProfile(
       id: id ?? this.id,
@@ -419,9 +604,22 @@ class EmTaskSessionProfile {
       port: port ?? this.port,
       username: username ?? this.username,
       password: password ?? this.password,
+      privateKeyPath: privateKeyPath ?? this.privateKeyPath,
+      privateKeyPassphrase: privateKeyPassphrase ?? this.privateKeyPassphrase,
       shellKind: shellKind ?? this.shellKind,
       initialPath: initialPath ?? this.initialPath,
       supportsSftp: supportsSftp ?? this.supportsSftp,
+      panelId: panelId ?? this.panelId,
+      panelTaskName: panelTaskName ?? this.panelTaskName,
+      panelTaskCommand: panelTaskCommand ?? this.panelTaskCommand,
+      panelTaskWorkingDir: panelTaskWorkingDir ?? this.panelTaskWorkingDir,
+      panelTaskSyncName: panelTaskSyncName ?? this.panelTaskSyncName,
+      panelTaskSyncHost: panelTaskSyncHost ?? this.panelTaskSyncHost,
+      panelTaskSyncPort: panelTaskSyncPort ?? this.panelTaskSyncPort,
+      panelTaskSyncCommand: panelTaskSyncCommand ?? this.panelTaskSyncCommand,
+      panelTaskSyncWorkingDir:
+          panelTaskSyncWorkingDir ?? this.panelTaskSyncWorkingDir,
+      panelTaskSyncSftp: panelTaskSyncSftp ?? this.panelTaskSyncSftp,
     );
   }
 

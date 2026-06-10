@@ -7,20 +7,13 @@ import 'models.dart';
 class EmTaskProfileStore {
   static const _profilesKey = 'emtask_client.sessions.v1';
   static const _panelsKey = 'emtask_client.panels.v1';
+  static const _settingsKey = 'emtask_client.settings.v1';
 
   Future<List<EmTaskSessionProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getStringList(_profilesKey);
     if (saved == null || saved.isEmpty) {
-      return <EmTaskSessionProfile>[
-        EmTaskSessionProfile.defaults(),
-        EmTaskSessionProfile.defaults(
-          id: 'default-powershell',
-          name: 'emtask powershell',
-          port: 2223,
-          shellKind: EmTaskShellKind.powershell,
-        ),
-      ];
+      return <EmTaskSessionProfile>[];
     }
 
     final profiles = <EmTaskSessionProfile>[];
@@ -35,9 +28,7 @@ class EmTaskProfileStore {
       }
     }
 
-    return profiles.isEmpty
-        ? <EmTaskSessionProfile>[EmTaskSessionProfile.defaults()]
-        : profiles;
+    return profiles;
   }
 
   Future<void> saveProfiles(List<EmTaskSessionProfile> profiles) async {
@@ -75,5 +66,28 @@ class EmTaskProfileStore {
       _panelsKey,
       panels.map((panel) => panel.encode()).toList(growable: false),
     );
+  }
+
+  Future<EmTaskClientSettings> loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_settingsKey);
+    if (saved == null || saved.isEmpty) {
+      return EmTaskClientSettings.defaults();
+    }
+
+    try {
+      final json = jsonDecode(saved);
+      if (json is Map<String, Object?>) {
+        return EmTaskClientSettings.fromJson(json);
+      }
+    } catch (_) {
+      // Ignore broken settings and use safe defaults.
+    }
+    return EmTaskClientSettings.defaults();
+  }
+
+  Future<void> saveSettings(EmTaskClientSettings settings) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_settingsKey, settings.encode());
   }
 }

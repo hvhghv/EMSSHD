@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:xterm/xterm.dart';
@@ -17,6 +18,41 @@ import 'src/models.dart';
 import 'src/panel_client.dart';
 import 'src/profile_store.dart';
 import 'src/windows_screen_capture.dart';
+
+const _appDisplayName = 'emtask Client';
+const _appVersion = '1.0.0+1';
+
+Map<ShortcutActivator, Intent> _terminalShortcutsForPlatform(
+  TargetPlatform platform,
+) {
+  switch (platform) {
+    case TargetPlatform.iOS:
+    case TargetPlatform.macOS:
+      return <ShortcutActivator, Intent>{
+        const SingleActivator(LogicalKeyboardKey.keyC, meta: true, shift: true):
+            CopySelectionTextIntent.copy,
+        const SingleActivator(LogicalKeyboardKey.keyV, meta: true, shift: true):
+            const PasteTextIntent(SelectionChangedCause.keyboard),
+      };
+    case TargetPlatform.android:
+    case TargetPlatform.fuchsia:
+    case TargetPlatform.linux:
+    case TargetPlatform.windows:
+      return <ShortcutActivator, Intent>{
+        const SingleActivator(LogicalKeyboardKey.keyC,
+            control: true, shift: true): CopySelectionTextIntent.copy,
+        const SingleActivator(LogicalKeyboardKey.keyV,
+            control: true,
+            shift: true): const PasteTextIntent(SelectionChangedCause.keyboard),
+      };
+  }
+}
+
+@visibleForTesting
+Map<ShortcutActivator, Intent> terminalShortcutsForPlatformForTest(
+  TargetPlatform platform,
+) =>
+    _terminalShortcutsForPlatform(platform);
 
 void main() {
   runZonedGuarded(
@@ -130,6 +166,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
 
   List<EmTaskConnection> _connections = <EmTaskConnection>[];
   List<EmTaskPanelProfile> _panels = <EmTaskPanelProfile>[];
+  EmTaskClientSettings _settings = EmTaskClientSettings.defaults();
   final Set<String> _refreshingPanels = <String>{};
   Timer? _ticker;
   bool _loadingProfiles = true;
@@ -148,12 +185,14 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
   Future<void> _loadProfiles() async {
     final profiles = await _store.loadProfiles();
     final panels = await _store.loadPanels();
+    final settings = await _store.loadSettings();
     if (!mounted) {
       return;
     }
     setState(() {
       _connections = profiles.map(EmTaskConnection.new).toList();
       _panels = panels;
+      _settings = settings;
       _loadingProfiles = false;
     });
   }
@@ -168,13 +207,58 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     await _store.savePanels(_panels);
   }
 
+  void _applySettings(EmTaskClientSettings settings) {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _settings = settings);
+    unawaited(_store.saveSettings(settings));
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _SettingsPage(
+          settings: _settings,
+          onChanged: _applySettings,
+        ),
+      ),
+    );
+  }
+
   Future<void> _addOrEditProfile({EmTaskConnection? connection}) async {
+    final panel =
+        connection == null ? null : _panelForProfile(connection.profile);
     final profile = await showDialog<EmTaskSessionProfile>(
       context: context,
-      builder: (context) => _ProfileDialog(profile: connection?.profile),
+      builder: (context) => _ProfileDialog(
+        profile: connection?.profile,
+        isPanelSession: panel != null,
+      ),
     );
     if (profile == null) {
       return;
+    }
+
+    if (connection != null && panel != null) {
+      final request = _buildPanelUpdateRequest(connection.profile, profile);
+      if (request != null) {
+        try {
+          if (connection.isConnected || connection.isConnecting) {
+            await connection.disconnect(keepOutput: true);
+          }
+          await _panelClient.updateTask(
+            panel,
+            _panelTaskNameForProfile(connection.profile),
+            request,
+          );
+        } catch (error) {
+          if (mounted) {
+            _showHomeSnackBar('同步服务端会话失败：${_formatError(error)}');
+          }
+          return;
+        }
+      }
     }
 
     setState(() {
@@ -185,6 +269,47 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       }
     });
     await _saveProfiles();
+    if (panel != null) {
+      await _refreshPanel(panel, showSnackBar: false);
+    }
+  }
+
+  EmTaskPanelUpdateTaskRequest? _buildPanelUpdateRequest(
+    EmTaskSessionProfile previous,
+    EmTaskSessionProfile next,
+  ) {
+    String? listenAddress;
+    int? port;
+    String? command;
+    String? workingDir;
+    bool? useSftp;
+
+    if (next.panelTaskSyncHost && next.host != previous.host) {
+      listenAddress = next.host;
+    }
+    if (next.panelTaskSyncPort && next.port != previous.port) {
+      port = next.port;
+    }
+    if (next.panelTaskSyncCommand &&
+        next.panelTaskCommand != previous.panelTaskCommand) {
+      command = next.panelTaskCommand;
+    }
+    if (next.panelTaskSyncWorkingDir &&
+        next.panelTaskWorkingDir != previous.panelTaskWorkingDir) {
+      workingDir = next.panelTaskWorkingDir;
+    }
+    if (next.panelTaskSyncSftp && next.supportsSftp != previous.supportsSftp) {
+      useSftp = next.supportsSftp;
+    }
+
+    final request = EmTaskPanelUpdateTaskRequest(
+      listenAddress: listenAddress,
+      port: port,
+      command: command,
+      workingDir: workingDir,
+      useSftp: useSftp,
+    );
+    return request.isEmpty ? null : request;
   }
 
   Future<void> _addPanel() async {
@@ -310,30 +435,127 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     }
   }
 
-  Future<void> _refreshPanel(EmTaskPanelProfile panel) async {
+  Future<bool> _refreshPanel(
+    EmTaskPanelProfile panel, {
+    bool showSnackBar = true,
+  }) async {
     if (_refreshingPanels.contains(panel.id)) {
-      return;
+      return false;
     }
     setState(() => _refreshingPanels.add(panel.id));
     try {
       final sessions = await _panelClient.fetchSessions(panel);
       if (!mounted) {
-        return;
+        return false;
       }
       if (!_panels.any((item) => item.id == panel.id)) {
-        return;
+        return false;
       }
       setState(() => _upsertPanelProfiles(panel, sessions));
       await _saveProfiles();
-      _showHomeSnackBar('已从 ${panel.name} 获取 ${sessions.length} 个会话。');
+      if (showSnackBar) {
+        _showHomeSnackBar('已从 ${panel.name} 获取 ${sessions.length} 个会话。');
+      }
+      return true;
     } catch (error) {
-      if (mounted) {
+      if (mounted && showSnackBar) {
         _showHomeSnackBar('刷新面板失败：${_formatError(error)}');
       }
+      return false;
     } finally {
       if (mounted) {
         setState(() => _refreshingPanels.remove(panel.id));
       }
+    }
+  }
+
+  Future<void> _addPanelTask(
+    EmTaskPanelProfile panel, {
+    EmTaskSessionProfile? template,
+  }) async {
+    final request = await showDialog<EmTaskPanelCreateTaskRequest>(
+      context: context,
+      builder: (context) => _PanelTaskDialog(
+        panel: panel,
+        template: template,
+        existingTaskNames: _panelTaskNames(panel),
+      ),
+    );
+    if (request == null) {
+      return;
+    }
+
+    if (_panelTaskNameExists(panel, request.name)) {
+      _showHomeSnackBar('子任务名称 “${request.name}” 已存在，请换一个名称。');
+      return;
+    }
+
+    try {
+      final session = await _panelClient.createTask(panel, request);
+      if (!mounted || !_panels.any((item) => item.id == panel.id)) {
+        return;
+      }
+      setState(() => _upsertPanelProfiles(panel, <EmTaskSessionProfile>[
+            _normalizePanelSession(panel, session),
+          ]));
+      await _saveProfiles();
+      await _refreshPanel(panel, showSnackBar: false);
+      if (mounted) {
+        _showHomeSnackBar('已添加子任务 “${request.name}”。');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showHomeSnackBar('添加子任务失败：${_formatError(error)}');
+      }
+    }
+  }
+
+  Set<String> _panelTaskNames(EmTaskPanelProfile panel) {
+    return _panelConnections(panel)
+        .map((connection) => _panelTaskNameForProfile(connection.profile))
+        .where((name) => name.trim().isNotEmpty)
+        .map(_normalizeTaskNameKey)
+        .toSet();
+  }
+
+  bool _panelTaskNameExists(EmTaskPanelProfile panel, String taskName) {
+    final key = _normalizeTaskNameKey(taskName);
+    return key.isNotEmpty && _panelTaskNames(panel).contains(key);
+  }
+
+  static String _normalizeTaskNameKey(String taskName) {
+    return taskName.trim().toLowerCase();
+  }
+
+  Future<void> _refreshAllPanels() async {
+    if (_panels.isEmpty) {
+      _showHomeSnackBar('暂无面板可刷新。');
+      return;
+    }
+    if (_refreshingPanels.length == _panels.length) {
+      return;
+    }
+
+    final panels = _panels.toList(growable: false);
+    var refreshed = 0;
+    var failed = 0;
+    for (final panel in panels) {
+      if (!mounted || !_panels.any((item) => item.id == panel.id)) {
+        continue;
+      }
+      final ok = await _refreshPanel(panel, showSnackBar: false);
+      if (ok) {
+        refreshed += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    if (mounted) {
+      _showHomeSnackBar(
+        failed == 0
+            ? '已刷新 $refreshed 个面板。'
+            : '已刷新 $refreshed 个面板，$failed 个失败或跳过。',
+      );
     }
   }
 
@@ -547,7 +769,11 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         }
       }
       if (replacementIndex >= 0) {
-        connection.profile = normalized[replacementIndex];
+        connection.profile = _mergePanelSessionFromServer(
+          panel,
+          connection.profile,
+          normalized[replacementIndex],
+        );
         nextConnections.add(connection);
         usedSessionIndexes.add(replacementIndex);
       } else {
@@ -563,20 +789,58 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     _connections = nextConnections;
   }
 
+  EmTaskSessionProfile _mergePanelSessionFromServer(
+    EmTaskPanelProfile panel,
+    EmTaskSessionProfile local,
+    EmTaskSessionProfile remote,
+  ) {
+    final taskName = remote.panelTaskName.trim().isEmpty
+        ? local.panelTaskName
+        : remote.panelTaskName;
+    final displayName = local.name.trim().isEmpty ? remote.name : local.name;
+    return local.copyWith(
+      id: '${panel.id}-${taskName.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '-')}-${local.panelTaskSyncPort ? remote.port : local.port}',
+      name: displayName,
+      host: local.panelTaskSyncHost ? remote.host : local.host,
+      username: panel.username,
+      password: panel.password,
+      port: local.panelTaskSyncPort ? remote.port : local.port,
+      shellKind:
+          local.panelTaskSyncCommand ? remote.shellKind : local.shellKind,
+      supportsSftp:
+          local.panelTaskSyncSftp ? remote.supportsSftp : local.supportsSftp,
+      panelId: panel.id,
+      panelTaskName: taskName,
+      panelTaskCommand: local.panelTaskSyncCommand
+          ? remote.panelTaskCommand
+          : local.panelTaskCommand,
+      panelTaskWorkingDir: local.panelTaskSyncWorkingDir
+          ? remote.panelTaskWorkingDir
+          : local.panelTaskWorkingDir,
+    );
+  }
+
   EmTaskSessionProfile _normalizePanelSession(
     EmTaskPanelProfile panel,
     EmTaskSessionProfile profile,
   ) {
-    final taskName = profile.name.contains('/')
-        ? profile.name.split('/').last.trim()
-        : profile.name.trim();
+    final metadataTaskName = profile.panelTaskName.trim();
+    final taskName = metadataTaskName.isNotEmpty
+        ? metadataTaskName
+        : profile.name.contains('/')
+            ? profile.name.split('/').last.trim()
+            : profile.name.trim();
     final safeTask = taskName.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '-');
     return profile.copyWith(
       id: '${panel.id}-$safeTask-${profile.port}',
       name: '${panel.name} / ${taskName.isEmpty ? 'task' : taskName}',
-      host: panel.host,
+      host: profile.host.trim().isEmpty ? panel.host : profile.host,
       username: panel.username,
       password: panel.password,
+      panelId: panel.id,
+      panelTaskName: taskName,
+      panelTaskCommand: profile.panelTaskCommand,
+      panelTaskWorkingDir: profile.panelTaskWorkingDir,
     );
   }
 
@@ -585,7 +849,8 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     EmTaskPanelProfile panel,
   ) {
     final profile = connection.profile;
-    return profile.id.startsWith('${panel.id}-') ||
+    return profile.panelId == panel.id ||
+        profile.id.startsWith('${panel.id}-') ||
         (profile.host == panel.host &&
             profile.name.startsWith('${panel.name} /'));
   }
@@ -593,10 +858,34 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
   bool _isPanelProfile(EmTaskSessionProfile profile) {
     return _panels.any(
       (panel) =>
+          profile.panelId == panel.id ||
           profile.id.startsWith('${panel.id}-') ||
           (profile.host == panel.host &&
               profile.name.startsWith('${panel.name} /')),
     );
+  }
+
+  EmTaskPanelProfile? _panelForProfile(EmTaskSessionProfile profile) {
+    for (final panel in _panels) {
+      if (profile.panelId == panel.id ||
+          profile.id.startsWith('${panel.id}-') ||
+          (profile.host == panel.host &&
+              profile.name.startsWith('${panel.name} /'))) {
+        return panel;
+      }
+    }
+    return null;
+  }
+
+  String _panelTaskNameForProfile(EmTaskSessionProfile profile) {
+    final metadataTaskName = profile.panelTaskName.trim();
+    if (metadataTaskName.isNotEmpty) {
+      return metadataTaskName;
+    }
+    if (profile.name.contains('/')) {
+      return profile.name.split('/').last.trim();
+    }
+    return '';
   }
 
   List<EmTaskConnection> _panelConnections(EmTaskPanelProfile panel) {
@@ -609,17 +898,28 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     EmTaskSessionProfile left,
     EmTaskSessionProfile right,
   ) {
+    final leftTask = left.panelTaskName.trim();
+    final rightTask = right.panelTaskName.trim();
+    if (leftTask.isNotEmpty && rightTask.isNotEmpty && leftTask == rightTask) {
+      return true;
+    }
     return left.host == right.host &&
         left.port == right.port &&
         left.username == right.username;
   }
 
   Future<void> _removeProfile(EmTaskConnection connection) async {
+    final panel = _panelForProfile(connection.profile);
+    final panelTaskName = _panelTaskNameForProfile(connection.profile);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除会话'),
-        content: Text('确定删除 “${connection.profile.name}” 吗？'),
+        content: Text(
+          panel == null
+              ? '确定删除 “${connection.profile.name}” 吗？'
+              : '确定删除 “${connection.profile.name}” 吗？这会同步删除服务端动态子任务。',
+        ),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -640,9 +940,31 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     if (!mounted) {
       return;
     }
+
+    if (panel != null) {
+      if (panelTaskName.isEmpty) {
+        _showHomeSnackBar('无法确定面板子任务名称，请先刷新面板后再删除。');
+        return;
+      }
+      try {
+        await _panelClient.deleteTask(panel, panelTaskName);
+      } catch (error) {
+        if (mounted) {
+          _showHomeSnackBar('删除服务端子任务失败：${_formatError(error)}');
+        }
+        return;
+      }
+    }
+
     setState(() => _connections.remove(connection));
     connection.dispose();
     await _saveProfiles();
+    if (panel != null) {
+      await _refreshPanel(panel, showSnackBar: false);
+      if (mounted) {
+        _showHomeSnackBar('已删除服务端子任务 “$panelTaskName”。');
+      }
+    }
   }
 
   Future<void> _toggleConnection(EmTaskConnection connection) async {
@@ -683,6 +1005,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       MaterialPageRoute<void>(
         builder: (context) => EmTaskSessionPage(
           connection: connection,
+          shortcutKeysEnabled: _settings.shortcutKeysEnabled,
+          terminalKeyboardButtonOnly: _settings.terminalKeyboardButtonOnly,
+          sftpSmallFileBytes: _settings.sftpSmallFileBytes,
+          sftpPreviewHeight: _settings.sftpPreviewHeight,
           onProfilePathChanged: (path) => _saveEditedPath(connection, path),
         ),
       ),
@@ -697,8 +1023,19 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Text(message),
+        action: SnackBarAction(
+          label: '关闭',
+          onPressed: () {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          },
+        ),
+      ),
     );
   }
 
@@ -737,19 +1074,60 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         backgroundColor: const Color(0xff111827),
         actions: <Widget>[
           IconButton(
-            tooltip: '添加面板',
-            onPressed: _addPanel,
-            icon: const Icon(Icons.dashboard_outlined),
-          ),
-          IconButton(
-            tooltip: '二维码添加面板',
-            onPressed: _showQrImportOptions,
-            icon: const Icon(Icons.qr_code_scanner),
-          ),
-          IconButton(
             tooltip: '新增会话',
             onPressed: () => _addOrEditProfile(),
             icon: const Icon(Icons.add_circle_outline),
+          ),
+          PopupMenuButton<_HomeMenuAction>(
+            tooltip: '更多操作',
+            onSelected: (action) async {
+              switch (action) {
+                case _HomeMenuAction.refreshPanels:
+                  await _refreshAllPanels();
+                case _HomeMenuAction.addPanel:
+                  await _addPanel();
+                case _HomeMenuAction.importPanelQr:
+                  await _showQrImportOptions();
+                case _HomeMenuAction.settings:
+                  await _openSettings();
+              }
+            },
+            itemBuilder: (context) => <PopupMenuEntry<_HomeMenuAction>>[
+              PopupMenuItem<_HomeMenuAction>(
+                value: _HomeMenuAction.refreshPanels,
+                enabled: _panels.isNotEmpty && _refreshingPanels.isEmpty,
+                child: const ListTile(
+                  leading: Icon(Icons.sync_outlined),
+                  title: Text('刷新所有面板'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<_HomeMenuAction>(
+                value: _HomeMenuAction.addPanel,
+                child: ListTile(
+                  leading: Icon(Icons.dashboard_outlined),
+                  title: Text('添加面板'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem<_HomeMenuAction>(
+                value: _HomeMenuAction.importPanelQr,
+                child: ListTile(
+                  leading: Icon(Icons.qr_code_scanner),
+                  title: Text('二维码添加面板'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem<_HomeMenuAction>(
+                value: _HomeMenuAction.settings,
+                child: ListTile(
+                  leading: Icon(Icons.settings_outlined),
+                  title: Text('设置'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -790,6 +1168,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
             trailing: _PanelActions(
               refreshing: _refreshingPanels.contains(panel.id),
               onRefresh: () => _refreshPanel(panel),
+              onAddTask: () => _addPanelTask(panel),
               onEdit: () => _editPanel(panel),
               onDelete: () => _removePanel(panel),
             ),
@@ -886,11 +1265,15 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     return AnimatedBuilder(
       animation: connection,
       builder: (context, _) {
+        final panel = _panelForProfile(connection.profile);
         return _SessionTile(
           connection: connection,
           onOpen: () => _openSession(connection),
           onToggle: () => _toggleConnection(connection),
           onEdit: () => _addOrEditProfile(connection: connection),
+          onCreatePanelTaskFromTemplate: panel == null
+              ? null
+              : () => _addPanelTask(panel, template: connection.profile),
           onDelete: () => _removeProfile(connection),
         );
       },
@@ -902,10 +1285,18 @@ class EmTaskSessionPage extends StatefulWidget {
   const EmTaskSessionPage({
     super.key,
     required this.connection,
+    required this.shortcutKeysEnabled,
+    required this.terminalKeyboardButtonOnly,
+    required this.sftpSmallFileBytes,
+    required this.sftpPreviewHeight,
     required this.onProfilePathChanged,
   });
 
   final EmTaskConnection connection;
+  final bool shortcutKeysEnabled;
+  final bool terminalKeyboardButtonOnly;
+  final int sftpSmallFileBytes;
+  final int sftpPreviewHeight;
   final Future<void> Function(String path) onProfilePathChanged;
 
   @override
@@ -919,6 +1310,8 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   final _sftpPathController = TextEditingController();
   final _sftpListScrollController = ScrollController();
   final _sftpPreviewScrollController = ScrollController();
+  final _sftpEditorController = TextEditingController();
+  final _sftpOffsetController = TextEditingController(text: '0');
   StreamSubscription<String>? _terminalOutputSubscription;
 
   bool _showSftp = false;
@@ -926,9 +1319,20 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   String? _sftpError;
   String? _loadedDirectoryPath;
   String? _openedFilePath;
+  EmTaskSftpFileContent? _openedFileContent;
   String? _openedFileText;
+  String? _openedFileOriginalText;
+  bool _openedFileEditable = false;
+  bool _openedFileDirty = false;
+  bool _openedFileEditingBinary = false;
   List<EmTaskSftpEntry> _sftpEntries = const <EmTaskSftpEntry>[];
+  final _sftpEditCache = <String, _SftpEditCache>{};
   int _lastOutputLength = 0;
+  bool _shortcutCtrl = false;
+  bool _shortcutShift = false;
+  bool _shortcutAlt = false;
+  bool _terminalKeyboardUnlocked = true;
+  bool _applyingSftpEditorText = false;
 
   @override
   void initState() {
@@ -937,7 +1341,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
       maxLines: 5000,
       onOutput: (data) {
         try {
-          widget.connection.writeText(data);
+          widget.connection.writeText(_applyTerminalInputModifiers(data));
         } catch (error) {
           _terminal.write('\r\n$error\r\n');
         }
@@ -963,6 +1367,20 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
       _terminal.write,
     );
     widget.connection.addListener(_handleConnectionChanged);
+    _sftpEditorController.addListener(_handleSftpEditorChanged);
+    _terminalKeyboardUnlocked = !widget.terminalKeyboardButtonOnly;
+  }
+
+  @override
+  void didUpdateWidget(covariant EmTaskSessionPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.terminalKeyboardButtonOnly !=
+        widget.terminalKeyboardButtonOnly) {
+      _terminalKeyboardUnlocked = !widget.terminalKeyboardButtonOnly;
+      if (widget.terminalKeyboardButtonOnly) {
+        _terminalFocusNode.unfocus();
+      }
+    }
   }
 
   void _handleConnectionChanged() {
@@ -972,15 +1390,64 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     }
   }
 
+  void _handleSftpEditorChanged() {
+    if (_applyingSftpEditorText) {
+      return;
+    }
+    final path = _openedFilePath;
+    final originalText = _openedFileOriginalText;
+    if (path == null || !_openedFileEditable || originalText == null) {
+      return;
+    }
+    final editorText = _sftpEditorController.text;
+    final dirty = editorText != originalText;
+    if (dirty) {
+      _sftpEditCache[path] = _SftpEditCache(
+        originalText: originalText,
+        editedText: editorText,
+        editingBinary: _openedFileEditingBinary,
+      );
+    } else {
+      _sftpEditCache.remove(path);
+    }
+    if (dirty != _openedFileDirty && mounted) {
+      setState(() => _openedFileDirty = dirty);
+    }
+  }
+
+  void _clearOpenedSftpFile() {
+    _openedFilePath = null;
+    _openedFileContent = null;
+    _openedFileText = null;
+    _openedFileOriginalText = null;
+    _openedFileEditable = false;
+    _openedFileDirty = false;
+    _openedFileEditingBinary = false;
+    _setSftpEditorText('');
+    _sftpOffsetController.text = '0';
+  }
+
+  void _setSftpEditorText(String text) {
+    _applyingSftpEditorText = true;
+    _sftpEditorController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _applyingSftpEditorText = false;
+  }
+
   @override
   void dispose() {
     widget.connection.removeListener(_handleConnectionChanged);
     widget.connection.setActive(false);
+    _sftpEditorController.removeListener(_handleSftpEditorChanged);
     unawaited(_terminalOutputSubscription?.cancel());
     _terminalFocusNode.dispose();
     _sftpPathController.dispose();
     _sftpListScrollController.dispose();
     _sftpPreviewScrollController.dispose();
+    _sftpEditorController.dispose();
+    _sftpOffsetController.dispose();
     super.dispose();
   }
 
@@ -1010,8 +1477,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
       setState(() {
         _sftpError = _formatError(error);
         _sftpPathController.text = '.';
-        _openedFilePath = null;
-        _openedFileText = null;
+        _clearOpenedSftpFile();
       });
       return;
     }
@@ -1023,8 +1489,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     setState(() {
       _sftpBusy = true;
       _sftpError = null;
-      _openedFilePath = null;
-      _openedFileText = null;
+      _clearOpenedSftpFile();
     });
 
     try {
@@ -1051,6 +1516,18 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   Future<void> _openFile(EmTaskSftpEntry entry) async {
+    await _loadFilePage(
+      entry.path,
+      offset: 0,
+      preferredLength: _initialSftpReadLength(entry),
+    );
+  }
+
+  Future<void> _loadFilePage(
+    String path, {
+    required int offset,
+    int? preferredLength,
+  }) async {
     if (!widget.connection.isConnected) {
       setState(() => _sftpError = '请先连接会话，然后再读取文件。');
       return;
@@ -1058,17 +1535,176 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     setState(() {
       _sftpBusy = true;
       _sftpError = null;
-      _openedFilePath = entry.path;
+      _openedFilePath = path;
+      _openedFileContent = null;
       _openedFileText = null;
+      _openedFileOriginalText = null;
+      _openedFileEditable = false;
+      _openedFileDirty = false;
+      _openedFileEditingBinary = false;
     });
+    _setSftpEditorText('');
 
     try {
-      final content = await widget.connection.readSftpFile(entry.path);
+      final content = await widget.connection.readSftpFileContent(
+        path,
+        offset: offset,
+        length: preferredLength ?? EmTaskConnection.sftpPageBytes,
+      );
       if (!mounted) {
         return;
       }
-      setState(() => _openedFileText = content.isEmpty ? '文件为空。' : content);
+      _applyOpenedFileContent(path, content, useCache: offset == 0);
       _scrollSftpPreviewToTop();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = _formatError(error));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sftpBusy = false);
+      }
+    }
+  }
+
+  void _applyOpenedFileContent(
+    String path,
+    EmTaskSftpFileContent content, {
+    required bool useCache,
+  }) {
+    final cached = useCache ? _sftpEditCache[path] : null;
+    final canUseCache = content.isEditable &&
+        cached != null &&
+        cached.editingBinary == content.isBinaryEditable;
+    final editorText = canUseCache
+        ? cached.editedText
+        : content.isEditable
+            ? content.editorText
+            : '';
+    final originalText = canUseCache
+        ? cached.originalText
+        : content.isEditable
+            ? content.editorText
+            : null;
+    final dirty = originalText != null && editorText != originalText;
+
+    setState(() {
+      _openedFilePath = path;
+      _openedFileContent = content;
+      _openedFileText = content.displayText;
+      _openedFileOriginalText = originalText;
+      _openedFileEditable = content.isEditable;
+      _openedFileDirty = dirty;
+      _openedFileEditingBinary = content.isBinaryEditable;
+    });
+    _sftpOffsetController.text = content.offset.toString();
+    _setSftpEditorText(editorText);
+  }
+
+  Future<void> _loadOpenedFileOffset() async {
+    final path = _openedFilePath;
+    if (path == null) {
+      return;
+    }
+    final raw = _sftpOffsetController.text.trim();
+    final offset = int.tryParse(raw);
+    if (offset == null || offset < 0) {
+      setState(() => _sftpError = '偏移必须是大于等于 0 的整数。');
+      return;
+    }
+    await _loadFilePage(path, offset: offset);
+  }
+
+  Future<void> _loadPreviousFilePage() async {
+    final path = _openedFilePath;
+    final content = _openedFileContent;
+    if (path == null || content == null || !content.canGoPrevious) {
+      return;
+    }
+    await _loadFilePage(path, offset: content.previousOffset);
+  }
+
+  Future<void> _loadNextFilePage() async {
+    final path = _openedFilePath;
+    final content = _openedFileContent;
+    if (path == null || content == null || !content.canGoNext) {
+      return;
+    }
+    await _loadFilePage(path, offset: content.nextOffset);
+  }
+
+  int _initialSftpReadLength(EmTaskSftpEntry entry) {
+    final size = entry.size;
+    final smallFileBytes = EmTaskClientSettings.clampSftpSmallFileBytes(
+      widget.sftpSmallFileBytes,
+    );
+    if (size != null && size >= 0 && size <= smallFileBytes) {
+      return size == 0 ? 1 : size;
+    }
+    return EmTaskConnection.sftpPageBytes;
+  }
+
+  Future<void> _saveOpenedFile() async {
+    final path = _openedFilePath;
+    if (path == null || !_openedFileEditable) {
+      return;
+    }
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再保存文件。');
+      return;
+    }
+
+    final nextText = _sftpEditorController.text;
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    try {
+      final nextBytes = _openedFileEditingBinary
+          ? EmTaskSftpFileContent.parseHexBytes(nextText)
+          : Uint8List.fromList(utf8.encode(nextText));
+      if (_openedFileEditingBinary) {
+        await widget.connection.writeSftpFileBytes(path, nextBytes);
+      } else {
+        await widget.connection.writeSftpFile(path, nextText);
+      }
+      List<EmTaskSftpEntry>? refreshedEntries;
+      final currentDirectory = _loadedDirectoryPath;
+      if (currentDirectory != null) {
+        refreshedEntries =
+            await widget.connection.listSftpDirectory(currentDirectory);
+      }
+      if (!mounted) {
+        return;
+      }
+      final nextContent = EmTaskSftpFileContent(
+        text: _openedFileEditingBinary ? '' : nextText,
+        bytes: nextBytes,
+        size: nextBytes.length,
+        offset: 0,
+        length: nextBytes.length,
+        isTruncated: false,
+        isUtf8Text: !_openedFileEditingBinary,
+        pageBytes: EmTaskConnection.sftpPageBytes,
+      );
+      final nextEditorText = nextContent.editorText;
+      _sftpEditCache.remove(path);
+      setState(() {
+        _openedFileText = nextContent.displayText;
+        _openedFileOriginalText = nextEditorText;
+        _openedFileContent = nextContent;
+        _openedFileDirty = false;
+        if (refreshedEntries != null) {
+          _sftpEntries = refreshedEntries;
+        }
+      });
+      _setSftpEditorText(nextEditorText);
+      _showSnackBar('已保存 $path');
+    } on FormatException catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = 'HEX 内容格式错误：${error.message}');
+      }
     } catch (error) {
       if (mounted) {
         setState(() => _sftpError = _formatError(error));
@@ -1084,6 +1720,645 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     await _loadDirectory(path: _parentSftpPath(_sftpPathController.text));
   }
 
+  Future<void> _refreshSftpDirectory() async {
+    final connection = widget.connection;
+    if (!connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再刷新 SFTP。');
+      return;
+    }
+
+    if (_sftpEditCache.isNotEmpty) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('刷新会丢弃未保存编辑'),
+          content: Text(
+            '当前有 ${_sftpEditCache.length} 个文件存在未保存的编辑缓存。刷新会清空这些缓存，并重新读取服务端目录和文件。是否继续？',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.refresh),
+              label: const Text('刷新'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) {
+        return;
+      }
+    }
+
+    final rawPath = _loadedDirectoryPath ?? _sftpPathController.text;
+    late final String targetPath;
+    try {
+      targetPath = EmTaskConnection.normalizeSftpVirtualPath(rawPath);
+    } catch (error) {
+      setState(() => _sftpError = _formatError(error));
+      return;
+    }
+
+    final previouslyOpenedPath = _openedFilePath;
+    final previousOffset = _openedFileContent?.offset ?? 0;
+    _sftpEditCache.clear();
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    try {
+      final entries = await connection.listSftpDirectory(targetPath);
+      EmTaskSftpEntry? reopenedEntry;
+      if (previouslyOpenedPath != null) {
+        for (final entry in entries) {
+          if (!entry.isDirectory && entry.path == previouslyOpenedPath) {
+            reopenedEntry = entry;
+            break;
+          }
+        }
+      }
+
+      EmTaskSftpFileContent? reopenedContent;
+      if (reopenedEntry != null) {
+        reopenedContent = await connection.readSftpFileContent(
+          reopenedEntry.path,
+          offset: previousOffset,
+          length: previousOffset == 0
+              ? _initialSftpReadLength(reopenedEntry)
+              : EmTaskConnection.sftpPageBytes,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+      _sftpPathController.text = targetPath;
+      setState(() {
+        _sftpEntries = entries;
+        _loadedDirectoryPath = targetPath;
+      });
+      if (reopenedEntry != null && reopenedContent != null) {
+        _applyOpenedFileContent(
+          reopenedEntry.path,
+          reopenedContent,
+          useCache: false,
+        );
+        _scrollSftpListToEntry(reopenedEntry.path);
+        _scrollSftpPreviewToTop();
+      } else {
+        setState(_clearOpenedSftpFile);
+        _scrollSftpListToTop();
+      }
+      await widget.onProfilePathChanged(targetPath);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = _formatError(error));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sftpBusy = false);
+      }
+    }
+  }
+
+  Future<void> _createSftpFile() async {
+    await _createSftpEntry(isDirectory: false);
+  }
+
+  Future<void> _createSftpDirectory() async {
+    await _createSftpEntry(isDirectory: true);
+  }
+
+  Future<void> _createSftpEntry({required bool isDirectory}) async {
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再新建。');
+      return;
+    }
+    final name = await _showSftpNameDialog(
+      title: isDirectory ? '新建文件夹' : '新建文件',
+      labelText: isDirectory ? '文件夹名称' : '文件名称',
+      confirmText: '新建',
+    );
+    if (name == null) {
+      return;
+    }
+
+    late final String currentDirectory;
+    try {
+      currentDirectory = EmTaskConnection.normalizeSftpVirtualPath(
+        _loadedDirectoryPath ?? _sftpPathController.text,
+      );
+    } catch (error) {
+      setState(() => _sftpError = _formatError(error));
+      return;
+    }
+    final targetPath = _joinSftpChildPath(currentDirectory, name);
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    try {
+      if (isDirectory) {
+        await widget.connection.createSftpDirectory(targetPath);
+      } else {
+        await widget.connection.createSftpFile(targetPath);
+      }
+      final entries = await widget.connection.listSftpDirectory(
+        currentDirectory,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _sftpEntries = entries;
+        _loadedDirectoryPath = currentDirectory;
+        _sftpPathController.text = currentDirectory;
+      });
+      if (isDirectory) {
+        _scrollSftpListToEntry(targetPath);
+      } else {
+        await _loadFilePage(targetPath, offset: 0, preferredLength: 1);
+        _scrollSftpListToEntry(targetPath);
+      }
+      _showSnackBar('已新建${isDirectory ? '文件夹' : '文件'} $targetPath');
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = _formatError(error));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sftpBusy = false);
+      }
+    }
+  }
+
+  Future<void> _deleteSftpEntry(EmTaskSftpEntry entry) async {
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再删除。');
+      return;
+    }
+    final cachedCount = entry.isDirectory
+        ? _sftpCachedPathCountUnder(entry.path)
+        : (_sftpEditCache.containsKey(entry.path) ? 1 : 0);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('删除${entry.isDirectory ? '文件夹' : '文件'}'),
+        content: Text(
+          '确定删除 “${entry.path}” 吗？${entry.isDirectory ? '\n文件夹必须为空才能删除。' : ''}${cachedCount > 0 ? '\n相关未保存编辑缓存也会被删除。' : ''}',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    try {
+      await widget.connection.deleteSftpPath(
+        entry.path,
+        isDirectory: entry.isDirectory,
+      );
+      if (entry.isDirectory) {
+        _removeSftpCachesUnder(entry.path);
+      } else {
+        _sftpEditCache.remove(entry.path);
+      }
+      final currentDirectory = EmTaskConnection.normalizeSftpVirtualPath(
+        _loadedDirectoryPath ?? _sftpPathController.text,
+      );
+      final entries = await widget.connection.listSftpDirectory(
+        currentDirectory,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _sftpEntries = entries;
+        if (_openedFilePath == entry.path ||
+            (entry.isDirectory &&
+                _openedFilePath != null &&
+                _isSftpPathUnder(_openedFilePath!, entry.path))) {
+          _clearOpenedSftpFile();
+        }
+      });
+      _showSnackBar('已删除 ${entry.path}');
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = _formatError(error));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sftpBusy = false);
+      }
+    }
+  }
+
+  Future<void> _renameSftpEntry(EmTaskSftpEntry entry) async {
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再重命名。');
+      return;
+    }
+
+    final nextName = await _showSftpNameDialog(
+      title: '重命名${entry.isDirectory ? '文件夹' : '文件'}',
+      labelText: entry.isDirectory ? '新的文件夹名称' : '新的文件名称',
+      confirmText: '重命名',
+      initialText: entry.name,
+    );
+    if (nextName == null || nextName == entry.name) {
+      return;
+    }
+
+    final duplicate = _sftpEntries.any(
+      (candidate) => candidate.path != entry.path && candidate.name == nextName,
+    );
+    if (duplicate) {
+      setState(() => _sftpError = '当前目录已存在名为 “$nextName” 的条目。');
+      return;
+    }
+
+    final newPath = _joinSftpChildPath(_parentSftpPath(entry.path), nextName);
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    try {
+      await widget.connection.renameSftpPath(entry.path, newPath);
+      final currentDirectory = EmTaskConnection.normalizeSftpVirtualPath(
+        _loadedDirectoryPath ?? _sftpPathController.text,
+      );
+      final entries = await widget.connection.listSftpDirectory(
+        currentDirectory,
+      );
+      if (!mounted) {
+        return;
+      }
+      final renamedOpenedPath = _openedFilePath == null
+          ? null
+          : _replaceSftpPathPrefix(_openedFilePath!, entry.path, newPath);
+      _moveSftpCachesForRename(entry.path, newPath);
+      setState(() {
+        _sftpEntries = entries;
+        if (renamedOpenedPath != null) {
+          _openedFilePath = renamedOpenedPath;
+        }
+      });
+      _scrollSftpListToEntry(newPath);
+      _showSnackBar('已重命名为 $newPath');
+    } catch (error) {
+      if (mounted) {
+        setState(() => _sftpError = _formatError(error));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sftpBusy = false);
+      }
+    }
+  }
+
+  void _moveSftpCachesForRename(String oldPath, String newPath) {
+    final moved = <String, _SftpEditCache>{};
+    final removed = <String>[];
+    for (final MapEntry(key: path, value: cache) in _sftpEditCache.entries) {
+      final renamedPath = _replaceSftpPathPrefix(path, oldPath, newPath);
+      if (renamedPath == null) {
+        continue;
+      }
+      moved[renamedPath] = cache;
+      removed.add(path);
+    }
+    for (final path in removed) {
+      _sftpEditCache.remove(path);
+    }
+    _sftpEditCache.addAll(moved);
+  }
+
+  Future<void> _showSftpEditCacheDialog() async {
+    if (_sftpEditCache.isEmpty) {
+      _showSnackBar('当前没有未保存的文件编辑。');
+      return;
+    }
+
+    final cachedPaths = _sftpEditCache.keys.toList()..sort();
+    final selectedPaths = <String>{};
+    final result = await showDialog<_SftpEditCacheDialogResult>(
+      context: context,
+      builder: (context) {
+        final screenWidth = MediaQuery.sizeOf(context).width;
+        final dialogWidth = math.min(560.0, math.max(280.0, screenWidth - 64));
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void setSelected(String path, bool selected) {
+              setDialogState(() {
+                if (selected) {
+                  selectedPaths.add(path);
+                } else {
+                  selectedPaths.remove(path);
+                }
+              });
+            }
+
+            return AlertDialog(
+              title: Text('未保存的文件（已选 ${selectedPaths.length}）'),
+              content: SizedBox(
+                width: dialogWidth,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 360),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: cachedPaths.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final path = cachedPaths[index];
+                      final cache = _sftpEditCache[path]!;
+                      final selected = selectedPaths.contains(path);
+                      return CheckboxListTile(
+                        value: selected,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        secondary: IconButton(
+                          tooltip: '跳转到文件',
+                          icon: const Icon(Icons.open_in_new),
+                          onPressed: () => Navigator.of(context).pop(
+                            _SftpEditCacheDialogResult.jump(path),
+                          ),
+                        ),
+                        title: Text(
+                          path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          cache.editingBinary ? '二进制 HEX 编辑' : '文本编辑',
+                        ),
+                        onChanged: (value) => setSelected(path, value ?? false),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: selectedPaths.length == cachedPaths.length
+                      ? null
+                      : () => setDialogState(
+                            () => selectedPaths.addAll(cachedPaths),
+                          ),
+                  child: const Text('全选'),
+                ),
+                TextButton(
+                  onPressed: selectedPaths.isEmpty
+                      ? null
+                      : () => setDialogState(selectedPaths.clear),
+                  child: const Text('清空'),
+                ),
+                TextButton.icon(
+                  onPressed: selectedPaths.isEmpty
+                      ? null
+                      : () => Navigator.of(context).pop(
+                            _SftpEditCacheDialogResult.restore(selectedPaths),
+                          ),
+                  icon: const Icon(Icons.restore),
+                  label: const Text('恢复所选'),
+                ),
+                FilledButton.icon(
+                  onPressed: selectedPaths.isEmpty
+                      ? null
+                      : () => Navigator.of(context).pop(
+                            _SftpEditCacheDialogResult.save(selectedPaths),
+                          ),
+                  icon: const Icon(Icons.save_outlined),
+                  label: const Text('保存所选'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('关闭'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (result == null) {
+      return;
+    }
+    switch (result.action) {
+      case _SftpEditCacheDialogAction.jump:
+        await _jumpToSftpCachedFile(result.paths.single);
+      case _SftpEditCacheDialogAction.save:
+        await _saveSftpCachedFiles(result.paths);
+      case _SftpEditCacheDialogAction.restore:
+        _restoreSftpCachedFiles(result.paths);
+    }
+  }
+
+  Future<void> _saveSftpCachedFiles(List<String> paths) async {
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再保存未保存文件。');
+      return;
+    }
+
+    setState(() {
+      _sftpBusy = true;
+      _sftpError = null;
+    });
+
+    final saved = <String, EmTaskSftpFileContent>{};
+    final failures = <String>[];
+    for (final path in paths) {
+      final cache = _sftpEditCache[path];
+      if (cache == null) {
+        continue;
+      }
+      try {
+        final bytes = cache.editingBinary
+            ? EmTaskSftpFileContent.parseHexBytes(cache.editedText)
+            : Uint8List.fromList(utf8.encode(cache.editedText));
+        await widget.connection.writeSftpFileBytes(path, bytes);
+        saved[path] = EmTaskSftpFileContent(
+          text: cache.editingBinary ? '' : cache.editedText,
+          bytes: bytes,
+          size: bytes.length,
+          offset: 0,
+          length: bytes.length,
+          isTruncated: false,
+          isUtf8Text: !cache.editingBinary,
+          pageBytes: EmTaskConnection.sftpPageBytes,
+        );
+      } on FormatException catch (error) {
+        failures.add('$path：HEX 内容格式错误：${error.message}');
+      } catch (error) {
+        failures.add('$path：${_formatError(error)}');
+      }
+    }
+
+    List<EmTaskSftpEntry>? refreshedEntries;
+    if (saved.isNotEmpty && _loadedDirectoryPath != null) {
+      try {
+        refreshedEntries = await widget.connection.listSftpDirectory(
+          _loadedDirectoryPath!,
+        );
+      } catch (_) {
+        // 保存已经完成；目录刷新失败不影响缓存清理。
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      for (final path in saved.keys) {
+        _sftpEditCache.remove(path);
+      }
+      if (refreshedEntries != null) {
+        _sftpEntries = refreshedEntries;
+      }
+      final openedPath = _openedFilePath;
+      if (openedPath != null && saved.containsKey(openedPath)) {
+        final nextContent = saved[openedPath]!;
+        final nextEditorText = nextContent.editorText;
+        _openedFileText = nextContent.displayText;
+        _openedFileOriginalText = nextEditorText;
+        _openedFileContent = nextContent;
+        _openedFileDirty = false;
+        _openedFileEditingBinary = nextContent.isBinaryEditable;
+        _setSftpEditorText(nextEditorText);
+      }
+      if (failures.isNotEmpty) {
+        _sftpError = '部分未保存文件保存失败：\n${failures.take(3).join('\n')}';
+      }
+      _sftpBusy = false;
+    });
+    if (saved.isNotEmpty) {
+      _showSnackBar('已保存 ${saved.length} 个未保存文件。');
+    }
+  }
+
+  void _restoreSftpCachedFiles(List<String> paths) {
+    String? restoredEditorText;
+    var restoredCount = 0;
+    setState(() {
+      for (final path in paths) {
+        final cache = _sftpEditCache.remove(path);
+        if (cache == null) {
+          continue;
+        }
+        restoredCount += 1;
+        if (_openedFilePath == path) {
+          restoredEditorText = cache.originalText;
+          _openedFileDirty = false;
+        }
+      }
+    });
+    if (restoredEditorText != null) {
+      _setSftpEditorText(restoredEditorText!);
+    }
+    if (restoredCount > 0) {
+      _showSnackBar('已恢复 $restoredCount 个文件的未保存编辑。');
+    }
+  }
+
+  Future<void> _jumpToSftpCachedFile(String path) async {
+    if (!widget.connection.isConnected) {
+      setState(() => _sftpError = '请先连接会话，然后再打开未保存文件。');
+      return;
+    }
+
+    final directory = _parentSftpPath(path);
+    if (_loadedDirectoryPath != directory) {
+      await _loadDirectory(path: directory);
+      if (!mounted || _loadedDirectoryPath != directory) {
+        return;
+      }
+    }
+    await _loadFilePage(path, offset: 0);
+    _scrollSftpListToEntry(path);
+  }
+
+  Future<String?> _showSftpNameDialog({
+    required String title,
+    required String labelText,
+    required String confirmText,
+    String? initialText,
+  }) async {
+    final controller = TextEditingController(text: initialText);
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: controller.text.length,
+    );
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: labelText,
+            helperText: '仅输入名称，不要包含 /、\\、: 或 ..',
+          ),
+          onSubmitted: (_) {
+            final name = controller.text.trim();
+            if (_isValidSftpChildName(name)) {
+              Navigator.of(context).pop(name);
+            }
+          },
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final name = controller.text.trim();
+              if (!_isValidSftpChildName(name)) {
+                _showSnackBar('名称不能为空，且不能包含 /、\\、: 或 ..。');
+                return;
+              }
+              Navigator.of(context).pop(name);
+            },
+            child: Text(confirmText),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
+  }
+
+  int _sftpCachedPathCountUnder(String directoryPath) {
+    return _sftpEditCache.keys
+        .where((path) => _isSftpPathUnder(path, directoryPath))
+        .length;
+  }
+
+  void _removeSftpCachesUnder(String directoryPath) {
+    _sftpEditCache.removeWhere(
+      (path, _) => _isSftpPathUnder(path, directoryPath),
+    );
+  }
+
   Future<void> _resetSftpPath() async {
     await _loadDirectory(path: '.');
   }
@@ -1096,6 +2371,25 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     });
   }
 
+  void _scrollSftpListToEntry(String path) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_sftpListScrollController.hasClients) {
+        return;
+      }
+      final index = _sftpEntries.indexWhere((entry) => entry.path == path);
+      if (index < 0) {
+        return;
+      }
+      const estimatedItemExtent = 57.0;
+      final parentOffset = _loadedDirectoryPath == null ? 0 : 1;
+      final target = (index + parentOffset) * estimatedItemExtent;
+      final position = _sftpListScrollController.position;
+      _sftpListScrollController.jumpTo(
+        target.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+    });
+  }
+
   void _scrollSftpPreviewToTop() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_sftpPreviewScrollController.hasClients) {
@@ -1105,9 +2399,157 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Text(message),
+        action: SnackBarAction(
+          label: '关闭',
+          onPressed: () {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          },
+        ),
+      ),
     );
+  }
+
+  Future<void> _restartRemoteTask() async {
+    if (!widget.connection.isConnected) {
+      _showSnackBar('请先连接会话，再重启远端应用。');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重启应用'),
+        content: const Text('将立即终止当前 emtask 应用进程并由服务端重新拉起。是否继续？'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.restart_alt),
+            label: const Text('重启'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      _terminalFocusNode.requestFocus();
+      return;
+    }
+    try {
+      await widget.connection.restartRemoteTask();
+      _showSnackBar('已请求 emtask 快速重启应用。');
+    } catch (error) {
+      _showSnackBar('重启应用失败：${_formatError(error)}');
+    } finally {
+      _requestTerminalInputFocus();
+    }
+  }
+
+  void _requestTerminalInputFocus() {
+    if (!widget.connection.isConnected) {
+      return;
+    }
+    if (widget.terminalKeyboardButtonOnly && !_terminalKeyboardUnlocked) {
+      return;
+    }
+    _terminalFocusNode.requestFocus();
+  }
+
+  void _toggleTerminalKeyboardInput() {
+    if (!widget.terminalKeyboardButtonOnly) {
+      _terminalFocusNode.requestFocus();
+      return;
+    }
+    if (!_terminalKeyboardUnlocked) {
+      setState(() => _terminalKeyboardUnlocked = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && widget.connection.isConnected) {
+          _terminalFocusNode.requestFocus();
+        }
+      });
+      return;
+    }
+    setState(() => _terminalKeyboardUnlocked = false);
+    _terminalFocusNode.unfocus();
+  }
+
+  void _sendTerminalShortcut(_TerminalShortcutKey key) {
+    if (!widget.connection.isConnected) {
+      _showSnackBar('请先连接会话，再发送终端快捷键。');
+      return;
+    }
+    try {
+      widget.connection.writeText(_terminalShortcutSequence(key));
+      _requestTerminalInputFocus();
+    } catch (error) {
+      _showSnackBar(_formatError(error));
+    }
+  }
+
+  String _applyTerminalInputModifiers(String data) {
+    if (!widget.shortcutKeysEnabled || data.isEmpty) {
+      return data;
+    }
+    if (!_shortcutCtrl && !_shortcutAlt && !_shortcutShift) {
+      return data;
+    }
+
+    final transformed = _terminalInputWithModifiers(
+      data,
+      ctrl: _shortcutCtrl,
+      shift: _shortcutShift,
+      alt: _shortcutAlt,
+    );
+    if (_shortcutCtrl || _shortcutAlt) {
+      setState(() {
+        _shortcutCtrl = false;
+        _shortcutAlt = false;
+      });
+    }
+    return transformed;
+  }
+
+  String _terminalShortcutSequence(_TerminalShortcutKey key) {
+    switch (key) {
+      case _TerminalShortcutKey.tab:
+        if (_shortcutShift && !_shortcutCtrl && !_shortcutAlt) {
+          return '\x1b[Z';
+        }
+        final tab = _shortcutCtrl ? '\x09' : '\t';
+        return _shortcutAlt ? '\x1b$tab' : tab;
+      case _TerminalShortcutKey.up:
+        return _modifiedArrowSequence('A');
+      case _TerminalShortcutKey.down:
+        return _modifiedArrowSequence('B');
+      case _TerminalShortcutKey.right:
+        return _modifiedArrowSequence('C');
+      case _TerminalShortcutKey.left:
+        return _modifiedArrowSequence('D');
+    }
+  }
+
+  String _modifiedArrowSequence(String finalByte) {
+    var modifier = 1;
+    if (_shortcutShift) {
+      modifier += 1;
+    }
+    if (_shortcutAlt) {
+      modifier += 2;
+    }
+    if (_shortcutCtrl) {
+      modifier += 4;
+    }
+    if (modifier == 1) {
+      return '\x1b[$finalByte';
+    }
+    return '\x1b[1;$modifier$finalByte';
   }
 
   @override
@@ -1118,6 +2560,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
       builder: (context, _) {
         final connection = widget.connection;
         return Scaffold(
+          resizeToAvoidBottomInset: _showSftp,
           appBar: AppBar(
             backgroundColor: const Color(0xff111827),
             title: Column(
@@ -1137,6 +2580,27 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
               ],
             ),
             actions: <Widget>[
+              if (!_showSftp)
+                IconButton(
+                  tooltip: widget.terminalKeyboardButtonOnly
+                      ? (_terminalKeyboardUnlocked ? '锁定键盘输入' : '打开键盘输入')
+                      : '打开键盘输入',
+                  onPressed: connection.isConnected
+                      ? _toggleTerminalKeyboardInput
+                      : null,
+                  icon: Icon(
+                    widget.terminalKeyboardButtonOnly &&
+                            !_terminalKeyboardUnlocked
+                        ? Icons.keyboard_hide
+                        : Icons.keyboard_outlined,
+                  ),
+                ),
+              if (!_showSftp)
+                IconButton(
+                  tooltip: '重启应用',
+                  onPressed: connection.isConnected ? _restartRemoteTask : null,
+                  icon: const Icon(Icons.restart_alt),
+                ),
               if (!_showSftp)
                 IconButton(
                   tooltip: '清空终端输出',
@@ -1174,8 +2638,21 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   Widget _buildTerminalView(EmTaskConnection connection) {
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final keyboardVisible = keyboardInset > 0;
+    final manualKeyboardLocked = widget.terminalKeyboardButtonOnly &&
+        !_terminalKeyboardUnlocked &&
+        connection.isConnected;
+    const shortcutBarHeight = 48.0;
+    final shortcutBottom = keyboardVisible ? keyboardInset + 8 : 8.0;
+    final shortcutReserve =
+        widget.shortcutKeysEnabled ? shortcutBarHeight + 18 : 0.0;
+    final terminalBottomPadding =
+        10.0 + shortcutReserve + (keyboardVisible ? keyboardInset : 0.0);
+
     return SafeArea(
       top: false,
+      bottom: !keyboardVisible,
       child: Container(
         width: double.infinity,
         color: Colors.black,
@@ -1186,8 +2663,9 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                 _terminal,
                 controller: _terminalController,
                 focusNode: _terminalFocusNode,
-                autofocus: true,
-                readOnly: !connection.isConnected,
+                autofocus: !widget.terminalKeyboardButtonOnly,
+                readOnly: !connection.isConnected || manualKeyboardLocked,
+                shortcuts: _terminalShortcutsForPlatform(defaultTargetPlatform),
                 theme: TerminalThemes.whiteOnBlack,
                 textStyle: const TerminalStyle(
                   fontFamily: 'Consolas',
@@ -1200,15 +2678,82 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                   fontSize: 14,
                   height: 1.28,
                 ),
-                padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                padding: EdgeInsets.fromLTRB(
+                  10,
+                  10,
+                  10,
+                  terminalBottomPadding,
+                ),
                 cursorType: TerminalCursorType.block,
                 alwaysShowCursor: true,
               ),
             ),
-            if (!connection.isConnected)
+            if (manualKeyboardLocked)
               Positioned(
+                top: 12,
                 right: 12,
-                bottom: 12,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xdd111827),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xff334155)),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        const Icon(Icons.keyboard_hide, size: 16),
+                        const SizedBox(width: 6),
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 32),
+                          ),
+                          onPressed: _toggleTerminalKeyboardInput,
+                          child: const Text('点击键盘按钮后输入'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            if (widget.shortcutKeysEnabled)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                left: 8,
+                right: 8,
+                bottom: shortcutBottom,
+                child: _TerminalShortcutBar(
+                  enabled: connection.isConnected,
+                  ctrlActive: _shortcutCtrl,
+                  shiftActive: _shortcutShift,
+                  altActive: _shortcutAlt,
+                  onToggleCtrl: () {
+                    setState(() => _shortcutCtrl = !_shortcutCtrl);
+                    _requestTerminalInputFocus();
+                  },
+                  onToggleShift: () {
+                    setState(() => _shortcutShift = !_shortcutShift);
+                    _requestTerminalInputFocus();
+                  },
+                  onToggleAlt: () {
+                    setState(() => _shortcutAlt = !_shortcutAlt);
+                    _requestTerminalInputFocus();
+                  },
+                  onSend: _sendTerminalShortcut,
+                ),
+              ),
+            if (!connection.isConnected)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                right: 12,
+                bottom: shortcutBottom + (widget.shortcutKeysEnabled ? 54 : 4),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: const Color(0xdd111827),
@@ -1240,7 +2785,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'SFTP 文件查看',
+                    'SFTP 文件查看 / 编辑',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
@@ -1317,15 +2862,34 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
             ),
             OutlinedButton.icon(
               onPressed: connection.isConnected && !_sftpBusy
-                  ? () => _loadDirectory(path: _loadedDirectoryPath)
+                  ? _refreshSftpDirectory
                   : null,
               icon: const Icon(Icons.refresh),
               label: const Text('刷新'),
             ),
+            OutlinedButton.icon(
+              onPressed: connection.isConnected && !_sftpBusy
+                  ? _createSftpDirectory
+                  : null,
+              icon: const Icon(Icons.create_new_folder_outlined),
+              label: const Text('新建文件夹'),
+            ),
+            OutlinedButton.icon(
+              onPressed:
+                  connection.isConnected && !_sftpBusy ? _createSftpFile : null,
+              icon: const Icon(Icons.note_add_outlined),
+              label: const Text('新建文件'),
+            ),
+            if (_sftpEditCache.isNotEmpty)
+              OutlinedButton.icon(
+                onPressed: !_sftpBusy ? _showSftpEditCacheDialog : null,
+                icon: const Icon(Icons.pending_actions_outlined),
+                label: Text('未保存 ${_sftpEditCache.length}'),
+              ),
           ],
         );
 
-        if (constraints.maxWidth < 660) {
+        if (constraints.maxWidth < 980) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
@@ -1340,7 +2904,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
           children: <Widget>[
             Expanded(child: pathField),
             const SizedBox(width: 10),
-            buttons,
+            Flexible(child: buttons),
           ],
         );
       },
@@ -1366,16 +2930,22 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
           );
         }
 
-        final previewHeight = math.min(
-          280.0,
-          math.max(160.0, constraints.maxHeight * 0.42),
-        );
-        return Column(
-          children: <Widget>[
-            Expanded(child: list),
-            const SizedBox(height: 12),
-            SizedBox(height: previewHeight, child: preview),
-          ],
+        final listHeight = _sftpEntries.isEmpty
+            ? 150.0
+            : math.min(300.0, math.max(190.0, constraints.maxHeight * 0.38));
+        final previewHeight = EmTaskClientSettings.clampSftpPreviewHeight(
+          widget.sftpPreviewHeight,
+        ).toDouble();
+        return SingleChildScrollView(
+          padding: EdgeInsets.only(
+              bottom: MediaQuery.paddingOf(context).bottom + 16),
+          child: Column(
+            children: <Widget>[
+              SizedBox(height: listHeight, child: list),
+              const SizedBox(height: 12),
+              SizedBox(height: previewHeight, child: preview),
+            ],
+          ),
         );
       },
     );
@@ -1384,6 +2954,8 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   Widget _buildSftpEntryList() {
     final emptyMessage =
         _loadedDirectoryPath == null ? '输入路径后点击“打开目录”。' : '目录为空。';
+    final showParentEntry = _loadedDirectoryPath != null;
+    final itemCount = _sftpEntries.length + (showParentEntry ? 1 : 0);
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1391,17 +2963,28 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xff1f2937)),
       ),
-      child: _sftpEntries.isEmpty
+      child: itemCount == 0
           ? Center(child: Text(emptyMessage))
           : Scrollbar(
               controller: _sftpListScrollController,
               child: ListView.separated(
                 controller: _sftpListScrollController,
                 padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _sftpEntries.length,
+                itemCount: itemCount,
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (context, index) {
-                  final entry = _sftpEntries[index];
+                  if (showParentEntry && index == 0) {
+                    final atRoot = _loadedDirectoryPath == '.';
+                    return ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.folder_outlined),
+                      title: const Text('..'),
+                      subtitle: Text(atRoot ? '工作路径根目录' : '上级目录'),
+                      onTap: _openParentDirectory,
+                    );
+                  }
+                  final entryIndex = showParentEntry ? index - 1 : index;
+                  final entry = _sftpEntries[entryIndex];
                   return ListTile(
                     dense: true,
                     leading: Icon(
@@ -1421,6 +3004,23 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        IconButton(
+                          tooltip: '重命名',
+                          icon: const Icon(Icons.drive_file_rename_outline),
+                          onPressed:
+                              _sftpBusy ? null : () => _renameSftpEntry(entry),
+                        ),
+                        IconButton(
+                          tooltip: '删除',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed:
+                              _sftpBusy ? null : () => _deleteSftpEntry(entry),
+                        ),
+                      ],
+                    ),
                     onTap: () => entry.isDirectory
                         ? _loadDirectory(path: entry.path)
                         : _openFile(entry),
@@ -1432,6 +3032,14 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   Widget _buildSftpPreview() {
+    final openedFilePath = _openedFilePath;
+    final openedFileContent = _openedFileContent;
+    final canSave = openedFilePath != null &&
+        _openedFileEditable &&
+        _openedFileDirty &&
+        !_sftpBusy &&
+        widget.connection.isConnected;
+
     return DecoratedBox(
       decoration: BoxDecoration(
         color: const Color(0xff020617),
@@ -1443,43 +3051,217 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
         children: <Widget>[
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
-            child: Row(
-              children: <Widget>[
-                const Icon(Icons.article_outlined, size: 18),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _openedFilePath ?? '文件预览',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compactHeader = constraints.maxWidth < 520;
+                final title = Row(
+                  children: <Widget>[
+                    Icon(
+                      openedFileContent?.isBinary == true
+                          ? Icons.data_object
+                          : Icons.article_outlined,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        openedFilePath == null
+                            ? '文件预览'
+                            : _openedFileDirty
+                                ? '$openedFilePath *'
+                                : openedFilePath,
+                        maxLines: compactHeader ? 2 : 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                    ),
+                  ],
+                );
+                final saveButton = openedFilePath != null && _openedFileEditable
+                    ? FilledButton.icon(
+                        onPressed: canSave ? _saveOpenedFile : null,
+                        icon: const Icon(Icons.save_outlined, size: 18),
+                        label: const Text('保存'),
+                      )
+                    : null;
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    if (compactHeader) ...<Widget>[
+                      title,
+                      if (saveButton != null) ...<Widget>[
+                        const SizedBox(height: 8),
+                        Align(
+                            alignment: Alignment.centerRight,
+                            child: saveButton),
+                      ],
+                    ] else
+                      Row(
+                        children: <Widget>[
+                          Expanded(child: title),
+                          if (saveButton != null) ...<Widget>[
+                            const SizedBox(width: 8),
+                            saveButton,
+                          ],
+                        ],
+                      ),
+                    if (openedFileContent != null) ...<Widget>[
+                      const SizedBox(height: 8),
+                      _buildSftpPreviewControls(openedFileContent),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
           const Divider(height: 1),
           Expanded(
-            child: Scrollbar(
-              controller: _sftpPreviewScrollController,
-              child: SingleChildScrollView(
-                controller: _sftpPreviewScrollController,
-                padding: const EdgeInsets.all(14),
-                child: SelectableText(
-                  _openedFileText ?? '点击左侧文件查看内容。',
-                  style: const TextStyle(
-                    fontFamily: 'Consolas',
-                    fontFamilyFallback: <String>['Menlo', 'monospace'],
-                    fontSize: 13,
-                    height: 1.35,
-                    color: Color(0xffd1d5db),
+            child: openedFilePath != null && _openedFileEditable
+                ? Scrollbar(
+                    controller: _sftpPreviewScrollController,
+                    child: TextField(
+                      controller: _sftpEditorController,
+                      scrollController: _sftpPreviewScrollController,
+                      enabled: !_sftpBusy,
+                      expands: true,
+                      maxLines: null,
+                      minLines: null,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
+                      decoration: InputDecoration(
+                        hintText: _openedFileEditingBinary
+                            ? '按 HEX 字节编辑，例如：00 1f a0 ff。空格、换行、逗号可分隔。'
+                            : '文件为空，可直接输入内容后保存。',
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.all(14),
+                      ),
+                      style: const TextStyle(
+                        fontFamily: 'Consolas',
+                        fontFamilyFallback: <String>['Menlo', 'monospace'],
+                        fontSize: 13,
+                        height: 1.35,
+                        color: Color(0xffd1d5db),
+                      ),
+                    ),
+                  )
+                : Scrollbar(
+                    controller: _sftpPreviewScrollController,
+                    child: SingleChildScrollView(
+                      controller: _sftpPreviewScrollController,
+                      padding: const EdgeInsets.all(14),
+                      child: SelectableText(
+                        _openedFileText ?? '点击左侧文件查看内容。',
+                        style: const TextStyle(
+                          fontFamily: 'Consolas',
+                          fontFamilyFallback: <String>['Menlo', 'monospace'],
+                          fontSize: 13,
+                          height: 1.35,
+                          color: Color(0xffd1d5db),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildSftpPreviewControls(EmTaskSftpFileContent content) {
+    final metaChips = Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: <Widget>[
+        Chip(
+          visualDensity: VisualDensity.compact,
+          label: Text(
+            content.isBinary
+                ? (content.isBinaryEditable ? '二进制 / HEX 可编辑' : '二进制 / HEX')
+                : 'UTF-8 文本',
+          ),
+        ),
+        Chip(
+          visualDensity: VisualDensity.compact,
+          label: Text(
+            '大小 ${_formatBytes(content.size)} · 偏移 ${content.offset} · 本页 ${_formatBytes(content.length)}',
+          ),
+        ),
+      ],
+    );
+
+    final offsetField = SizedBox(
+      width: 150,
+      child: TextField(
+        controller: _sftpOffsetController,
+        enabled: !_sftpBusy,
+        keyboardType: TextInputType.number,
+        decoration: const InputDecoration(
+          labelText: '偏移',
+          isDense: true,
+          border: OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _loadOpenedFileOffset(),
+      ),
+    );
+
+    final pageButtons = Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        OutlinedButton.icon(
+          onPressed: content.canGoPrevious && !_sftpBusy
+              ? _loadPreviousFilePage
+              : null,
+          icon: const Icon(Icons.chevron_left),
+          label: const Text('上一页'),
+        ),
+        OutlinedButton.icon(
+          onPressed: content.canGoNext && !_sftpBusy ? _loadNextFilePage : null,
+          icon: const Icon(Icons.chevron_right),
+          label: const Text('下一页'),
+        ),
+        FilledButton.tonalIcon(
+          onPressed: !_sftpBusy ? _loadOpenedFileOffset : null,
+          icon: const Icon(Icons.travel_explore),
+          label: const Text('跳转'),
+        ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 560;
+        if (compact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              metaChips,
+              const SizedBox(height: 8),
+              offsetField,
+              const SizedBox(height: 8),
+              pageButtons,
+            ],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            metaChips,
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                offsetField,
+                const SizedBox(width: 8),
+                Expanded(child: pageButtons),
+              ],
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1499,10 +3281,19 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
 
 enum _SessionMenuAction {
   edit,
+  createPanelTaskFromTemplate,
   delete,
 }
 
+enum _HomeMenuAction {
+  refreshPanels,
+  addPanel,
+  importPanelQr,
+  settings,
+}
+
 enum _PanelMenuAction {
+  addTask,
   edit,
   delete,
 }
@@ -1511,6 +3302,55 @@ enum _QrImportAction {
   camera,
   image,
   file,
+}
+
+enum _SftpEditCacheDialogAction {
+  jump,
+  save,
+  restore,
+}
+
+class _SftpEditCacheDialogResult {
+  const _SftpEditCacheDialogResult._({
+    required this.action,
+    required this.paths,
+  });
+
+  factory _SftpEditCacheDialogResult.jump(String path) {
+    return _SftpEditCacheDialogResult._(
+      action: _SftpEditCacheDialogAction.jump,
+      paths: <String>[path],
+    );
+  }
+
+  factory _SftpEditCacheDialogResult.save(Iterable<String> paths) {
+    return _SftpEditCacheDialogResult._(
+      action: _SftpEditCacheDialogAction.save,
+      paths: List<String>.unmodifiable(paths),
+    );
+  }
+
+  factory _SftpEditCacheDialogResult.restore(Iterable<String> paths) {
+    return _SftpEditCacheDialogResult._(
+      action: _SftpEditCacheDialogAction.restore,
+      paths: List<String>.unmodifiable(paths),
+    );
+  }
+
+  final _SftpEditCacheDialogAction action;
+  final List<String> paths;
+}
+
+class _SftpEditCache {
+  const _SftpEditCache({
+    required this.originalText,
+    required this.editedText,
+    required this.editingBinary,
+  });
+
+  final String originalText;
+  final String editedText;
+  final bool editingBinary;
 }
 
 class _ScreenRegionSelection {
@@ -1800,12 +3640,14 @@ class _PanelActions extends StatelessWidget {
   const _PanelActions({
     required this.refreshing,
     required this.onRefresh,
+    required this.onAddTask,
     required this.onEdit,
     required this.onDelete,
   });
 
   final bool refreshing;
   final VoidCallback onRefresh;
+  final VoidCallback onAddTask;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -1829,6 +3671,8 @@ class _PanelActions extends StatelessWidget {
           tooltip: '面板操作',
           onSelected: (action) {
             switch (action) {
+              case _PanelMenuAction.addTask:
+                onAddTask();
               case _PanelMenuAction.edit:
                 onEdit();
               case _PanelMenuAction.delete:
@@ -1836,6 +3680,10 @@ class _PanelActions extends StatelessWidget {
             }
           },
           itemBuilder: (context) => const <PopupMenuEntry<_PanelMenuAction>>[
+            PopupMenuItem<_PanelMenuAction>(
+              value: _PanelMenuAction.addTask,
+              child: Text('添加子任务'),
+            ),
             PopupMenuItem<_PanelMenuAction>(
               value: _PanelMenuAction.edit,
               child: Text('编辑面板'),
@@ -1848,6 +3696,231 @@ class _PanelActions extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+class _PanelTaskDialog extends StatefulWidget {
+  const _PanelTaskDialog({
+    required this.panel,
+    this.template,
+    this.existingTaskNames = const <String>{},
+  });
+
+  final EmTaskPanelProfile panel;
+  final EmTaskSessionProfile? template;
+  final Set<String> existingTaskNames;
+
+  @override
+  State<_PanelTaskDialog> createState() => _PanelTaskDialogState();
+}
+
+class _PanelTaskDialogState extends State<_PanelTaskDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _nameController;
+  late final TextEditingController _listenAddressController;
+  late final TextEditingController _portController;
+  late final TextEditingController _commandController;
+  late final TextEditingController _workingDirController;
+  var _useSftp = true;
+  var _useConpty = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final template = widget.template;
+    final templateTaskName = template == null
+        ? ''
+        : (template.panelTaskName.trim().isNotEmpty
+            ? template.panelTaskName.trim()
+            : _panelTaskNameFromSessionName(template.name));
+    _nameController = TextEditingController(
+      text: template == null ? '' : _suggestCopyTaskName(templateTaskName),
+    );
+    _listenAddressController = TextEditingController(
+      text: template?.host.trim() ?? '',
+    );
+    _portController = TextEditingController(
+      text: template == null ? '' : '${template.port}',
+    );
+    _commandController = TextEditingController(
+      text: template?.panelTaskCommand.trim().isNotEmpty == true
+          ? template!.panelTaskCommand.trim()
+          : Platform.isWindows
+              ? 'cmd.exe'
+              : '/bin/sh',
+    );
+    _workingDirController = TextEditingController(
+      text: template == null
+          ? '.'
+          : (template.panelTaskWorkingDir.trim().isEmpty
+              ? '.'
+              : template.panelTaskWorkingDir.trim()),
+    );
+    if (template != null) {
+      _useSftp = template.supportsSftp;
+      _useConpty = template.shellKind == EmTaskShellKind.cmd ||
+          template.shellKind == EmTaskShellKind.powershell ||
+          (Platform.isWindows && template.shellKind == EmTaskShellKind.auto);
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _listenAddressController.dispose();
+    _portController.dispose();
+    _commandController.dispose();
+    _workingDirController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        widget.template == null
+            ? '添加子任务到 ${widget.panel.name}'
+            : '以当前任务为模板新增子任务',
+      ),
+      content: SizedBox(
+        width: 520,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                TextFormField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(
+                    labelText: '子任务名称',
+                    hintText: '例如 app-shell',
+                  ),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return '请输入子任务名称';
+                    }
+                    if (widget.existingTaskNames.contains(
+                      _EmTaskHomePageState._normalizeTaskNameKey(value),
+                    )) {
+                      return '子任务名称已存在';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _portController,
+                  decoration: const InputDecoration(
+                    labelText: 'SSH 监听端口',
+                    hintText: '例如 2223',
+                  ),
+                  keyboardType: TextInputType.number,
+                  validator: (value) {
+                    final port = int.tryParse(value?.trim() ?? '');
+                    if (port == null || port <= 0 || port > 65535) {
+                      return '请输入 1-65535 之间的端口';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _commandController,
+                  decoration: const InputDecoration(
+                    labelText: '启动命令',
+                    hintText: '例如 cmd.exe 或 /bin/sh',
+                  ),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return '请输入启动命令';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _workingDirController,
+                  decoration: const InputDecoration(
+                    labelText: '工作目录',
+                    hintText: '默认 .',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _listenAddressController,
+                  decoration: const InputDecoration(
+                    labelText: '监听地址（可选）',
+                    hintText: '留空表示 0.0.0.0',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('启用 SFTP'),
+                  value: _useSftp,
+                  onChanged: (value) => setState(() => _useSftp = value),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('使用 ConPTY（Windows 推荐）'),
+                  value: _useConpty,
+                  onChanged: (value) => setState(() => _useConpty = value),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('添加'),
+        ),
+      ],
+    );
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    Navigator.of(context).pop(
+      EmTaskPanelCreateTaskRequest(
+        name: _nameController.text.trim(),
+        port: int.parse(_portController.text.trim()),
+        command: _commandController.text.trim(),
+        listenAddress: _listenAddressController.text.trim(),
+        workingDir: _workingDirController.text.trim().isEmpty
+            ? '.'
+            : _workingDirController.text.trim(),
+        useSftp: _useSftp,
+        useConpty: _useConpty,
+      ),
+    );
+  }
+
+  String _suggestCopyTaskName(String baseName) {
+    final normalizedBase = baseName.trim().isEmpty ? 'task' : baseName.trim();
+    final first = '$normalizedBase-copy';
+    if (!widget.existingTaskNames.contains(
+      _EmTaskHomePageState._normalizeTaskNameKey(first),
+    )) {
+      return first;
+    }
+    for (var index = 2; index < 1000; index += 1) {
+      final candidate = '$normalizedBase-copy-$index';
+      if (!widget.existingTaskNames.contains(
+        _EmTaskHomePageState._normalizeTaskNameKey(candidate),
+      )) {
+        return candidate;
+      }
+    }
+    return '$normalizedBase-copy-${DateTime.now().millisecondsSinceEpoch}';
   }
 }
 
@@ -2233,6 +4306,7 @@ class _SessionTile extends StatelessWidget {
     required this.onOpen,
     required this.onToggle,
     required this.onEdit,
+    this.onCreatePanelTaskFromTemplate,
     required this.onDelete,
   });
 
@@ -2240,6 +4314,7 @@ class _SessionTile extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onToggle;
   final VoidCallback onEdit;
+  final VoidCallback? onCreatePanelTaskFromTemplate;
   final VoidCallback onDelete;
 
   @override
@@ -2321,17 +4396,23 @@ class _SessionTile extends StatelessWidget {
                 switch (action) {
                   case _SessionMenuAction.edit:
                     onEdit();
+                  case _SessionMenuAction.createPanelTaskFromTemplate:
+                    onCreatePanelTaskFromTemplate?.call();
                   case _SessionMenuAction.delete:
                     onDelete();
                 }
               },
-              itemBuilder: (context) =>
-                  const <PopupMenuEntry<_SessionMenuAction>>[
-                PopupMenuItem<_SessionMenuAction>(
+              itemBuilder: (context) => <PopupMenuEntry<_SessionMenuAction>>[
+                const PopupMenuItem<_SessionMenuAction>(
                   value: _SessionMenuAction.edit,
                   child: Text('编辑'),
                 ),
-                PopupMenuItem<_SessionMenuAction>(
+                if (onCreatePanelTaskFromTemplate != null)
+                  const PopupMenuItem<_SessionMenuAction>(
+                    value: _SessionMenuAction.createPanelTaskFromTemplate,
+                    child: Text('以此为模板新增子任务'),
+                  ),
+                const PopupMenuItem<_SessionMenuAction>(
                   value: _SessionMenuAction.delete,
                   child: Text('删除'),
                 ),
@@ -2479,6 +4560,446 @@ class _SftpPlaceholder extends StatelessWidget {
   }
 }
 
+enum _TerminalShortcutKey {
+  tab,
+  left,
+  up,
+  down,
+  right,
+}
+
+class _TerminalShortcutBar extends StatelessWidget {
+  const _TerminalShortcutBar({
+    required this.enabled,
+    required this.ctrlActive,
+    required this.shiftActive,
+    required this.altActive,
+    required this.onToggleCtrl,
+    required this.onToggleShift,
+    required this.onToggleAlt,
+    required this.onSend,
+  });
+
+  final bool enabled;
+  final bool ctrlActive;
+  final bool shiftActive;
+  final bool altActive;
+  final VoidCallback onToggleCtrl;
+  final VoidCallback onToggleShift;
+  final VoidCallback onToggleAlt;
+  final void Function(_TerminalShortcutKey key) onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xee0f172a),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xff334155)),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 18,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          children: <Widget>[
+            _ShortcutToggleChip(
+              label: 'CTRL',
+              selected: ctrlActive,
+              enabled: enabled,
+              onPressed: onToggleCtrl,
+            ),
+            _ShortcutToggleChip(
+              label: 'Shift',
+              selected: shiftActive,
+              enabled: enabled,
+              onPressed: onToggleShift,
+            ),
+            _ShortcutToggleChip(
+              label: 'Alt',
+              selected: altActive,
+              enabled: enabled,
+              onPressed: onToggleAlt,
+            ),
+            const SizedBox(width: 8),
+            _ShortcutActionChip(
+              label: 'Tab',
+              enabled: enabled,
+              onPressed: () => onSend(_TerminalShortcutKey.tab),
+            ),
+            _ShortcutActionChip(
+              label: '←',
+              tooltip: '左键',
+              enabled: enabled,
+              onPressed: () => onSend(_TerminalShortcutKey.left),
+            ),
+            _ShortcutActionChip(
+              label: '↑',
+              tooltip: '上键',
+              enabled: enabled,
+              onPressed: () => onSend(_TerminalShortcutKey.up),
+            ),
+            _ShortcutActionChip(
+              label: '↓',
+              tooltip: '下键',
+              enabled: enabled,
+              onPressed: () => onSend(_TerminalShortcutKey.down),
+            ),
+            _ShortcutActionChip(
+              label: '→',
+              tooltip: '右键',
+              enabled: enabled,
+              onPressed: () => onSend(_TerminalShortcutKey.right),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ShortcutToggleChip extends StatelessWidget {
+  const _ShortcutToggleChip({
+    required this.label,
+    required this.selected,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: FilterChip(
+        label: Text(label),
+        selected: selected,
+        showCheckmark: false,
+        onSelected: enabled ? (_) => onPressed() : null,
+      ),
+    );
+  }
+}
+
+class _ShortcutActionChip extends StatelessWidget {
+  const _ShortcutActionChip({
+    required this.label,
+    required this.enabled,
+    required this.onPressed,
+    this.tooltip,
+  });
+
+  final String label;
+  final String? tooltip;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(46, 36),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+        ),
+        onPressed: enabled ? onPressed : null,
+        child: Text(label),
+      ),
+    );
+    if (tooltip == null) {
+      return button;
+    }
+    return Tooltip(message: tooltip!, child: button);
+  }
+}
+
+class _SettingsPage extends StatefulWidget {
+  const _SettingsPage({
+    required this.settings,
+    required this.onChanged,
+  });
+
+  final EmTaskClientSettings settings;
+  final ValueChanged<EmTaskClientSettings> onChanged;
+
+  @override
+  State<_SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<_SettingsPage> {
+  late EmTaskClientSettings _settings;
+
+  @override
+  void initState() {
+    super.initState();
+    _settings = widget.settings;
+  }
+
+  void _updateSettings(EmTaskClientSettings settings) {
+    setState(() => _settings = settings);
+    widget.onChanged(settings);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final layout = _layoutForWidth(MediaQuery.sizeOf(context).width);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('设置'),
+        backgroundColor: const Color(0xff111827),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: layout.pagePadding,
+          children: <Widget>[
+            _SettingsSectionCard(
+              icon: Icons.keyboard_outlined,
+              title: '启动快捷键',
+              subtitle: '在终端底部显示 CTRL、Shift、Alt、Tab 和方向键，方便移动端输入组合键。',
+              child: Column(
+                children: <Widget>[
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _settings.shortcutKeysEnabled,
+                    onChanged: (value) => _updateSettings(
+                      _settings.copyWith(shortcutKeysEnabled: value),
+                    ),
+                    title: const Text('显示终端快捷键栏'),
+                    subtitle: const Text('启用后进入终端页可点击按键发送 Tab、方向键或组合键。'),
+                  ),
+                  const Divider(height: 1),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _settings.terminalKeyboardButtonOnly,
+                    onChanged: (value) => _updateSettings(
+                      _settings.copyWith(terminalKeyboardButtonOnly: value),
+                    ),
+                    title: const Text('手动打开终端键盘'),
+                    subtitle: const Text(
+                      '启用后点击终端不会自动弹出软键盘，只有点击终端页键盘按钮才允许输入。',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _SettingsSectionCard(
+              icon: Icons.folder_open_outlined,
+              title: 'SFTP 文件预览',
+              subtitle: '小于等于阈值的 UTF-8 文本会完整加载并允许编辑；超过阈值的大文件按 64KB 分页读取。',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  DropdownButtonFormField<int>(
+                    value: _sftpSmallFileThresholdValue(
+                      _settings.sftpSmallFileBytes,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: '小文件阈值',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: _sftpSmallFileThresholdOptions
+                        .map(
+                          (value) => DropdownMenuItem<int>(
+                            value: value,
+                            child: Text(_formatBytes(value)),
+                          ),
+                        )
+                        .toList(growable: false),
+                    onChanged: (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      _updateSettings(
+                        _settings.copyWith(sftpSmallFileBytes: value),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<int>(
+                    value: _sftpPreviewHeightValue(
+                      _settings.sftpPreviewHeight,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: '预览框高度',
+                      helperText: '移动端上下布局时生效；增大后页面可上下滚动。',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: _sftpPreviewHeightOptions
+                        .map(
+                          (value) => DropdownMenuItem<int>(
+                            value: value,
+                            child: Text('$value px'),
+                          ),
+                        )
+                        .toList(growable: false),
+                    onChanged: (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      _updateSettings(
+                        _settings.copyWith(sftpPreviewHeight: value),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const _AboutSettingsCard(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+const List<int> _sftpSmallFileThresholdOptions = <int>[
+  64 * 1024,
+  128 * 1024,
+  256 * 1024,
+  512 * 1024,
+  1024 * 1024,
+  2 * 1024 * 1024,
+  4 * 1024 * 1024,
+];
+
+const List<int> _sftpPreviewHeightOptions = <int>[
+  420,
+  520,
+  640,
+  760,
+  900,
+  1100,
+  1400,
+];
+
+int _sftpSmallFileThresholdValue(int value) {
+  return _sftpSmallFileThresholdOptions.contains(value)
+      ? value
+      : EmTaskClientSettings.defaultSftpSmallFileBytes;
+}
+
+int _sftpPreviewHeightValue(int value) {
+  return _sftpPreviewHeightOptions.contains(value)
+      ? value
+      : EmTaskClientSettings.defaultSftpPreviewHeight;
+}
+
+class _SettingsSectionCard extends StatelessWidget {
+  const _SettingsSectionCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Icon(icon, size: 24),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AboutSettingsCard extends StatelessWidget {
+  const _AboutSettingsCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Image.asset(
+                  'assets/icons/emtask_icon.png',
+                  width: 42,
+                  height: 42,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        '关于',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      const Text('$_appDisplayName · v$_appVersion'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Text('跨平台 emtask SSH / SFTP 客户端。'),
+            const SizedBox(height: 8),
+            Text(
+              '支持 Android、Windows、Linux、macOS、iOS，多会话连接、终端输入、SFTP 文件查看/编辑和面板二维码导入。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.onCreate});
 
@@ -2516,9 +5037,10 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _ProfileDialog extends StatefulWidget {
-  const _ProfileDialog({this.profile});
+  const _ProfileDialog({this.profile, this.isPanelSession = false});
 
   final EmTaskSessionProfile? profile;
+  final bool isPanelSession;
 
   @override
   State<_ProfileDialog> createState() => _ProfileDialogState();
@@ -2531,9 +5053,18 @@ class _ProfileDialogState extends State<_ProfileDialog> {
   late final TextEditingController _portController;
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _privateKeyPathController;
+  late final TextEditingController _privateKeyPassphraseController;
   late final TextEditingController _pathController;
+  late final TextEditingController _panelCommandController;
+  late final TextEditingController _panelWorkingDirController;
   late final EmTaskShellKind _shellKind;
   late bool _supportsSftp;
+  late bool _syncPanelHost;
+  late bool _syncPanelPort;
+  late bool _syncPanelCommand;
+  late bool _syncPanelWorkingDir;
+  late bool _syncPanelSftp;
 
   @override
   void initState() {
@@ -2545,9 +5076,25 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     _portController = TextEditingController(text: '${profile.port}');
     _usernameController = TextEditingController(text: profile.username);
     _passwordController = TextEditingController(text: profile.password);
+    _privateKeyPathController =
+        TextEditingController(text: profile.privateKeyPath);
+    _privateKeyPassphraseController =
+        TextEditingController(text: profile.privateKeyPassphrase);
     _pathController = TextEditingController(text: profile.initialPath);
+    _panelCommandController =
+        TextEditingController(text: profile.panelTaskCommand);
+    _panelWorkingDirController = TextEditingController(
+      text: profile.panelTaskWorkingDir.trim().isEmpty
+          ? '.'
+          : profile.panelTaskWorkingDir,
+    );
     _shellKind = profile.shellKind;
     _supportsSftp = profile.supportsSftp;
+    _syncPanelHost = profile.panelTaskSyncHost;
+    _syncPanelPort = profile.panelTaskSyncPort;
+    _syncPanelCommand = profile.panelTaskSyncCommand;
+    _syncPanelWorkingDir = profile.panelTaskSyncWorkingDir;
+    _syncPanelSftp = profile.panelTaskSyncSftp;
   }
 
   @override
@@ -2557,7 +5104,11 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     _portController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _privateKeyPathController.dispose();
+    _privateKeyPassphraseController.dispose();
     _pathController.dispose();
+    _panelCommandController.dispose();
+    _panelWorkingDirController.dispose();
     super.dispose();
   }
 
@@ -2604,7 +5155,12 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                     children: <Widget>[
                       TextFormField(
                         controller: _nameController,
-                        decoration: const InputDecoration(labelText: '名称'),
+                        decoration: InputDecoration(
+                          labelText: '名称',
+                          helperText: widget.isPanelSession
+                              ? '服务端任务名是唯一标识，不会通过编辑会话同步修改。'
+                              : null,
+                        ),
                         validator: _required,
                       ),
                       const SizedBox(height: 10),
@@ -2629,6 +5185,20 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                         ),
                         firstFlex: 2,
                       ),
+                      if (widget.isPanelSession)
+                        _buildPanelSyncSwitch(
+                          title: 'IP / 主机名同步到服务端',
+                          value: _syncPanelHost,
+                          onChanged: (value) =>
+                              setState(() => _syncPanelHost = value),
+                        ),
+                      if (widget.isPanelSession)
+                        _buildPanelSyncSwitch(
+                          title: '端口同步到服务端',
+                          value: _syncPanelPort,
+                          onChanged: (value) =>
+                              setState(() => _syncPanelPort = value),
+                        ),
                       const SizedBox(height: 10),
                       _buildFieldPair(
                         TextFormField(
@@ -2638,8 +5208,28 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                         ),
                         TextFormField(
                           controller: _passwordController,
-                          decoration: const InputDecoration(labelText: '密码'),
+                          decoration:
+                              const InputDecoration(labelText: '密码 / 键盘口令'),
                           obscureText: true,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildPrivateKeyPicker(),
+                      const SizedBox(height: 10),
+                      TextFormField(
+                        controller: _privateKeyPassphraseController,
+                        decoration: const InputDecoration(
+                          labelText: '私钥口令',
+                          hintText: '私钥未加密可留空',
+                        ),
+                        obscureText: true,
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '可选择 OpenSSH/RSA 私钥文件；若同时填写密码，会在密钥认证不可用时继续尝试密码或键盘交互认证。',
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
                       const SizedBox(height: 10),
@@ -2671,6 +5261,68 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                           '勾选后终端页右上角显示 SFTP 入口；服务端任务配置也需要 use_sftp = true。',
                         ),
                       ),
+                      if (widget.isPanelSession) ...<Widget>[
+                        _buildPanelSyncSwitch(
+                          title: 'SFTP 支持同步到服务端',
+                          value: _syncPanelSftp,
+                          onChanged: (value) =>
+                              setState(() => _syncPanelSftp = value),
+                        ),
+                        const Divider(height: 28),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            '服务端任务字段',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextFormField(
+                          controller: _panelCommandController,
+                          decoration: const InputDecoration(
+                            labelText: '服务端命令 command',
+                            hintText: '例如 cmd.exe、powershell、bash',
+                          ),
+                          validator: (value) {
+                            final nextCommand = value?.trim() ?? '';
+                            final previousCommand =
+                                widget.profile?.panelTaskCommand.trim() ?? '';
+                            if (_syncPanelCommand &&
+                                nextCommand.isEmpty &&
+                                previousCommand.isNotEmpty) {
+                              return '同步命令时不能为空';
+                            }
+                            return null;
+                          },
+                        ),
+                        _buildPanelSyncSwitch(
+                          title: '命令同步到服务端',
+                          value: _syncPanelCommand,
+                          onChanged: (value) =>
+                              setState(() => _syncPanelCommand = value),
+                        ),
+                        const SizedBox(height: 10),
+                        TextFormField(
+                          controller: _panelWorkingDirController,
+                          decoration: const InputDecoration(
+                            labelText: '服务端工作目录 working_dir',
+                            hintText: '. 表示 emtask 工作目录',
+                          ),
+                        ),
+                        _buildPanelSyncSwitch(
+                          title: '工作目录同步到服务端',
+                          value: _syncPanelWorkingDir,
+                          onChanged: (value) =>
+                              setState(() => _syncPanelWorkingDir = value),
+                        ),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            '未勾选同步的字段：保存时只修改本机；以后刷新面板时服务端值也不会覆盖这个字段。',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -2744,11 +5396,109 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     );
   }
 
+  Widget _buildPanelSyncSwitch({
+    required String title,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return CheckboxListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      value: value,
+      onChanged: (value) => onChanged(value ?? false),
+      controlAffinity: ListTileControlAffinity.leading,
+      title: Text(title),
+      subtitle: const Text('不勾选时不上传到服务端，刷新面板也不会覆盖此项。'),
+    );
+  }
+
+  Widget _buildPrivateKeyPicker() {
+    final pathField = TextFormField(
+      controller: _privateKeyPathController,
+      readOnly: true,
+      decoration: const InputDecoration(
+        labelText: '登录密钥私钥文件',
+        hintText: '例如 id_rsa、id_ed25519 或 OpenSSH 私钥',
+      ),
+    );
+    final buttons = Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        OutlinedButton.icon(
+          onPressed: _pickPrivateKeyFile,
+          icon: const Icon(Icons.key_outlined),
+          label: const Text('选择私钥'),
+        ),
+        if (_privateKeyPathController.text.isNotEmpty)
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _privateKeyPathController.clear();
+                _privateKeyPassphraseController.clear();
+              });
+            },
+            icon: const Icon(Icons.clear),
+            label: const Text('清除'),
+          ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 560) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              pathField,
+              const SizedBox(height: 8),
+              buttons,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(child: pathField),
+            const SizedBox(width: 10),
+            buttons,
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _pickPrivateKeyFile() async {
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: false,
+    );
+    final file = picked?.files.single;
+    if (file == null) {
+      return;
+    }
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法获取私钥文件路径，请重新选择本地文件。')),
+        );
+      }
+      return;
+    }
+    setState(() => _privateKeyPathController.text = path);
+  }
+
   void _submit() {
     if (!_formKey.currentState!.validate()) {
       return;
     }
     final original = widget.profile;
+    final panelTaskName = widget.isPanelSession
+        ? (original?.panelTaskName.trim().isNotEmpty == true
+            ? original!.panelTaskName
+            : _panelTaskNameFromSessionName(_nameController.text))
+        : (original?.panelTaskName ?? '');
     Navigator.of(context).pop(
       EmTaskSessionProfile(
         id: original?.id ?? EmTaskSessionProfile.newId(),
@@ -2757,10 +5507,29 @@ class _ProfileDialogState extends State<_ProfileDialog> {
         port: int.parse(_portController.text.trim()),
         username: _usernameController.text.trim(),
         password: _passwordController.text,
+        privateKeyPath: _privateKeyPathController.text.trim(),
+        privateKeyPassphrase: _privateKeyPassphraseController.text,
         shellKind: _shellKind,
         initialPath:
             EmTaskConnection.normalizeSftpVirtualPath(_pathController.text),
         supportsSftp: _supportsSftp,
+        panelId: original?.panelId ?? '',
+        panelTaskName: panelTaskName,
+        panelTaskCommand: widget.isPanelSession
+            ? _panelCommandController.text.trim()
+            : (original?.panelTaskCommand ?? ''),
+        panelTaskWorkingDir: widget.isPanelSession
+            ? (_panelWorkingDirController.text.trim().isEmpty
+                ? '.'
+                : _panelWorkingDirController.text.trim())
+            : (original?.panelTaskWorkingDir ?? '.'),
+        panelTaskSyncName: widget.isPanelSession ? false : true,
+        panelTaskSyncHost: widget.isPanelSession ? _syncPanelHost : true,
+        panelTaskSyncPort: widget.isPanelSession ? _syncPanelPort : true,
+        panelTaskSyncCommand: widget.isPanelSession ? _syncPanelCommand : true,
+        panelTaskSyncWorkingDir:
+            widget.isPanelSession ? _syncPanelWorkingDir : true,
+        panelTaskSyncSftp: widget.isPanelSession ? _syncPanelSftp : true,
       ),
     );
   }
@@ -2783,11 +5552,93 @@ String _sessionElapsed(DateTime? time) {
   return '内容更新于 ${elapsed.inHours} 小时前';
 }
 
+String _panelTaskNameFromSessionName(String name) {
+  final trimmed = name.trim();
+  if (trimmed.contains('/')) {
+    final last = trimmed.split('/').last.trim();
+    if (last.isNotEmpty) {
+      return last;
+    }
+  }
+  return trimmed;
+}
+
 String _formatError(Object error) {
   return error
       .toString()
       .replaceFirst('Bad state: ', '')
       .replaceFirst('StateError: ', '');
+}
+
+@visibleForTesting
+String terminalInputWithModifiersForTest(
+  String data, {
+  required bool ctrl,
+  required bool shift,
+  required bool alt,
+}) {
+  return _terminalInputWithModifiers(
+    data,
+    ctrl: ctrl,
+    shift: shift,
+    alt: alt,
+  );
+}
+
+String _terminalInputWithModifiers(
+  String data, {
+  required bool ctrl,
+  required bool shift,
+  required bool alt,
+}) {
+  if (data.isEmpty) {
+    return data;
+  }
+
+  final buffer = StringBuffer();
+  for (final codeUnit in data.codeUnits) {
+    var output = String.fromCharCode(codeUnit);
+    if (shift && codeUnit >= 0x61 && codeUnit <= 0x7a) {
+      output = String.fromCharCode(codeUnit - 0x20);
+    }
+    if (ctrl) {
+      final ctrlCode = _ctrlCodeUnit(output.codeUnitAt(0));
+      if (ctrlCode != null) {
+        output = String.fromCharCode(ctrlCode);
+      }
+    }
+    if (alt) {
+      buffer.write('\x1b');
+    }
+    buffer.write(output);
+  }
+  return buffer.toString();
+}
+
+int? _ctrlCodeUnit(int codeUnit) {
+  if (codeUnit >= 0x61 && codeUnit <= 0x7a) {
+    return codeUnit - 0x60;
+  }
+  if (codeUnit >= 0x41 && codeUnit <= 0x5a) {
+    return codeUnit - 0x40;
+  }
+  switch (codeUnit) {
+    case 0x40: // @
+      return 0x00;
+    case 0x5b: // [
+      return 0x1b;
+    case 0x5c: // \
+      return 0x1c;
+    case 0x5d: // ]
+      return 0x1d;
+    case 0x5e: // ^
+      return 0x1e;
+    case 0x5f: // _
+      return 0x1f;
+    case 0x3f: // ?
+      return 0x7f;
+  }
+  return null;
 }
 
 String _formatBytes(int? value) {
@@ -2819,6 +5670,51 @@ String _parentSftpPath(String path) {
     return '.';
   }
   return value.substring(0, slash);
+}
+
+String _joinSftpChildPath(String directory, String name) {
+  final base = EmTaskConnection.normalizeSftpVirtualPath(directory);
+  if (base == '.') {
+    return name;
+  }
+  return '$base/$name';
+}
+
+bool _isValidSftpChildName(String name) {
+  return name.isNotEmpty &&
+      name != '.' &&
+      name != '..' &&
+      !name.contains('/') &&
+      !name.contains('\\') &&
+      !name.contains(':') &&
+      !name.contains('\u0000');
+}
+
+bool _isSftpPathUnder(String path, String directoryPath) {
+  final normalizedPath = EmTaskConnection.normalizeSftpVirtualPath(path);
+  final normalizedDirectory =
+      EmTaskConnection.normalizeSftpVirtualPath(directoryPath);
+  if (normalizedPath == normalizedDirectory) {
+    return true;
+  }
+  if (normalizedDirectory == '.') {
+    return normalizedPath != '.';
+  }
+  return normalizedPath.startsWith('$normalizedDirectory/');
+}
+
+String? _replaceSftpPathPrefix(String path, String oldPath, String newPath) {
+  final normalizedPath = EmTaskConnection.normalizeSftpVirtualPath(path);
+  final normalizedOldPath = EmTaskConnection.normalizeSftpVirtualPath(oldPath);
+  final normalizedNewPath = EmTaskConnection.normalizeSftpVirtualPath(newPath);
+  if (normalizedPath == normalizedOldPath) {
+    return normalizedNewPath;
+  }
+  final oldPrefix = '$normalizedOldPath/';
+  if (!normalizedPath.startsWith(oldPrefix)) {
+    return null;
+  }
+  return '$normalizedNewPath/${normalizedPath.substring(oldPrefix.length)}';
 }
 
 String _safeInitialSftpPath(String path) {
