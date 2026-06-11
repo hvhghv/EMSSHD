@@ -20,7 +20,7 @@ env:
 jobs:
   emtask-server-windows-msvc:
     name: emtask server / Windows MSVC ${{ matrix.arch }}
-    runs-on: windows-latest
+    runs-on: windows-2022
     continue-on-error: ${{ matrix.allow_failure == 'true' }}
     strategy:
       fail-fast: false
@@ -80,7 +80,7 @@ jobs:
       - name: Build SQLite runtime
         shell: pwsh
         run: |
-          $sqliteSource = (Resolve-Path 'Libs/external/sqlite/src/sqlite3.c').Path -replace [char]92, '/'
+          $sqliteSource = (Resolve-Path 'Libs/external/sqlite/src/sqlite3.c').Path.Replace('\', '/')
           $sqliteSourceDir = 'build-sqlite-src-msvc-${{ matrix.arch }}'
           $sqliteBuildDir = 'build-sqlite-msvc-${{ matrix.arch }}'
           New-Item -ItemType Directory -Force -Path $sqliteSourceDir | Out-Null
@@ -96,24 +96,34 @@ jobs:
           )
           '@ -replace 'SQLITE_SOURCE_PLACEHOLDER', $sqliteSource | Set-Content -Encoding UTF8 $sqliteSourceDir/CMakeLists.txt
 
-          cmake -S $sqliteSourceDir -B $sqliteBuildDir -G 'Visual Studio 17 2022' -A '${{ matrix.vs_arch }}'
+          $sqliteCmakeArgs = @(
+            '-S', $sqliteSourceDir,
+            '-B', $sqliteBuildDir,
+            '-G', 'Visual Studio 17 2022',
+            '-A', '${{ matrix.vs_arch }}'
+          )
+          $windowsSdk = '${{ matrix.windows_sdk }}'
+          if ($windowsSdk) {
+            $sqliteCmakeArgs += '-DCMAKE_SYSTEM_VERSION=' + $windowsSdk
+          }
+          cmake @sqliteCmakeArgs
           cmake --build $sqliteBuildDir --config Release --target sqlite3 --parallel
 
       - name: Package
         shell: pwsh
         run: |
-          $packageName = 'emtask-windows-msvc-${{ matrix.arch }}'
+          $packageName = 'emtask-server-windows-msvc-${{ matrix.arch }}'
           $packageRoot = 'dist/' + $packageName
-          New-Item -ItemType Directory -Force -Path $packageRoot/bin, $packageRoot/config, $packageRoot/docs, $packageRoot/tools | Out-Null
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
 
-          Copy-Item build-emtask-msvc-${{ matrix.arch }}/Release/emtask.exe $packageRoot/bin/
-          Copy-Item build-sqlite-msvc-${{ matrix.arch }}/Release/sqlite3.dll $packageRoot/bin/
-          Copy-Item APP/emtask/emtask.conf.example $packageRoot/config/
-          Copy-Item File/emtask-service/emtask-windows-service.ps1 $packageRoot/tools/
-          Copy-Item File/emtask-service/emtask-service-wrapper.exe $packageRoot/tools/
-          Copy-Item File/emtask-service/emtask-service-wrapper.cs $packageRoot/tools/
-          Copy-Item APP/emtask/README.md $packageRoot/docs/emtask-README.md
-          Copy-Item LICENSE $packageRoot/docs/
+          Copy-Item build-emtask-msvc-${{ matrix.arch }}/Release/emtask.exe $packageRoot/
+          Copy-Item build-sqlite-msvc-${{ matrix.arch }}/Release/sqlite3.dll $packageRoot/
+          Copy-Item APP/emtask/emtask.conf.example $packageRoot/
+          Copy-Item File/emtask-service/emtask-windows-service.ps1 $packageRoot/
+          Copy-Item File/emtask-service/emtask-service-wrapper.exe $packageRoot/
+          Copy-Item File/emtask-service/emtask-service-wrapper.cs $packageRoot/
+          Copy-Item APP/emtask/README.md $packageRoot/emtask-README.md
+          Copy-Item LICENSE $packageRoot/
 
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -122,10 +132,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-windows-msvc-${{ matrix.arch }}
+          name: emtask-server-windows-msvc-${{ matrix.arch }}
           path: |
-            dist/emtask-windows-msvc-${{ matrix.arch }}.zip
-            dist/emtask-windows-msvc-${{ matrix.arch }}.zip.sha256
+            dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip
+            dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip.sha256
           if-no-files-found: error
 
   emtask-server-windows-msys2:
@@ -182,19 +192,19 @@ jobs:
       - name: Package tree
         shell: msys2 {0}
         run: |
-          package_name=emtask-windows-msys2-x64
+          package_name=emtask-server-windows-msys2-x64
           package_root=dist/$package_name
           rm -rf $package_root
-          mkdir -p $package_root/bin $package_root/config $package_root/docs $package_root/tools
+          mkdir -p $package_root
 
-          cp build-emtask-msys2-x64/emtask.exe $package_root/bin/
-          cp build-sqlite-msys2-x64/sqlite3.dll $package_root/bin/
-          cp APP/emtask/emtask.conf.example $package_root/config/
-          cp File/emtask-service/emtask-windows-service.ps1 $package_root/tools/
-          cp File/emtask-service/emtask-service-wrapper.exe $package_root/tools/
-          cp File/emtask-service/emtask-service-wrapper.cs $package_root/tools/
-          cp APP/emtask/README.md $package_root/docs/emtask-README.md
-          cp LICENSE $package_root/docs/
+          cp build-emtask-msys2-x64/emtask.exe $package_root/
+          cp build-sqlite-msys2-x64/sqlite3.dll $package_root/
+          cp APP/emtask/emtask.conf.example $package_root/
+          cp File/emtask-service/emtask-windows-service.ps1 $package_root/
+          cp File/emtask-service/emtask-service-wrapper.exe $package_root/
+          cp File/emtask-service/emtask-service-wrapper.cs $package_root/
+          cp APP/emtask/README.md $package_root/emtask-README.md
+          cp LICENSE $package_root/
 
           copy_mingw_deps() {
             local binary=$1
@@ -202,17 +212,17 @@ jobs:
               awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\/mingw64\/bin\/.*[.]dll$/) print $i }' |
               sort -u |
               while read -r dll; do
-                cp -n $dll $package_root/bin/
+                cp -n $dll $package_root/
               done
           }
 
-          copy_mingw_deps $package_root/bin/emtask.exe
-          copy_mingw_deps $package_root/bin/sqlite3.dll
+          copy_mingw_deps $package_root/emtask.exe
+          copy_mingw_deps $package_root/sqlite3.dll
 
       - name: Compress package
         shell: pwsh
         run: |
-          $packageName = 'emtask-windows-msys2-x64'
+          $packageName = 'emtask-server-windows-msys2-x64'
           $packageRoot = 'dist/' + $packageName
 
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
@@ -222,10 +232,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-windows-msys2-x64
+          name: emtask-server-windows-msys2-x64
           path: |
-            dist/emtask-windows-msys2-x64.zip
-            dist/emtask-windows-msys2-x64.zip.sha256
+            dist/emtask-server-windows-msys2-x64.zip
+            dist/emtask-server-windows-msys2-x64.zip.sha256
           if-no-files-found: error
 
   emtask-server-windows-cygwin:
@@ -287,19 +297,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          package_name=emtask-windows-cygwin-x64
+          package_name=emtask-server-windows-cygwin-x64
           package_root=dist/$package_name
           rm -rf $package_root
-          mkdir -p $package_root/bin $package_root/config $package_root/docs $package_root/tools
+          mkdir -p $package_root
 
-          cp build-emtask-cygwin-x64/emtask.exe $package_root/bin/
-          cp build-sqlite-cygwin-x64/sqlite3.dll $package_root/bin/
-          cp APP/emtask/emtask.conf.example $package_root/config/
-          cp File/emtask-service/emtask-windows-service.ps1 $package_root/tools/
-          cp File/emtask-service/emtask-service-wrapper.exe $package_root/tools/
-          cp File/emtask-service/emtask-service-wrapper.cs $package_root/tools/
-          cp APP/emtask/README.md $package_root/docs/emtask-README.md
-          cp LICENSE $package_root/docs/
+          cp build-emtask-cygwin-x64/emtask.exe $package_root/
+          cp build-sqlite-cygwin-x64/sqlite3.dll $package_root/
+          cp APP/emtask/emtask.conf.example $package_root/
+          cp File/emtask-service/emtask-windows-service.ps1 $package_root/
+          cp File/emtask-service/emtask-service-wrapper.exe $package_root/
+          cp File/emtask-service/emtask-service-wrapper.cs $package_root/
+          cp APP/emtask/README.md $package_root/emtask-README.md
+          cp LICENSE $package_root/
 
           copy_cygwin_deps() {
             local binary=$1
@@ -310,19 +320,19 @@ jobs:
                 unix_path=$(cygpath -u $win_path)
                 case $unix_path in
                   /bin/*.dll|/usr/bin/*.dll)
-                    cp -n $unix_path $package_root/bin/
+                    cp -n $unix_path $package_root/
                     ;;
                 esac
               done
           }
 
-          copy_cygwin_deps $package_root/bin/emtask.exe
-          copy_cygwin_deps $package_root/bin/sqlite3.dll
+          copy_cygwin_deps $package_root/emtask.exe
+          copy_cygwin_deps $package_root/sqlite3.dll
 
       - name: Compress package
         shell: pwsh
         run: |
-          $packageName = 'emtask-windows-cygwin-x64'
+          $packageName = 'emtask-server-windows-cygwin-x64'
           $packageRoot = 'dist/' + $packageName
 
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
@@ -332,10 +342,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-windows-cygwin-x64
+          name: emtask-server-windows-cygwin-x64
           path: |
-            dist/emtask-windows-cygwin-x64.zip
-            dist/emtask-windows-cygwin-x64.zip.sha256
+            dist/emtask-server-windows-cygwin-x64.zip
+            dist/emtask-server-windows-cygwin-x64.zip.sha256
           if-no-files-found: error
 
   emtask-server-linux-glibc:
@@ -422,22 +432,23 @@ jobs:
 
       - name: Package
         run: |
-          package_name=emtask-linux-glibc-${{ matrix.arch }}
+          package_name=emtask-server-linux-glibc-${{ matrix.arch }}
           build_dir=build-emtask-linux-glibc-${{ matrix.arch }}
           package_root=dist/$package_name
-          mkdir -p $package_root/bin $package_root/config $package_root/docs
+          rm -rf $package_root
+          mkdir -p $package_root
 
-          cp $build_dir/emtask $package_root/bin/
+          cp $build_dir/emtask $package_root/
           if [ '${{ matrix.arch }}' = 'x64' ]; then
-            cp File/sqlite-runtime/linux-x64/libsqlite3.so* $package_root/bin/
+            cp File/sqlite-runtime/linux-x64/libsqlite3.so* $package_root/
           else
-            ${{ matrix.c_compiler }} -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/bin/libsqlite3.so.0 -ldl -lpthread
-            ln -s libsqlite3.so.0 $package_root/bin/libsqlite3.so
+            ${{ matrix.c_compiler }} -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/libsqlite3.so.0 -ldl -lpthread
+            ln -s libsqlite3.so.0 $package_root/libsqlite3.so
           fi
-          cp APP/emtask/emtask.conf.example $package_root/config/
-          cp APP/emtask/README.md $package_root/docs/emtask-README.md
-          cp LICENSE $package_root/docs/
-          chmod +x $package_root/bin/emtask
+          cp APP/emtask/emtask.conf.example $package_root/
+          cp APP/emtask/README.md $package_root/emtask-README.md
+          cp LICENSE $package_root/
+          chmod +x $package_root/emtask
 
           tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
@@ -445,10 +456,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-linux-glibc-${{ matrix.arch }}
+          name: emtask-server-linux-glibc-${{ matrix.arch }}
           path: |
-            dist/emtask-linux-glibc-${{ matrix.arch }}.tar.gz
-            dist/emtask-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
+            dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz
+            dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
   emtask-server-linux-musl:
@@ -464,7 +475,7 @@ jobs:
             toolchain_asset: musl-toolchain-x86_64.tar.gz
           - arch: arm
             processor: arm
-            toolchain: arm-linux-musleabihf
+            toolchain: arm-linux-musleabi
             toolchain_asset: musl-toolchain-arm.tar.gz
           - arch: aarch64
             processor: aarch64
@@ -537,18 +548,19 @@ jobs:
 
       - name: Package
         run: |
-          package_name=emtask-linux-musl-${{ matrix.arch }}
+          package_name=emtask-server-linux-musl-${{ matrix.arch }}
           build_dir=build-emtask-linux-musl-${{ matrix.arch }}
           package_root=dist/$package_name
-          mkdir -p $package_root/bin $package_root/config $package_root/docs
+          rm -rf $package_root
+          mkdir -p $package_root
 
-          cp $build_dir/emtask $package_root/bin/
-          $MUSL_CC -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/bin/libsqlite3.so.0 -pthread
-          ln -s libsqlite3.so.0 $package_root/bin/libsqlite3.so
-          cp APP/emtask/emtask.conf.example $package_root/config/
-          cp APP/emtask/README.md $package_root/docs/emtask-README.md
-          cp LICENSE $package_root/docs/
-          chmod +x $package_root/bin/emtask
+          cp $build_dir/emtask $package_root/
+          $MUSL_CC -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/libsqlite3.so.0 -pthread
+          ln -s libsqlite3.so.0 $package_root/libsqlite3.so
+          cp APP/emtask/emtask.conf.example $package_root/
+          cp APP/emtask/README.md $package_root/emtask-README.md
+          cp LICENSE $package_root/
+          chmod +x $package_root/emtask
 
           tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
@@ -556,10 +568,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-linux-musl-${{ matrix.arch }}
+          name: emtask-server-linux-musl-${{ matrix.arch }}
           path: |
-            dist/emtask-linux-musl-${{ matrix.arch }}.tar.gz
-            dist/emtask-linux-musl-${{ matrix.arch }}.tar.gz.sha256
+            dist/emtask-server-linux-musl-${{ matrix.arch }}.tar.gz
+            dist/emtask-server-linux-musl-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
   emtask-client-android-apk:
@@ -1164,7 +1176,7 @@ jobs:
             toolchain_asset: musl-toolchain-x86_64.tar.gz
           - arch: arm
             processor: arm
-            toolchain: arm-linux-musleabihf
+            toolchain: arm-linux-musleabi
             toolchain_asset: musl-toolchain-arm.tar.gz
           - arch: aarch64
             processor: aarch64
