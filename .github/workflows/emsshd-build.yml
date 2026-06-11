@@ -1,0 +1,533 @@
+name: Build emsshd
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc:
+    name: Windows MSVC ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            vs_arch: Win32
+          - arch: x64
+            vs_arch: x64
+          - arch: arm64
+            vs_arch: ARM64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $buildDir = "build-emsshd-msvc-${{ matrix.arch }}"
+          $cmakeArgs = @(
+            "-S", ".",
+            "-B", $buildDir,
+            "-G", "Visual Studio 17 2022",
+            "-A", "${{ matrix.vs_arch }}",
+            "-DEMSSH_USE_MBEDTLS=ON",
+            "-DEMSSH_USE_OPENSSL=OFF",
+            "-DEMSSH_USE_WOLFSSL=OFF",
+            "-DEMSSH_MBEDTLS_USE_PSA=OFF",
+            "-DEMSSH_MBEDTLS_CLASSIC_LAYOUT=ON",
+            "-DEMSSH_MBEDTLS_LEGACY_CONFIG_FILE=",
+            "-DEMSSH_BUILD_EXAMPLES=ON",
+            "-DEMSSH_BUILD_TESTS=OFF",
+            "-DEMSSH_BUILD_POSIX_PASSWD_AUTH=OFF",
+            "-DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR=${{ github.workspace }}/Libs/external/mbedtls",
+            "-DCMAKE_EXE_LINKER_FLAGS=bcrypt.lib"
+          )
+          cmake @cmakeArgs
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build "build-emsshd-msvc-${{ matrix.arch }}" --config Release --target emssh_concurrent_server --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $packageName = "emsshd-windows-msvc-${{ matrix.arch }}"
+          $packageRoot = "dist/$packageName"
+          New-Item -ItemType Directory -Force -Path "$packageRoot/bin", "$packageRoot/docs" | Out-Null
+
+          Copy-Item "build-emsshd-msvc-${{ matrix.arch }}/Release/emssh_concurrent_server.exe" "$packageRoot/bin/emsshd.exe"
+          Copy-Item "LICENSE" "$packageRoot/docs/"
+
+          @"
+          emsshd Windows package
+
+          This package uses the current cross-platform concurrent SSH/SFTP server target
+          (emssh_concurrent_server) and packages it as bin/emsshd.exe.
+          The Linux packages use APP/emsshd/Linux/linux_posix_stdio_server.c.
+
+          Basic usage:
+            emsshd.exe <port> <root-dir> <username> <password> [hostkey-file] [--max-workers N] [--max-connections N] [--timeout-ms N]
+          "@ | Set-Content -Encoding UTF8 "$packageRoot/docs/README-windows.txt"
+
+          Compress-Archive -Path $packageRoot -DestinationPath "dist/$packageName.zip" -Force
+          (Get-FileHash "dist/$packageName.zip" -Algorithm SHA256).Hash.ToLower() + "  $packageName.zip" |
+            Set-Content -NoNewline "dist/$packageName.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emsshd-windows-msvc-${{ matrix.arch }}
+          path: |
+            dist/emsshd-windows-msvc-${{ matrix.arch }}.zip
+            dist/emsshd-windows-msvc-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+
+  windows-msys2:
+    name: Windows MSYS2 x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Configure
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build-emsshd-msys2-x64 \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS=-lbcrypt \
+            -DEMSSH_USE_MBEDTLS=ON \
+            -DEMSSH_USE_OPENSSL=OFF \
+            -DEMSSH_USE_WOLFSSL=OFF \
+            -DEMSSH_MBEDTLS_USE_PSA=OFF \
+            -DEMSSH_MBEDTLS_CLASSIC_LAYOUT=ON \
+            -DEMSSH_MBEDTLS_LEGACY_CONFIG_FILE= \
+            -DEMSSH_BUILD_EXAMPLES=ON \
+            -DEMSSH_BUILD_TESTS=OFF \
+            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=OFF \
+            -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR="$PWD/Libs/external/mbedtls"
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build-emsshd-msys2-x64 --target emssh_concurrent_server --parallel "$(nproc)"
+
+      - name: Package tree
+        shell: msys2 {0}
+        run: |
+          package_name="emsshd-windows-msys2-x64"
+          package_root="dist/$package_name"
+          rm -rf "$package_root"
+          mkdir -p "$package_root/bin" "$package_root/docs"
+
+          cp "build-emsshd-msys2-x64/emssh_concurrent_server.exe" "$package_root/bin/emsshd.exe"
+          cp "LICENSE" "$package_root/docs/"
+          cat > "$package_root/docs/README-windows.txt" <<'EOF'
+          emsshd Windows MSYS2 package
+
+          This package uses the current cross-platform concurrent SSH/SFTP server target
+          (emssh_concurrent_server) and packages it as bin/emsshd.exe.
+
+          Basic usage:
+            emsshd.exe <port> <root-dir> <username> <password> [hostkey-file] [--max-workers N] [--max-connections N] [--timeout-ms N]
+          EOF
+
+          copy_mingw_deps() {
+            local binary="$1"
+            ldd "$binary" |
+              awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\/mingw64\/bin\/.*\.dll$/) print $i }' |
+              sort -u |
+              while read -r dll; do
+                cp -n "$dll" "$package_root/bin/"
+              done
+          }
+
+          copy_mingw_deps "$package_root/bin/emsshd.exe"
+
+      - name: Compress package
+        shell: pwsh
+        run: |
+          $packageName = "emsshd-windows-msys2-x64"
+          $packageRoot = "dist/$packageName"
+
+          Compress-Archive -Path $packageRoot -DestinationPath "dist/$packageName.zip" -Force
+          (Get-FileHash "dist/$packageName.zip" -Algorithm SHA256).Hash.ToLower() + "  $packageName.zip" |
+            Set-Content -NoNewline "dist/$packageName.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emsshd-windows-msys2-x64
+          path: |
+            dist/emsshd-windows-msys2-x64.zip
+            dist/emsshd-windows-msys2-x64.zip.sha256
+          if-no-files-found: error
+
+  windows-cygwin:
+    name: Windows Cygwin x64
+    runs-on: windows-latest
+    env:
+      CYGWIN_NOWINPATH: 1
+      SHELLOPTS: igncr
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Cygwin
+        uses: cygwin/cygwin-install-action@v6
+        with:
+          packages: cmake gcc-core ninja
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-emsshd-cygwin-x64 \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEMSSH_USE_MBEDTLS=ON \
+            -DEMSSH_USE_OPENSSL=OFF \
+            -DEMSSH_USE_WOLFSSL=OFF \
+            -DEMSSH_MBEDTLS_USE_PSA=OFF \
+            -DEMSSH_MBEDTLS_CLASSIC_LAYOUT=ON \
+            -DEMSSH_MBEDTLS_LEGACY_CONFIG_FILE= \
+            -DEMSSH_BUILD_EXAMPLES=ON \
+            -DEMSSH_BUILD_TESTS=OFF \
+            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=OFF \
+            -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR="$PWD/Libs/external/mbedtls"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          jobs="$(nproc 2>/dev/null || echo 2)"
+          cmake --build build-emsshd-cygwin-x64 --target emssh_concurrent_server --parallel "$jobs"
+
+      - name: Package tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name="emsshd-windows-cygwin-x64"
+          package_root="dist/$package_name"
+          rm -rf "$package_root"
+          mkdir -p "$package_root/bin" "$package_root/docs"
+
+          cp "build-emsshd-cygwin-x64/emssh_concurrent_server.exe" "$package_root/bin/emsshd.exe"
+          cp "LICENSE" "$package_root/docs/"
+          cat > "$package_root/docs/README-windows.txt" <<'EOF'
+          emsshd Windows Cygwin package
+
+          This package uses the current cross-platform concurrent SSH/SFTP server target
+          (emssh_concurrent_server) and packages it as bin/emsshd.exe.
+
+          Basic usage:
+            emsshd.exe <port> <root-dir> <username> <password> [hostkey-file] [--max-workers N] [--max-connections N] [--timeout-ms N]
+          EOF
+
+          copy_cygwin_deps() {
+            local binary="$1"
+            cygcheck "$binary" |
+              awk '/^[[:space:]]+[A-Za-z]:\\/ { print $1 }' |
+              sort -u |
+              while read -r win_path; do
+                unix_path="$(cygpath -u "$win_path")"
+                case "$unix_path" in
+                  /bin/*.dll|/usr/bin/*.dll)
+                    cp -n "$unix_path" "$package_root/bin/"
+                    ;;
+                esac
+              done
+          }
+
+          copy_cygwin_deps "$package_root/bin/emsshd.exe"
+
+      - name: Compress package
+        shell: pwsh
+        run: |
+          $packageName = "emsshd-windows-cygwin-x64"
+          $packageRoot = "dist/$packageName"
+
+          Compress-Archive -Path $packageRoot -DestinationPath "dist/$packageName.zip" -Force
+          (Get-FileHash "dist/$packageName.zip" -Algorithm SHA256).Hash.ToLower() + "  $packageName.zip" |
+            Set-Content -NoNewline "dist/$packageName.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emsshd-windows-cygwin-x64
+          path: |
+            dist/emsshd-windows-cygwin-x64.zip
+            dist/emsshd-windows-cygwin-x64.zip.sha256
+          if-no-files-found: error
+
+  linux-glibc:
+    name: Linux glibc ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            processor: x86_64
+            triplet: x86_64-linux-gnu
+            c_compiler: gcc
+            apt_packages: libcrypt-dev
+            cross: "false"
+          - arch: x86
+            processor: i686
+            triplet: i686-linux-gnu
+            c_compiler: i686-linux-gnu-gcc
+            apt_packages: gcc-i686-linux-gnu
+            cross: "true"
+          - arch: arm
+            processor: arm
+            triplet: arm-linux-gnueabihf
+            c_compiler: arm-linux-gnueabihf-gcc
+            apt_packages: gcc-arm-linux-gnueabihf
+            cross: "true"
+          - arch: aarch64
+            processor: aarch64
+            triplet: aarch64-linux-gnu
+            c_compiler: aarch64-linux-gnu-gcc
+            apt_packages: gcc-aarch64-linux-gnu
+            cross: "true"
+          - arch: riscv64
+            processor: riscv64
+            triplet: riscv64-linux-gnu
+            c_compiler: riscv64-linux-gnu-gcc
+            apt_packages: gcc-riscv64-linux-gnu
+            cross: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build ${{ matrix.apt_packages }}
+
+      - name: Configure
+        run: |
+          build_dir="build-emsshd-linux-glibc-${{ matrix.arch }}"
+          cmake_args=(
+            -S .
+            -B "$build_dir"
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+            -DEMSSH_USE_MBEDTLS=ON
+            -DEMSSH_USE_OPENSSL=OFF
+            -DEMSSH_USE_WOLFSSL=OFF
+            -DEMSSH_MBEDTLS_USE_PSA=OFF
+            -DEMSSH_MBEDTLS_CLASSIC_LAYOUT=ON
+            -DEMSSH_MBEDTLS_LEGACY_CONFIG_FILE="${{ github.workspace }}/APP/emsshd/Linux/mbedtls_config_port.h"
+            -DEMSSH_BUILD_EXAMPLES=ON
+            -DEMSSH_BUILD_TESTS=OFF
+            -DEMSSH_BUILD_STDIO_FS=ON
+            -DEMSSH_BUILD_POSIX_RUNTIME=ON
+            -DEMSSH_BUILD_POSIX_NET=ON
+            -DEMSSH_BUILD_POSIX_TERM=ON
+            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=ON
+            -DEMSSH_BUILD_SSHD_CONFIG_FILE=ON
+            -DEMSSH_BUILD_LINUX_POSIX_STDIO_SERVER=ON
+            -DEMSSH_LINUX_POSIX_STDIO_SERVER_BACKEND=mbedtls
+            -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR="${{ github.workspace }}/Libs/external/mbedtls"
+          )
+
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cmake_args+=(
+              -DCMAKE_SYSTEM_NAME=Linux
+              -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.processor }}
+              -DCMAKE_FIND_ROOT_PATH=/usr/${{ matrix.triplet }}
+              -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+              -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+            )
+          fi
+
+          cmake "${cmake_args[@]}"
+
+      - name: Build
+        run: cmake --build "build-emsshd-linux-glibc-${{ matrix.arch }}" --target emssh_linux_posix_stdio_server --parallel
+
+      - name: Package
+        run: |
+          package_name="emsshd-linux-glibc-${{ matrix.arch }}"
+          build_dir="build-emsshd-linux-glibc-${{ matrix.arch }}"
+          package_root="dist/$package_name"
+          rm -rf "$package_root"
+          mkdir -p "$package_root/bin" "$package_root/config" "$package_root/docs" "$package_root/init.d"
+
+          cp "$build_dir/emssh_linux_posix_stdio_server" "$package_root/bin/emsshd"
+          cp "APP/emsshd/Linux/init.d/S98emsshd" "$package_root/init.d/"
+          cp "sshd_config" "$package_root/config/sshd_config.example"
+          cp "LICENSE" "$package_root/docs/"
+          cat > "$package_root/docs/README-linux.txt" <<'EOF'
+          emsshd Linux package
+
+          Binary: bin/emsshd
+          Example init script: init.d/S98emsshd
+          Example config: config/sshd_config.example
+
+          Basic usage:
+            emsshd --sshd-config <path> --passwd-file <path> --shadow-file <path> --session-mode auto
+          EOF
+          chmod +x "$package_root/bin/emsshd" "$package_root/init.d/S98emsshd"
+
+          tar -czf "dist/$package_name.tar.gz" -C dist "$package_name"
+          sha256sum "dist/$package_name.tar.gz" > "dist/$package_name.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emsshd-linux-glibc-${{ matrix.arch }}
+          path: |
+            dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz
+            dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  linux-musl:
+    name: Linux musl ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            processor: x86_64
+            toolchain: x86_64-linux-musl
+          - arch: x86
+            processor: i686
+            toolchain: i686-linux-musl
+          - arch: arm
+            processor: arm
+            toolchain: arm-linux-musleabihf
+          - arch: aarch64
+            processor: aarch64
+            toolchain: aarch64-linux-musl
+          - arch: riscv64
+            processor: riscv64
+            toolchain: riscv64-linux-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build curl
+
+      - name: Install musl cross toolchain
+        run: |
+          toolchain="${{ matrix.toolchain }}"
+          mkdir -p "$RUNNER_TEMP/musl-cross"
+          curl -L --retry 3 --retry-delay 5 \
+            -o "$RUNNER_TEMP/${toolchain}-cross.tgz" \
+            "https://musl.cc/${toolchain}-cross.tgz"
+          tar -xzf "$RUNNER_TEMP/${toolchain}-cross.tgz" -C "$RUNNER_TEMP/musl-cross"
+          echo "$RUNNER_TEMP/musl-cross/${toolchain}-cross/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: |
+          toolchain="${{ matrix.toolchain }}"
+          toolchain_root="$RUNNER_TEMP/musl-cross/${toolchain}-cross"
+          build_dir="build-emsshd-linux-musl-${{ matrix.arch }}"
+          cmake -S . -B "$build_dir" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.processor }} \
+            -DCMAKE_C_COMPILER=${toolchain}-gcc \
+            -DCMAKE_FIND_ROOT_PATH="$toolchain_root/$toolchain" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_EXE_LINKER_FLAGS=-static \
+            -DEMSSH_USE_MBEDTLS=ON \
+            -DEMSSH_USE_OPENSSL=OFF \
+            -DEMSSH_USE_WOLFSSL=OFF \
+            -DEMSSH_MBEDTLS_USE_PSA=OFF \
+            -DEMSSH_MBEDTLS_CLASSIC_LAYOUT=ON \
+            -DEMSSH_MBEDTLS_LEGACY_CONFIG_FILE="${{ github.workspace }}/APP/emsshd/Linux/mbedtls_config_port.h" \
+            -DEMSSH_BUILD_EXAMPLES=ON \
+            -DEMSSH_BUILD_TESTS=OFF \
+            -DEMSSH_BUILD_STDIO_FS=ON \
+            -DEMSSH_BUILD_POSIX_RUNTIME=ON \
+            -DEMSSH_BUILD_POSIX_NET=ON \
+            -DEMSSH_BUILD_POSIX_TERM=ON \
+            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=ON \
+            -DEMSSH_BUILD_SSHD_CONFIG_FILE=ON \
+            -DEMSSH_BUILD_LINUX_POSIX_STDIO_SERVER=ON \
+            -DEMSSH_LINUX_POSIX_STDIO_SERVER_BACKEND=mbedtls \
+            -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR="${{ github.workspace }}/Libs/external/mbedtls"
+
+      - name: Build
+        run: cmake --build "build-emsshd-linux-musl-${{ matrix.arch }}" --target emssh_linux_posix_stdio_server --parallel
+
+      - name: Package
+        run: |
+          package_name="emsshd-linux-musl-${{ matrix.arch }}"
+          build_dir="build-emsshd-linux-musl-${{ matrix.arch }}"
+          package_root="dist/$package_name"
+          rm -rf "$package_root"
+          mkdir -p "$package_root/bin" "$package_root/config" "$package_root/docs" "$package_root/init.d"
+
+          cp "$build_dir/emssh_linux_posix_stdio_server" "$package_root/bin/emsshd"
+          cp "APP/emsshd/Linux/init.d/S98emsshd" "$package_root/init.d/"
+          cp "sshd_config" "$package_root/config/sshd_config.example"
+          cp "LICENSE" "$package_root/docs/"
+          cat > "$package_root/docs/README-linux.txt" <<'EOF'
+          emsshd Linux musl package
+
+          Binary: bin/emsshd
+          Example init script: init.d/S98emsshd
+          Example config: config/sshd_config.example
+
+          Basic usage:
+            emsshd --sshd-config <path> --passwd-file <path> --shadow-file <path> --session-mode auto
+          EOF
+          chmod +x "$package_root/bin/emsshd" "$package_root/init.d/S98emsshd"
+
+          tar -czf "dist/$package_name.tar.gz" -C dist "$package_name"
+          sha256sum "dist/$package_name.tar.gz" > "dist/$package_name.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emsshd-linux-musl-${{ matrix.arch }}
+          path: |
+            dist/emsshd-linux-musl-${{ matrix.arch }}.tar.gz
+            dist/emsshd-linux-musl-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error

@@ -5,8 +5,10 @@
 
 .DESCRIPTION
     This script installs emtask.exe as a hidden Windows service by copying a prebuilt
-    .NET Framework ServiceBase wrapper to the service directory. Install does not require
-    a C# compiler when tools\emtask-service-wrapper.exe is already present.
+    .NET Framework ServiceBase wrapper to the service directory. Install uses the
+    current Windows user by default and prompts for that user's password. Pass
+    -LocalSystem only when the service should run as LocalSystem instead.
+    Install does not require a C# compiler when tools\emtask-service-wrapper.exe is already present.
 
     Use the build-wrapper action on a development machine to prebuild the wrapper from
     tools\emtask-service-wrapper.cs.
@@ -27,14 +29,19 @@
 
 .EXAMPLE
     # If .\emtask.exe and .\emtask.conf exist in the current directory, both paths can be omitted.
+    # By default, install prompts for the current user's password and runs as that user.
     .\tools\emtask-windows-service.ps1 install `
         -Force
 
 .EXAMPLE
-    # Run the service as the current Windows user. This prompts for the user's password.
+    # Explicitly run the service as LocalSystem instead of the default current user.
     .\tools\emtask-windows-service.ps1 install `
-        -CurrentUser `
+        -LocalSystem `
         -Force
+
+.EXAMPLE
+    # Change an already installed service to run as the current Windows user, then start it again.
+    .\tools\emtask-windows-service.ps1 set-current-user
 
 .EXAMPLE
     .\tools\emtask-windows-service.ps1 start
@@ -49,7 +56,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'uninstall', 'start', 'stop', 'restart', 'status', 'build-wrapper', 'help', '-h', '--help')]
+    [ValidateSet('install', 'uninstall', 'start', 'stop', 'restart', 'status', 'set-current-user', 'build-wrapper', 'help', '-h', '--help')]
     [string]$Action = 'install',
 
     [string]$ServiceName = 'emtask',
@@ -77,6 +84,8 @@ param(
 
     [switch]$CurrentUser,
 
+    [switch]$LocalSystem,
+
     [switch]$Force,
 
     [switch]$RemoveFiles,
@@ -103,12 +112,13 @@ Usage:
     .\$scriptName --help
 
 Actions:
-    install         Install emtask as a hidden Windows service. Default action.
+    install         Install emtask as a hidden Windows service. Default action. Runs as the current user by default.
     uninstall       Stop and delete the Windows service.
     start           Start the service.
     stop            Stop the service.
     restart         Restart the service.
     status          Show service status.
+    set-current-user Stop the service, set Log On As to the current Windows user, then start it.
     build-wrapper   Build the precompiled service wrapper exe from C# source.
     help            Show this help text.
 
@@ -123,8 +133,9 @@ Common options:
     -WrapperExe <path>        Prebuilt wrapper exe. Default: script directory\emtask-service-wrapper.exe
     -WrapperSource <path>     Wrapper C# source. Default: script directory\emtask-service-wrapper.cs
     -StartupType <type>       Automatic, Manual, or Disabled. Default: Automatic
-    -Credential <credential>  Service account credential.
-    -CurrentUser              Run the service as the current Windows user. Prompts for the user's password.
+    -Credential <credential>  Service account credential. Overrides the default current-user prompt.
+    -CurrentUser              Run the service as the current Windows user. This is the install default.
+    -LocalSystem              Run the service as LocalSystem instead of the default current user.
     -Force                    Replace an existing service during install.
     -RemoveFiles              Remove ServiceDir during uninstall.
     -CompileIfMissing         Compile wrapper if prebuilt exe is missing.
@@ -134,7 +145,8 @@ Examples:
     .\$scriptName build-wrapper
     .\$scriptName install -EmtaskExe .\emtask.exe -Config .\emtask.conf -Force
     .\$scriptName install -Force
-    .\$scriptName install -CurrentUser -Force
+    .\$scriptName install -LocalSystem -Force
+    .\$scriptName set-current-user
     .\$scriptName start
     .\$scriptName status
     .\$scriptName uninstall -RemoveFiles
@@ -233,6 +245,69 @@ function Get-CurrentUserCredential {
         throw 'Cannot determine the current Windows user name.'
     }
     return Get-Credential -UserName $userName -Message "Enter the Windows password for $userName to run the '$ServiceName' service."
+}
+
+function Get-ServiceCimOrNull {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $escapedName = $Name.Replace("'", "''")
+    return Get-CimInstance Win32_Service -Filter "Name='$escapedName'" -ErrorAction SilentlyContinue
+}
+
+function Get-ServiceChangeReturnMessage {
+    param([Parameter(Mandatory = $true)][int]$Code)
+
+    switch ($Code) {
+        0 { return 'Success' }
+        1 { return 'Not Supported' }
+        2 { return 'Access Denied' }
+        3 { return 'Dependent Services Running' }
+        4 { return 'Invalid Service Control' }
+        5 { return 'Service Cannot Accept Control' }
+        6 { return 'Service Not Active' }
+        7 { return 'Service Request Timeout' }
+        8 { return 'Unknown Failure' }
+        9 { return 'Path Not Found' }
+        10 { return 'Service Already Running' }
+        11 { return 'Service Database Locked' }
+        12 { return 'Service Dependency Deleted' }
+        13 { return 'Service Dependency Failure' }
+        14 { return 'Service Disabled' }
+        15 { return 'Service Logon Failed. Check the password and the "Log on as a service" right.' }
+        16 { return 'Service Marked For Deletion' }
+        17 { return 'Service No Thread' }
+        18 { return 'Status Circular Dependency' }
+        19 { return 'Status Duplicate Name' }
+        20 { return 'Status Invalid Name' }
+        21 { return 'Status Invalid Parameter' }
+        22 { return 'Status Invalid Service Account' }
+        default { return "Win32_Service.Change returned $Code" }
+    }
+}
+
+function Set-EmtaskServiceCredential {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$ServiceCredential
+    )
+
+    $serviceCim = Get-ServiceCimOrNull -Name $ServiceName
+    if (-not $serviceCim) {
+        throw "Service '$ServiceName' does not exist."
+    }
+
+    $password = $ServiceCredential.GetNetworkCredential().Password
+    $result = Invoke-CimMethod -InputObject $serviceCim -MethodName Change -Arguments @{
+        StartName = $ServiceCredential.UserName
+        StartPassword = $password
+    }
+    if ($result.ReturnValue -ne 0) {
+        throw "Failed to set service account to '$($ServiceCredential.UserName)': $(Get-ServiceChangeReturnMessage -Code ([int]$result.ReturnValue))"
+    }
+
+    $updated = Get-ServiceCimOrNull -Name $ServiceName
+    if ($updated) {
+        Write-Host "Actual service account: $($updated.StartName)"
+    }
 }
 
 function Get-CSharpCompiler {
@@ -338,12 +413,18 @@ function Stop-EmtaskService {
 function Install-EmtaskService {
     Assert-Administrator
 
+    if ($LocalSystem -and $Credential) {
+        throw 'Use either -LocalSystem or -Credential, not both.'
+    }
+    if ($LocalSystem -and $CurrentUser) {
+        throw 'Use either -LocalSystem or -CurrentUser, not both.'
+    }
     if ($CurrentUser -and $Credential) {
         throw 'Use either -CurrentUser or -Credential, not both.'
     }
 
     $serviceCredential = $Credential
-    if ($CurrentUser) {
+    if (-not $LocalSystem -and -not $serviceCredential) {
         $serviceCredential = Get-CurrentUserCredential
     }
 
@@ -415,12 +496,18 @@ function Install-EmtaskService {
     }
 
     New-Service @newServiceParams | Out-Null
+    if ($serviceCredential) {
+        Set-EmtaskServiceCredential -ServiceCredential $serviceCredential
+    }
     & sc.exe description $ServiceName $Description | Out-Null
     & sc.exe failure $ServiceName reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
     Write-Host "Installed service: $ServiceName"
-    if ($serviceCredential) {
-        Write-Host "Run as: $($serviceCredential.UserName)"
+    $installedService = Get-ServiceCimOrNull -Name $ServiceName
+    if ($installedService) {
+        Write-Host "Run as: $($installedService.StartName)"
+    } elseif ($serviceCredential) {
+        Write-Host "Requested run as: $($serviceCredential.UserName)"
     } else {
         Write-Host 'Run as: LocalSystem'
     }
@@ -474,10 +561,25 @@ function Show-EmtaskServiceStatus {
 
     $cim = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
     if ($cim) {
-        $cim | Select-Object Name, DisplayName, State, StartMode, ProcessId, PathName | Format-List
+        $cim | Select-Object Name, DisplayName, State, StartName, StartMode, ProcessId, PathName | Format-List
     } else {
         $service | Format-List Name, DisplayName, Status, ServiceType, CanStop
     }
+}
+
+function Set-EmtaskServiceCurrentUser {
+    Assert-Administrator
+
+    $service = Get-ServiceOrNull -Name $ServiceName
+    if (-not $service) {
+        throw "Service '$ServiceName' does not exist. Install it first."
+    }
+
+    $serviceCredential = Get-CurrentUserCredential
+    Stop-EmtaskService -IgnoreMissing
+    Set-EmtaskServiceCredential -ServiceCredential $serviceCredential
+    Start-EmtaskService
+    Show-EmtaskServiceStatus
 }
 
 switch ($Action) {
@@ -490,6 +592,7 @@ switch ($Action) {
         Start-EmtaskService
     }
     'status' { Show-EmtaskServiceStatus }
+    'set-current-user' { Set-EmtaskServiceCurrentUser }
     'build-wrapper' { Build-ServiceWrapper }
     'help' { Show-Usage }
     '-h' { Show-Usage }
