@@ -4,6 +4,8 @@
 build*
 # Keep the combined GitHub Actions workflow; the broad build* rule would ignore build.yml.
 !/.github/workflows/build.yml
+!/.github/scripts/
+!/.github/scripts/**
 # CMake/Ninja artifacts
 CMakeCache.txt
 CMakeFiles/

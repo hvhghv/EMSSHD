@@ -21,27 +21,16 @@ jobs:
   emtask-server-windows-msvc:
     name: emtask server / Windows MSVC ${{ matrix.arch }}
     runs-on: windows-2022
-    continue-on-error: ${{ matrix.allow_failure == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
             vs_arch: x64
-            allow_failure: 'false'
-            windows_sdk: ''
           - arch: x86
             vs_arch: Win32
-            allow_failure: 'false'
-            windows_sdk: ''
-          - arch: arm
-            vs_arch: ARM
-            allow_failure: 'true'
-            windows_sdk: '10.0.22621.0'
           - arch: arm64
             vs_arch: ARM64
-            allow_failure: 'false'
-            windows_sdk: ''
 
     steps:
       - name: Checkout
@@ -67,11 +56,6 @@ jobs:
             '-DEMSSH_BUILD_TESTS=OFF',
             '-DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR=${{ github.workspace }}/Libs/external/mbedtls'
           )
-          $windowsSdk = '${{ matrix.windows_sdk }}'
-          if ($windowsSdk) {
-            $cmakeArgs += '-DCMAKE_SYSTEM_VERSION=' + $windowsSdk
-            $cmakeArgs += '-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=' + $windowsSdk
-          }
           cmake @cmakeArgs
 
       - name: Build
@@ -103,13 +87,19 @@ jobs:
             '-G', 'Visual Studio 17 2022',
             '-A', '${{ matrix.vs_arch }}'
           )
-          $windowsSdk = '${{ matrix.windows_sdk }}'
-          if ($windowsSdk) {
-            $sqliteCmakeArgs += '-DCMAKE_SYSTEM_VERSION=' + $windowsSdk
-            $sqliteCmakeArgs += '-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=' + $windowsSdk
-          }
           cmake @sqliteCmakeArgs
           cmake --build $sqliteBuildDir --config Release --target sqlite3 --parallel
+
+      - name: Build service wrapper
+        shell: pwsh
+        run: |
+          $wrapperOut = 'build-service-wrapper-msvc-${{ matrix.arch }}/emtask-service-wrapper.exe'
+          & File/emtask-service/emtask-windows-service.ps1 build-wrapper `
+            -WrapperSource File/emtask-service/emtask-service-wrapper.cs `
+            -WrapperExe $wrapperOut
+          if (-not (Test-Path -LiteralPath $wrapperOut -PathType Leaf)) {
+            throw "Service wrapper was not built: $wrapperOut"
+          }
 
       - name: Package
         shell: pwsh
@@ -122,7 +112,7 @@ jobs:
           Copy-Item build-sqlite-msvc-${{ matrix.arch }}/Release/sqlite3.dll $packageRoot/
           Copy-Item APP/emtask/emtask.conf.example $packageRoot/
           Copy-Item File/emtask-service/emtask-windows-service.ps1 $packageRoot/
-          Copy-Item File/emtask-service/emtask-service-wrapper.exe $packageRoot/
+          Copy-Item build-service-wrapper-msvc-${{ matrix.arch }}/emtask-service-wrapper.exe $packageRoot/
           Copy-Item File/emtask-service/emtask-service-wrapper.cs $packageRoot/
           Copy-Item APP/emtask/README.md $packageRoot/emtask-README.md
           Copy-Item LICENSE $packageRoot/
@@ -130,6 +120,20 @@ jobs:
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
+
+      - name: Test Windows service package
+        if: ${{ matrix.arch != 'arm64' }}
+        shell: pwsh
+        run: |
+          & .\.github\scripts\test-emtask-windows-service.ps1 `
+            -PackageRoot "dist/emtask-server-windows-msvc-${{ matrix.arch }}" `
+            -Label "msvc-${{ matrix.arch }}"
+
+      - name: Skip Windows service runtime test
+        if: ${{ matrix.arch == 'arm64' }}
+        shell: pwsh
+        run: |
+          Write-Host 'Skipping service runtime test: GitHub-hosted x64 Windows runners cannot execute the ARM64 emtask.exe.'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -191,6 +195,17 @@ jobs:
           mkdir -p build-sqlite-msys2-x64
           gcc -O2 -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_API='__declspec(dllexport)' Libs/external/sqlite/src/sqlite3.c -o build-sqlite-msys2-x64/sqlite3.dll
 
+      - name: Build service wrapper
+        shell: pwsh
+        run: |
+          $wrapperOut = 'build-service-wrapper-msys2-x64/emtask-service-wrapper.exe'
+          & File/emtask-service/emtask-windows-service.ps1 build-wrapper `
+            -WrapperSource File/emtask-service/emtask-service-wrapper.cs `
+            -WrapperExe $wrapperOut
+          if (-not (Test-Path -LiteralPath $wrapperOut -PathType Leaf)) {
+            throw "Service wrapper was not built: $wrapperOut"
+          }
+
       - name: Package tree
         shell: msys2 {0}
         run: |
@@ -203,7 +218,7 @@ jobs:
           cp build-sqlite-msys2-x64/sqlite3.dll $package_root/
           cp APP/emtask/emtask.conf.example $package_root/
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
-          cp File/emtask-service/emtask-service-wrapper.exe $package_root/
+          cp build-service-wrapper-msys2-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
@@ -220,6 +235,13 @@ jobs:
 
           copy_mingw_deps $package_root/emtask.exe
           copy_mingw_deps $package_root/sqlite3.dll
+
+      - name: Test Windows service package
+        shell: pwsh
+        run: |
+          & .\.github\scripts\test-emtask-windows-service.ps1 `
+            -PackageRoot 'dist/emtask-server-windows-msys2-x64' `
+            -Label 'msys2-x64'
 
       - name: Compress package
         shell: pwsh
@@ -295,6 +317,17 @@ jobs:
           mkdir -p build-sqlite-cygwin-x64
           gcc -O2 -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_API='__declspec(dllexport)' Libs/external/sqlite/src/sqlite3.c -o build-sqlite-cygwin-x64/sqlite3.dll -lpthread
 
+      - name: Build service wrapper
+        shell: pwsh
+        run: |
+          $wrapperOut = 'build-service-wrapper-cygwin-x64/emtask-service-wrapper.exe'
+          & File/emtask-service/emtask-windows-service.ps1 build-wrapper `
+            -WrapperSource File/emtask-service/emtask-service-wrapper.cs `
+            -WrapperExe $wrapperOut
+          if (-not (Test-Path -LiteralPath $wrapperOut -PathType Leaf)) {
+            throw "Service wrapper was not built: $wrapperOut"
+          }
+
       - name: Package tree
         shell: bash
         run: |
@@ -308,7 +341,7 @@ jobs:
           cp build-sqlite-cygwin-x64/sqlite3.dll $package_root/
           cp APP/emtask/emtask.conf.example $package_root/
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
-          cp File/emtask-service/emtask-service-wrapper.exe $package_root/
+          cp build-service-wrapper-cygwin-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
@@ -337,6 +370,13 @@ jobs:
           copy_cygwin_deps $package_root/sqlite3.dll
           echo "Packaged Cygwin emtask files:"
           find "$package_root" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Test Windows service package
+        shell: pwsh
+        run: |
+          & .\.github\scripts\test-emtask-windows-service.ps1 `
+            -PackageRoot 'dist/emtask-server-windows-cygwin-x64' `
+            -Label 'cygwin-x64'
 
       - name: Compress package
         shell: pwsh
