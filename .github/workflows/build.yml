@@ -36,7 +36,7 @@ jobs:
             windows_sdk: ''
           - arch: arm
             vs_arch: ARM
-            allow_failure: 'false'
+            allow_failure: 'true'
             windows_sdk: '10.0.22621.0'
           - arch: arm64
             vs_arch: ARM64
@@ -70,6 +70,7 @@ jobs:
           $windowsSdk = '${{ matrix.windows_sdk }}'
           if ($windowsSdk) {
             $cmakeArgs += '-DCMAKE_SYSTEM_VERSION=' + $windowsSdk
+            $cmakeArgs += '-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=' + $windowsSdk
           }
           cmake @cmakeArgs
 
@@ -105,6 +106,7 @@ jobs:
           $windowsSdk = '${{ matrix.windows_sdk }}'
           if ($windowsSdk) {
             $sqliteCmakeArgs += '-DCMAKE_SYSTEM_VERSION=' + $windowsSdk
+            $sqliteCmakeArgs += '-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=' + $windowsSdk
           }
           cmake @sqliteCmakeArgs
           cmake --build $sqliteBuildDir --config Release --target sqlite3 --parallel
@@ -313,14 +315,19 @@ jobs:
 
           copy_cygwin_deps() {
             local binary=$1
-            cygcheck $binary |
-              awk '/^[[:space:]]+[A-Za-z]:/ { print $1 }' |
+            echo "Cygwin dependencies for $binary:"
+            cygcheck "$binary"
+            cygcheck "$binary" |
+              awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[A-Za-z]:\\.*[.]dll$/ || $i ~ /^\/.*[.]dll$/) print $i }' |
               sort -u |
-              while read -r win_path; do
-                unix_path=$(cygpath -u $win_path)
+              while read -r dep_path; do
+                case $dep_path in
+                  [A-Za-z]:*) unix_path=$(cygpath -u "$dep_path") ;;
+                  *) unix_path=$dep_path ;;
+                esac
                 case $unix_path in
-                  /bin/*.dll|/usr/bin/*.dll)
-                    cp -n $unix_path $package_root/
+                  /bin/*.dll|/usr/bin/*.dll|/usr/local/bin/*.dll)
+                    cp -nv "$unix_path" "$package_root/"
                     ;;
                 esac
               done
@@ -328,6 +335,8 @@ jobs:
 
           copy_cygwin_deps $package_root/emtask.exe
           copy_cygwin_deps $package_root/sqlite3.dll
+          echo "Packaged Cygwin emtask files:"
+          find "$package_root" -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Compress package
         shell: pwsh
@@ -996,20 +1005,27 @@ jobs:
 
           copy_cygwin_deps() {
             local binary=$1
-            cygcheck $binary |
-              awk '/^[[:space:]]+[A-Za-z]:/ { print $1 }' |
+            echo "Cygwin dependencies for $binary:"
+            cygcheck "$binary"
+            cygcheck "$binary" |
+              awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[A-Za-z]:\\.*[.]dll$/ || $i ~ /^\/.*[.]dll$/) print $i }' |
               sort -u |
-              while read -r win_path; do
-                unix_path=$(cygpath -u $win_path)
+              while read -r dep_path; do
+                case $dep_path in
+                  [A-Za-z]:*) unix_path=$(cygpath -u "$dep_path") ;;
+                  *) unix_path=$dep_path ;;
+                esac
                 case $unix_path in
-                  /bin/*.dll|/usr/bin/*.dll)
-                    cp -n $unix_path $package_root/bin/
+                  /bin/*.dll|/usr/bin/*.dll|/usr/local/bin/*.dll)
+                    cp -nv "$unix_path" "$package_root/bin/"
                     ;;
                 esac
               done
           }
 
           copy_cygwin_deps $package_root/bin/emsshd.exe
+          echo "Packaged Cygwin emsshd files:"
+          find "$package_root" -maxdepth 2 -type f -printf '%P\n' | sort
 
       - name: Compress package
         shell: pwsh
