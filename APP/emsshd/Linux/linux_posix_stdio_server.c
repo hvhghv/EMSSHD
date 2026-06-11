@@ -11,7 +11,9 @@
 #include <unistd.h>
 
 #include "emssh/platform_posix_net.h"
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
 #include "emssh/platform_posix_passwd_auth.h"
+#endif
 #include "emssh/platform_posix_runtime.h"
 #include "emssh/platform_posix_term.h"
 #include "emssh/platform_stdio_fs.h"
@@ -216,7 +218,9 @@ typedef struct app_shared {
 #if defined(EMSSH_BUILD_POSIX_TERM)
     ssh_posix_term_platform_t term;
 #endif
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     ssh_posix_passwd_auth_t passwd_auth;
+#endif
     ssh_sshd_config_file_t sshd_config;
     ssh_server_config_t base_server_config;
     ssh_server_session_options_t base_session_options;
@@ -1065,6 +1069,7 @@ static int publickey_authorized_by_path_list(
     return 0;
 }
 
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
 static int linux_password_auth_cb(void *ctx, const ssh_password_auth_request_t *request)
 {
     auth_runtime_context_t *auth_ctx = (auth_runtime_context_t *)ctx;
@@ -1097,6 +1102,7 @@ static int linux_password_auth_cb(void *ctx, const ssh_password_auth_request_t *
 
     return ssh_posix_passwd_auth_cb(&auth_ctx->shared->passwd_auth, request);
 }
+#endif
 
 static int linux_publickey_auth_cb(void *ctx, const ssh_publickey_auth_request_t *request)
 {
@@ -1848,9 +1854,11 @@ static int initialize_server_templates(
     }
     shared->base_session_options.sftp_trace_enabled = shared->sftp_trace_enabled;
 
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     if (!shared->sshd_config.has_password_authentication || shared->sshd_config.password_authentication) {
         shared->base_server_config.password_auth = linux_password_auth_cb;
     }
+#endif
     if (!shared->sshd_config.has_pubkey_authentication || shared->sshd_config.pubkey_authentication) {
         shared->base_server_config.publickey_auth = linux_publickey_auth_cb;
     }
@@ -2168,8 +2176,10 @@ int main(int argc, char **argv)
     app_shared_t shared;
     worker_pool_t pool;
     ssh_posix_listener_t listener;
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     char passwd_path_normalized[LINUX_SERVER_MAX_PATH];
     char shadow_path_normalized[LINUX_SERVER_MAX_PATH];
+#endif
     char sshd_config_path_normalized[LINUX_SERVER_MAX_PATH];
     const char *sshd_config_effective_path;
     int status;
@@ -2178,7 +2188,9 @@ int main(int argc, char **argv)
     int initialized_sftp_fs;
     int initialized_host_fs;
     int initialized_term;
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     int initialized_passwd_auth;
+#endif
     int initialized_pool;
     size_t worker_stack_size_bytes;
 
@@ -2211,7 +2223,9 @@ int main(int argc, char **argv)
     initialized_sftp_fs = 0;
     initialized_host_fs = 0;
     initialized_term = 0;
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     initialized_passwd_auth = 0;
+#endif
     initialized_pool = 0;
     shared.crypto_provider = opts.crypto_provider;
     shared.session_mode = opts.session_mode;
@@ -2232,6 +2246,7 @@ int main(int argc, char **argv)
     }
 #endif
 
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     status = normalize_host_fs_path(opts.passwd_path, passwd_path_normalized);
     if (status != SSH_OK) {
         fprintf(stderr, "invalid --passwd-file path: %s\n", opts.passwd_path);
@@ -2242,6 +2257,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "invalid --shadow-file path: %s\n", opts.shadow_path);
         goto cleanup;
     }
+#endif
     sshd_config_effective_path = NULL;
     if (opts.sshd_config_path != NULL) {
         status = normalize_host_fs_path(opts.sshd_config_path, sshd_config_path_normalized);
@@ -2294,6 +2310,7 @@ int main(int argc, char **argv)
 #endif
     }
 
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     status = ssh_posix_passwd_auth_init(
         &shared.passwd_auth,
         ssh_stdio_fs_api(&shared.host_fs),
@@ -2304,6 +2321,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     initialized_passwd_auth = 1;
+#endif
 
     status = initialize_server_templates(&shared, &opts, sshd_config_effective_path);
     if (status != SSH_OK) {
@@ -2442,9 +2460,11 @@ cleanup:
     if (initialized_pool) {
         worker_pool_deinit(&pool);
     }
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
     if (initialized_passwd_auth) {
         ssh_posix_passwd_auth_deinit(&shared.passwd_auth);
     }
+#endif
     if (initialized_host_fs) {
         ssh_stdio_fs_deinit(&shared.host_fs);
     }
