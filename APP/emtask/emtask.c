@@ -284,6 +284,8 @@ static void emtask_config_defaults(emtask_config_t *config)
         sizeof(config->global.panel_qr_host),
         EMTASK_DEFAULT_PANEL_QR_HOST);
     config->global.panel_qr_mode = EMTASK_PANEL_QR_ALWAYS;
+    config->global.panel_qr_include_username = 0;
+    config->global.panel_qr_include_password = 0;
     config->global.panel_otp_digits = EMTASK_DEFAULT_PANEL_OTP_DIGITS;
     config->global.panel_otp_step_sec = EMTASK_DEFAULT_PANEL_OTP_STEP_SEC;
     config->global.panel_otp_window = EMTASK_DEFAULT_PANEL_OTP_WINDOW;
@@ -507,6 +509,11 @@ static int emtask_apply_global_config_pair(
     if (emtask_key_equals(key, "panel_auth_file") || emtask_key_equals(key, "panel_auth_key_file")) {
         return emtask_copy_text(global->panel_auth_file, sizeof(global->panel_auth_file), value);
     }
+    if (emtask_key_equals(key, "panel_name") ||
+        emtask_key_equals(key, "panel_display_name") ||
+        emtask_key_equals(key, "panel_qr_name")) {
+        return emtask_copy_text(global->panel_name, sizeof(global->panel_name), value);
+    }
     if (emtask_key_equals(key, "panel_qr_file") ||
         emtask_key_equals(key, "panel_qrcode_file") ||
         emtask_key_equals(key, "panel_qr_code_file")) {
@@ -520,6 +527,26 @@ static int emtask_apply_global_config_pair(
     }
     if (emtask_key_equals(key, "panel_qr_host") || emtask_key_equals(key, "panel_qrcode_host")) {
         return emtask_copy_text(global->panel_qr_host, sizeof(global->panel_qr_host), value);
+    }
+    if (emtask_key_equals(key, "panel_qr_include_username") ||
+        emtask_key_equals(key, "panel_qrcode_include_username") ||
+        emtask_key_equals(key, "panel_qr_embed_username") ||
+        emtask_key_equals(key, "panel_qrcode_embed_username")) {
+        status = emtask_parse_bool(value, &flag);
+        if (status == SSH_OK) {
+            global->panel_qr_include_username = flag;
+        }
+        return status;
+    }
+    if (emtask_key_equals(key, "panel_qr_include_password") ||
+        emtask_key_equals(key, "panel_qrcode_include_password") ||
+        emtask_key_equals(key, "panel_qr_embed_password") ||
+        emtask_key_equals(key, "panel_qrcode_embed_password")) {
+        status = emtask_parse_bool(value, &flag);
+        if (status == SSH_OK) {
+            global->panel_qr_include_password = flag;
+        }
+        return status;
     }
     if (emtask_key_equals(key, "panel_qr_mode") ||
         emtask_key_equals(key, "panel_qr_policy") ||
@@ -1967,6 +1994,12 @@ static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *ou
     if (status != SSH_OK) {
         return status;
     }
+    if (global->panel_name[0] != '\0') {
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "pn", global->panel_name, 96u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
     status = emtask_panel_payload_append_field(out, out_capacity, &len, "h", emtask_panel_qr_host(global), 0u);
     if (status != SSH_OK) {
         return status;
@@ -2020,6 +2053,18 @@ static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *ou
         }
         (void)snprintf(value, sizeof(value), "%u", global->panel_otp_window);
         status = emtask_panel_payload_append_field(out, out_capacity, &len, "w", value, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    if (global->panel_qr_include_username != 0 && global->username[0] != '\0') {
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "u", global->username, 0u);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+    if (global->panel_qr_include_password != 0 && global->password[0] != '\0') {
+        status = emtask_panel_payload_append_field(out, out_capacity, &len, "p", global->password, 0u);
         if (status != SSH_OK) {
             return status;
         }
@@ -2956,6 +3001,177 @@ static int emtask_authorized_keys_contains(const char *path, const ssh_publickey
         return SSH_ERR_PLATFORM;
     }
     (void)fclose(file);
+    return SSH_OK;
+}
+
+static int emtask_publickey_blob_algorithm_matches(
+    const uint8_t *blob,
+    size_t blob_len,
+    const char *algorithm,
+    size_t algorithm_len)
+{
+    uint32_t encoded_len;
+
+    if (blob == NULL || algorithm == NULL || blob_len < 4u) {
+        return 0;
+    }
+    encoded_len = ((uint32_t)blob[0] << 24) |
+                  ((uint32_t)blob[1] << 16) |
+                  ((uint32_t)blob[2] << 8) |
+                  (uint32_t)blob[3];
+    if (encoded_len != algorithm_len || 4u + (size_t)encoded_len > blob_len) {
+        return 0;
+    }
+    return memcmp(blob + 4u, algorithm, algorithm_len) == 0;
+}
+
+static int emtask_parse_authorized_key_line(
+    char *line,
+    uint8_t *blob,
+    size_t blob_capacity,
+    size_t *blob_len)
+{
+    char *p;
+    char *algorithm_token;
+    char *blob_token;
+    size_t algorithm_len;
+    size_t blob_token_len;
+    int status;
+
+    if (line == NULL || blob == NULL || blob_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (strchr(line, '\r') != NULL || strchr(line, '\n') != NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    p = emtask_trim(line);
+    if (*p == '\0' || *p == '#') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    algorithm_token = p;
+    while (*p != '\0' && !emtask_is_space_char(*p)) {
+        ++p;
+    }
+    algorithm_len = (size_t)(p - algorithm_token);
+    if (!emtask_authorized_key_algorithm(algorithm_token, algorithm_len)) {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    if (*p == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    while (*p != '\0' && emtask_is_space_char(*p)) {
+        ++p;
+    }
+    blob_token = p;
+    while (*p != '\0' && !emtask_is_space_char(*p)) {
+        ++p;
+    }
+    blob_token_len = (size_t)(p - blob_token);
+    if (blob_token_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = emtask_decode_base64_token(blob_token, blob_token_len, blob, blob_capacity, blob_len);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (!emtask_publickey_blob_algorithm_matches(blob, *blob_len, algorithm_token, algorithm_len)) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    return SSH_OK;
+}
+
+static int emtask_authorized_keys_has_blob(const char *path, const uint8_t *blob, size_t blob_len, int *matched)
+{
+    ssh_publickey_auth_request_t request;
+    int status;
+
+    if (path == NULL || blob == NULL || matched == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    memset(&request, 0, sizeof(request));
+    request.publickey_blob = blob;
+    request.publickey_blob_len = blob_len;
+    status = emtask_authorized_keys_contains(path, &request, matched);
+    if (status == SSH_ERR_NOT_FOUND) {
+        *matched = 0;
+        return SSH_OK;
+    }
+    return status;
+}
+
+static int emtask_authorized_keys_needs_separator(const char *path, int *needs_separator)
+{
+    FILE *file;
+    long size;
+    int ch;
+
+    if (path == NULL || needs_separator == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *needs_separator = 0;
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return errno == ENOENT ? SSH_OK : SSH_ERR_PLATFORM;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    size = ftell(file);
+    if (size < 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    if (size == 0) {
+        (void)fclose(file);
+        return SSH_OK;
+    }
+    if (fseek(file, -1, SEEK_END) != 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    ch = fgetc(file);
+    if (ch == EOF && ferror(file) != 0) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    *needs_separator = ch != '\n' && ch != '\r';
+    (void)fclose(file);
+    return SSH_OK;
+}
+
+static int emtask_authorized_keys_append_line(const char *path, const char *line)
+{
+    FILE *file;
+    size_t line_len;
+    int needs_separator;
+    int status;
+
+    if (path == NULL || path[0] == '\0' || line == NULL || line[0] == '\0') {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    status = emtask_authorized_keys_needs_separator(path, &needs_separator);
+    if (status != SSH_OK) {
+        return status;
+    }
+    file = fopen(path, "ab");
+    if (file == NULL) {
+        return SSH_ERR_PLATFORM;
+    }
+    if (needs_separator && fwrite("\n", 1u, 1u, file) != 1u) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    line_len = strlen(line);
+    if (fwrite(line, 1u, line_len, file) != line_len || fwrite("\n", 1u, 1u, file) != 1u) {
+        (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    if (fclose(file) != 0) {
+        return SSH_ERR_PLATFORM;
+    }
     return SSH_OK;
 }
 
@@ -4429,6 +4645,59 @@ static void emtask_panel_write_error_json(char *out, size_t out_capacity, const 
     emtask_panel_appendf(&response, "}\n");
 }
 
+static int emtask_panel_register_authorized_key_from_json(emtask_app_t *app, const char *json, char *out, size_t out_capacity)
+{
+    emtask_panel_buffer_t response;
+    char public_key_line[1024];
+    uint8_t blob[EMSSH_MAX_HOST_KEY_BLOB];
+    size_t blob_len;
+    int matched;
+    int status;
+
+    if (app == NULL || json == NULL || out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    out[0] = '\0';
+    if (app->config.global.username[0] == '\0') {
+        return SSH_ERR_UNSUPPORTED;
+    }
+    if (app->config.global.authorized_keys_file[0] == '\0') {
+        return SSH_ERR_READ_ONLY;
+    }
+    status = emtask_json_get_string(json, "public_key", public_key_line, sizeof(public_key_line), 1);
+    if (status != SSH_OK) {
+        return status;
+    }
+    (void)emtask_trim(public_key_line);
+    status = emtask_parse_authorized_key_line(public_key_line, blob, sizeof(blob), &blob_len);
+    if (status != SSH_OK) {
+        return status;
+    }
+    matched = 0;
+    status = emtask_authorized_keys_has_blob(app->config.global.authorized_keys_file, blob, blob_len, &matched);
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (!matched) {
+        status = emtask_authorized_keys_append_line(app->config.global.authorized_keys_file, public_key_line);
+        if (status != SSH_OK) {
+            return status;
+        }
+    }
+
+    emtask_panel_buffer_init(&response, out, out_capacity);
+    emtask_panel_appendf(
+        &response,
+        "{\"registered\":%s,\"already_present\":%s,\"username\":",
+        matched ? "false" : "true",
+        matched ? "true" : "false");
+    emtask_panel_append_json_string(&response, app->config.global.username);
+    emtask_panel_appendf(&response, ",\"authorized_keys_file\":");
+    emtask_panel_append_json_string(&response, app->config.global.authorized_keys_file);
+    emtask_panel_appendf(&response, "}\n");
+    return response.truncated ? SSH_ERR_BUFFER_TOO_SMALL : SSH_OK;
+}
+
 static int emtask_panel_create_task_from_json(emtask_app_t *app, const char *json, char *out, size_t out_capacity)
 {
     emtask_panel_buffer_t response;
@@ -4933,6 +5202,25 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "{\"error\":\"unauthorized\"}\n");
     }
     if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/auth/authorized-keys") == 0 || strcmp(path, "/auth/public-keys") == 0) {
+            if (request_body == NULL || request_body_len == 0u) {
+                return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"empty_body\"}\n");
+            }
+            status = emtask_panel_register_authorized_key_from_json(app, request_body, response_body, sizeof(response_body));
+            if (status == SSH_OK) {
+                return emtask_panel_send_response(socket_handle, 200, "OK", "application/json", response_body);
+            }
+            if (status == SSH_ERR_READ_ONLY) {
+                return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"authorized_keys_not_configured\"}\n");
+            }
+            if (status == SSH_ERR_UNSUPPORTED) {
+                return emtask_panel_send_response(socket_handle, 409, "Conflict", "application/json", "{\"error\":\"publickey_auth_unavailable\"}\n");
+            }
+            if (status == SSH_ERR_INVALID_ARGUMENT || status == SSH_ERR_MALFORMED_PACKET || status == SSH_ERR_BUFFER_TOO_SMALL) {
+                return emtask_panel_send_response(socket_handle, 400, "Bad Request", "application/json", "{\"error\":\"invalid_public_key\"}\n");
+            }
+            return emtask_panel_send_response(socket_handle, 500, "Internal Server Error", "application/json", "{\"error\":\"authorized_keys_write_failed\"}\n");
+        }
         if (strcmp(path, "/tasks/restart") == 0 || strcmp(path, "/tasks/rerun") == 0) {
             char task_name[EMTASK_MAX_TASK_NAME];
 
@@ -5049,6 +5337,7 @@ static int emtask_panel_handle_connection(emtask_app_t *app, ssh_tcp_conn_t *con
             "<li>PATCH /tasks?name=&lt;task&gt; 修改动态子任务</li>"
             "<li>DELETE /tasks?name=&lt;task&gt; 删除动态子任务</li>"
             "<li>POST /tasks/restart?name=&lt;task&gt; 重新运行子任务命令</li>"
+            "<li>POST /auth/authorized-keys 注册客户端 SSH 公钥</li>"
             "<li><a href=\"/health\">/health</a></li>"
             "</ul></body></html>\n");
     }

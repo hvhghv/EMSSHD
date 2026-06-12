@@ -16,6 +16,7 @@ import 'package:zxing2/qrcode.dart' as zxing;
 import 'src/emtask_connection.dart';
 import 'src/models.dart';
 import 'src/panel_client.dart';
+import 'src/panel_key_manager.dart';
 import 'src/profile_store.dart';
 import 'src/windows_screen_capture.dart';
 
@@ -163,6 +164,7 @@ class EmTaskHomePage extends StatefulWidget {
 class _EmTaskHomePageState extends State<EmTaskHomePage> {
   final _store = EmTaskProfileStore();
   final _panelClient = const EmTaskPanelClient();
+  final _panelKeyManager = const EmTaskPanelKeyManager();
 
   List<EmTaskConnection> _connections = <EmTaskConnection>[];
   List<EmTaskPanelProfile> _panels = <EmTaskPanelProfile>[];
@@ -484,10 +486,79 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       });
       await _savePanels();
       await _saveProfiles();
-      _showHomeSnackBar('已通过二维码添加面板，正在获取所有会话。');
+      _showHomeSnackBar('已通过二维码添加面板，正在注册本机 SSH 公钥。');
+      final registeredPanel = await _registerPanelPublicKey(
+        panel,
+        showSuccess: false,
+      );
+      if (registeredPanel != null) {
+        panel = registeredPanel;
+        _showHomeSnackBar('已注册本机 SSH 公钥，正在获取所有会话。');
+      }
       await _refreshPanel(panel);
     } catch (error) {
       _showHomeSnackBar('二维码导入失败：${_formatError(error)}');
+    }
+  }
+
+  Future<EmTaskPanelProfile?> _registerPanelPublicKey(
+    EmTaskPanelProfile panel, {
+    bool showSuccess = true,
+  }) async {
+    try {
+      final prepared = await _panelKeyManager.ensurePanelKey(panel);
+      final registration = await _panelClient.registerAuthorizedKey(
+        prepared.panel,
+        publicKey: prepared.publicKeyLine,
+      );
+      if (!mounted) {
+        return null;
+      }
+
+      var updatedPanel = prepared.panel;
+      final serverUsername = registration.username.trim();
+      if (serverUsername.isNotEmpty &&
+          serverUsername != updatedPanel.username) {
+        updatedPanel = updatedPanel.copyWith(username: serverUsername);
+      }
+
+      setState(() {
+        updatedPanel = _upsertPanel(updatedPanel);
+        for (final connection in _panelConnections(updatedPanel)) {
+          final shouldUsePanelKey =
+              connection.profile.panelTaskSyncPrivateKey ||
+                  connection.profile.privateKeyPath.trim().isEmpty;
+          connection.profile = connection.profile.copyWith(
+            username: connection.profile.panelTaskSyncCredentials
+                ? updatedPanel.username
+                : connection.profile.username,
+            password: connection.profile.panelTaskSyncCredentials
+                ? updatedPanel.password
+                : connection.profile.password,
+            privateKeyPath: shouldUsePanelKey
+                ? updatedPanel.privateKeyPath
+                : connection.profile.privateKeyPath,
+            privateKeyPassphrase: shouldUsePanelKey
+                ? updatedPanel.privateKeyPassphrase
+                : connection.profile.privateKeyPassphrase,
+            panelTaskSyncPrivateKey:
+                shouldUsePanelKey || connection.profile.panelTaskSyncPrivateKey,
+          );
+        }
+      });
+      await _savePanels();
+      await _saveProfiles();
+      if (showSuccess) {
+        final verb = registration.alreadyPresent ? '已确认' : '已注册';
+        final generated = prepared.generated ? '并已生成本地私钥' : '并复用本地私钥';
+        _showHomeSnackBar('$verb本机 SSH 公钥，$generated。');
+      }
+      return updatedPanel;
+    } catch (error) {
+      if (mounted) {
+        _showHomeSnackBar('注册 SSH 公钥失败：${_formatError(error)}');
+      }
+      return null;
     }
   }
 
@@ -1335,6 +1406,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
               refreshing: _refreshingPanels.contains(panel.id),
               onRefresh: () => _refreshPanel(panel),
               onAddTask: () => _addPanelTask(panel),
+              onRegisterKey: () => _registerPanelPublicKey(panel),
               onEdit: () => _editPanel(panel),
               onDelete: () => _removePanel(panel),
             ),
@@ -3466,6 +3538,7 @@ enum _HomeMenuAction {
 
 enum _PanelMenuAction {
   addTask,
+  registerKey,
   edit,
   delete,
 }
@@ -3813,6 +3886,7 @@ class _PanelActions extends StatelessWidget {
     required this.refreshing,
     required this.onRefresh,
     required this.onAddTask,
+    required this.onRegisterKey,
     required this.onEdit,
     required this.onDelete,
   });
@@ -3820,6 +3894,7 @@ class _PanelActions extends StatelessWidget {
   final bool refreshing;
   final VoidCallback onRefresh;
   final VoidCallback onAddTask;
+  final VoidCallback onRegisterKey;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -3845,6 +3920,8 @@ class _PanelActions extends StatelessWidget {
             switch (action) {
               case _PanelMenuAction.addTask:
                 onAddTask();
+              case _PanelMenuAction.registerKey:
+                onRegisterKey();
               case _PanelMenuAction.edit:
                 onEdit();
               case _PanelMenuAction.delete:
@@ -3855,6 +3932,10 @@ class _PanelActions extends StatelessWidget {
             PopupMenuItem<_PanelMenuAction>(
               value: _PanelMenuAction.addTask,
               child: Text('添加子任务'),
+            ),
+            PopupMenuItem<_PanelMenuAction>(
+              value: _PanelMenuAction.registerKey,
+              child: Text('注册 SSH 公钥'),
             ),
             PopupMenuItem<_PanelMenuAction>(
               value: _PanelMenuAction.edit,

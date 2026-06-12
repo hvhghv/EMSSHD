@@ -798,7 +798,7 @@ jobs:
           if-no-files-found: error
 
   emsshd-windows-msvc:
-    name: emsshd / Windows MSVC ${{ matrix.arch }}
+    name: emsshd / windows msvc ${{ matrix.arch }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -879,7 +879,7 @@ jobs:
           if-no-files-found: error
 
   emsshd-windows-msys2:
-    name: emsshd / Windows MSYS2 x64
+    name: emsshd / windows msys2 x64
     runs-on: windows-latest
 
     steps:
@@ -976,7 +976,7 @@ jobs:
           if-no-files-found: error
 
   emsshd-windows-cygwin:
-    name: emsshd / Windows Cygwin x64
+    name: emsshd / windows cygwin x64
     runs-on: windows-latest
     env:
       CYGWIN_NOWINPATH: 1
@@ -1087,7 +1087,7 @@ jobs:
           if-no-files-found: error
 
   emsshd-linux-glibc:
-    name: emsshd / Linux glibc ${{ matrix.arch }}
+    name: emsshd / linux glibc ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -1220,7 +1220,7 @@ jobs:
           if-no-files-found: error
 
   emsshd-linux-musl:
-    name: emsshd / Linux musl ${{ matrix.arch }}
+    name: emsshd / linux musl ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false

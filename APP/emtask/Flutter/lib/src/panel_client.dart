@@ -162,10 +162,101 @@ class EmTaskPanelUpdateTaskRequest {
   }
 }
 
+class EmTaskAuthorizedKeyRegistration {
+  const EmTaskAuthorizedKeyRegistration({
+    required this.username,
+    required this.registered,
+    required this.alreadyPresent,
+  });
+
+  factory EmTaskAuthorizedKeyRegistration.fromJson(
+    Map<String, Object?> json,
+  ) {
+    return EmTaskAuthorizedKeyRegistration(
+      username: json['username'] as String? ?? '',
+      registered: json['registered'] as bool? ?? false,
+      alreadyPresent: json['already_present'] as bool? ?? false,
+    );
+  }
+
+  final String username;
+  final bool registered;
+  final bool alreadyPresent;
+}
+
 class EmTaskPanelClient {
   const EmTaskPanelClient({this.timeout = const Duration(seconds: 10)});
 
   final Duration timeout;
+
+  Future<EmTaskAuthorizedKeyRegistration> registerAuthorizedKey(
+    EmTaskPanelProfile panel, {
+    required String publicKey,
+  }) async {
+    final normalizedKey = publicKey.trim();
+    if (normalizedKey.isEmpty) {
+      throw StateError('缺少要注册的 SSH 公钥。');
+    }
+
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final request =
+          await client.postUrl(panel.authorizedKeysUri).timeout(timeout);
+      _addAuthHeaders(request, panel);
+      request.headers.contentType = ContentType.json;
+      final body = jsonEncode(<String, Object?>{'public_key': normalizedKey});
+      final bodyBytes = utf8.encode(body);
+      request.contentLength = bodyBytes.length;
+      request.add(bodyBytes);
+      final response = await request.close().timeout(timeout);
+      final responseBody =
+          await utf8.decoder.bind(response).join().timeout(timeout);
+      if (response.statusCode == HttpStatus.unauthorized) {
+        throw StateError('面板鉴权失败（HTTP 401）：请重新检查 Token/OTP。');
+      }
+      if (response.statusCode == HttpStatus.conflict) {
+        throw StateError(_formatRegisterKeyConflict(responseBody));
+      }
+      if (response.statusCode == HttpStatus.badRequest) {
+        throw StateError('服务端拒绝该 SSH 公钥：$responseBody');
+      }
+      if (response.statusCode != HttpStatus.ok &&
+          response.statusCode != HttpStatus.created) {
+        throw StateError(
+            '注册 SSH 公钥失败：HTTP ${response.statusCode} $responseBody');
+      }
+      final decoded = jsonDecode(responseBody);
+      if (decoded is! Map<String, Object?>) {
+        throw StateError('面板返回不是 JSON 对象。');
+      }
+      return EmTaskAuthorizedKeyRegistration.fromJson(decoded);
+    } on TimeoutException catch (error) {
+      throw StateError('连接面板超时：${panel.host}:${panel.port}，$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String _formatRegisterKeyConflict(String responseBody) {
+    try {
+      final decoded = jsonDecode(responseBody);
+      if (decoded is Map<String, Object?>) {
+        final error = decoded['error'] as String?;
+        if (error == 'authorized_keys_not_configured') {
+          return '服务端未配置 authorized_keys_file，无法注册公钥。请在 emtask.conf 中启用 authorized_keys_file。';
+        }
+        if (error == 'publickey_auth_unavailable') {
+          return '服务端当前用户名/公钥认证不可用，请检查 username 与 authorized_keys_file 配置。';
+        }
+        if (error != null && error.isNotEmpty) {
+          return '服务端拒绝注册 SSH 公钥：$error';
+        }
+      }
+    } on FormatException {
+      // Fall through to the raw response text.
+    }
+    return '服务端无法注册 SSH 公钥：$responseBody';
+  }
 
   Future<EmTaskSessionProfile> createTask(
     EmTaskPanelProfile panel,
@@ -614,8 +705,13 @@ EmTaskImportedPanel parseEmTaskPanelQrText(String source) {
 
   final authMode =
       EmTaskPanelAuthModeX.fromBits(int.tryParse(fields['a'] ?? '0'));
+  final panelName = fields['pn'] ?? fields['panel_name'] ?? fields['name'];
+  final sshUsername = fields['u'] ?? fields['user'] ?? fields['username'];
+  final sshPassword = fields['p'] ?? fields['pass'] ?? fields['password'];
   final panel = EmTaskPanelProfile.defaults(
-    name: 'emtask 面板 $host:$panelPort',
+    name: panelName?.trim().isNotEmpty == true
+        ? panelName!.trim()
+        : 'emtask 面板 $host:$panelPort',
     host: host,
     port: panelPort,
     authMode: authMode,
@@ -624,6 +720,8 @@ EmTaskImportedPanel parseEmTaskPanelQrText(String source) {
     otpDigits: int.tryParse(fields['d'] ?? '') ?? 6,
     otpStepSeconds: int.tryParse(fields['i'] ?? '') ?? 60,
     otpWindow: int.tryParse(fields['w'] ?? '') ?? 1,
+    username: sshUsername?.trim() ?? '',
+    password: sshPassword ?? '',
     startCommand: fields['start'] ?? '',
     stopCommand: fields['stop'] ?? '',
   );

@@ -365,6 +365,13 @@ class EmTaskPanelProfile {
         path: '/tasks',
       );
 
+  Uri get authorizedKeysUri => Uri(
+        scheme: 'http',
+        host: host,
+        port: port,
+        path: '/auth/authorized-keys',
+      );
+
   Map<String, Object?> toJson() {
     return <String, Object?>{
       'id': id,

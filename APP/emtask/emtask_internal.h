@@ -71,6 +71,7 @@ typedef struct emtask_global_config {
     char panel_auth_file[EMTASK_MAX_PATH];
     char panel_qr_file[EMTASK_MAX_PATH];
     char panel_tasks_db_file[EMTASK_MAX_PATH];
+    char panel_name[EMTASK_MAX_TEXT];
     char panel_qr_host[EMTASK_MAX_TEXT];
     uint32_t timeout_ms;
     unsigned max_workers;
@@ -83,6 +84,8 @@ typedef struct emtask_global_config {
     int use_conpty;
     int panel_enabled;
     int bind_retry_enabled;
+    int panel_qr_include_username;
+    int panel_qr_include_password;
     emtask_panel_qr_mode_t panel_qr_mode;
     emtask_auth_backend_t auth_backend;
 } emtask_global_config_t;

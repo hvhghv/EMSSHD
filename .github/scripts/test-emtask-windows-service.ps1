@@ -357,8 +357,8 @@ try {
     }
 
     Wait-TcpPort -Port $taskPort
-    if ($safeLabel -match 'cygwin') {
-        Write-Host 'Using SFTP session probe for Cygwin package because Win32 cmd.exe terminal echo is not stable under the Cygwin service build on GitHub-hosted runners.'
+    if ($safeLabel -match 'cygwin|msys2') {
+        Write-Host 'Using SFTP session probe for MSYS2/Cygwin package because Win32 cmd.exe terminal echo is not stable under these service builds on GitHub-hosted runners.'
         Invoke-SftpSessionProbe -Port $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
     } else {
         Invoke-SshSessionProbe -Port $taskPort -WorkRoot $workRoot

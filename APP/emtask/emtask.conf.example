@@ -2,7 +2,7 @@
 username = emtask
 password = emtask
 # hostkey_file = emtask_hostkey_p256.raw
-# authorized_keys_file = authorized_keys
+authorized_keys_file = authorized_keys
 # timeout_ms = 30000
 # max_workers = 16
 # Bind retry is enabled by default. Useful when a configured NIC/IP appears later.
@@ -29,11 +29,17 @@ password = emtask
 #   panel_otp_secret = <base32-totp-secret>
 # If token/OTP is enabled, emtask creates this SVG QR file for client import.
 # It embeds token/OTP material and should be protected like a password.
+# panel_name = emtask 面板
 # panel_qr_file = emtask_panel_connect.svg
 # panel_qr_mode = always      # default: overwrite/regenerate on every start
 # panel_qr_mode = if_missing  # preserve existing file; create only when missing
 # panel_qr_mode = disabled    # do not generate QR file
 # panel_qr_host = 127.0.0.1
+# 推荐保持 authorized_keys_file 开启：Flutter 扫码后会生成本地 SSH 密钥，
+# 并通过面板鉴权把公钥注册到该文件，后续用私钥登录 SSH/SFTP。
+# QR 默认不写入 SSH 登录用户名/密码。仅在确认二维码文件会像密码一样保护时开启。
+# panel_qr_include_username = false
+# panel_qr_include_password = false
 # panel_otp_digits = 6
 # panel_otp_step_sec = 60
 # panel_otp_window = 1

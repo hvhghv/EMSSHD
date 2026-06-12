@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +11,7 @@ import 'package:emtask_client/main.dart';
 import 'package:emtask_client/src/emtask_connection.dart';
 import 'package:emtask_client/src/models.dart';
 import 'package:emtask_client/src/panel_client.dart';
+import 'package:emtask_client/src/panel_key_manager.dart';
 import 'package:emtask_client/src/profile_store.dart';
 
 void main() {
@@ -187,6 +190,19 @@ void main() {
       'use_sftp': false,
       'use_conpty': false,
     });
+  });
+
+  test('generated panel key material is valid OpenSSH ed25519', () {
+    final material =
+        EmTaskPanelKeyManager.createEd25519KeyMaterial('emtask-client-test');
+    final keys = SSHKeyPair.fromPem(material.privateKeyPem);
+
+    expect(keys, hasLength(1));
+    expect(keys.single.name, 'ssh-ed25519');
+    expect(
+      material.publicKeyLine,
+      'ssh-ed25519 ${base64Encode(keys.single.toPublicKey().encode())} emtask-client-test',
+    );
   });
 
   test('session profile saves private key settings', () {
