@@ -64,7 +64,7 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 - `username`
 - `password`
 - `hostkey_file`
-- `authorized_keys_file`
+- `authorized_keys_file`：默认 `authorized_keys`，启动时自动创建；设为空可禁用公钥登录和面板公钥注册。
 - `timeout_ms`
 - `max_workers`
 - `bind_retry` / `bind_retry_enabled`：监听地址绑定失败时是否保持进程运行并自动重试绑定，默认开启。适用于任务端口和面板端口。
@@ -110,6 +110,7 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 username = emtask
 password = emtask
 hostkey_file = emtask_hostkey_p256.raw
+# 默认开启，并在启动时自动创建该文件；设为空可禁用公钥登录/面板公钥注册。
 authorized_keys_file = authorized_keys
 max_workers = 16
 bind_retry = true
@@ -160,7 +161,7 @@ command = powershell.exe -NoLogo
 - `panel_enabled = true` 时必须设置有效 `panel_port`；若面板端口与任务端口相同且监听地址冲突，配置会被拒绝。
 - `panel_auth = token` 或 `token+otp` 时必须能获得非空 token：从 `panel_auth_file` 读取，文件不存在或缺少字段时自动随机生成并保存。
 - `panel_auth = otp` 或 `token+otp` 时必须能获得可 Base32 解码的 OTP secret：从 `panel_auth_file` 读取，文件不存在或缺少字段时自动随机生成并保存。
-- 推荐保持 `authorized_keys_file` 已配置。Flutter 扫码导入面板后会生成本地 Ed25519 私钥，把对应公钥通过面板鉴权注册到该文件，后续 SSH/SFTP 使用私钥登录；私钥不会写入二维码，也不会上传到面板。
+- `authorized_keys_file` 默认已开启并会在启动时自动创建。Flutter 扫码导入面板后会生成本地 SSH 私钥，把对应公钥通过面板鉴权注册到该文件，后续 SSH/SFTP 使用私钥登录；私钥不会写入二维码，也不会上传到面板。
 - `panel_auth_file` 与 `panel_qr_file` 都包含或间接包含面板密钥材料；不要提交到源码仓库，也不要暴露到公网静态目录。若开启 `panel_qr_include_username` / `panel_qr_include_password`，二维码还会包含 SSH 登录凭据，必须按密码级别保护。若需要避免旧二维码和新鉴权材料不一致，保持默认 `panel_qr_mode = always`。
 - `working_dir` 为空时继承 `emtask` 进程当前工作目录；相对路径按配置文件所在目录解析。
 - 每个任务最多允许一个活跃终端连接；新终端连接会踢掉该任务旧终端连接。
@@ -190,7 +191,7 @@ Invoke-RestMethod http://127.0.0.1:6024/status -Headers @{ Authorization = 'Bear
 - `GET /health`：健康检查 JSON。
 - `GET /status`：完整状态 JSON，包含配置路径、auth backend、worker pool、panel 状态和全部任务状态。
 - `GET /tasks`：仅返回任务数组。
-- `POST /auth/authorized-keys`：注册客户端 SSH 公钥到 `authorized_keys_file`。请求需通过面板 Token/OTP 鉴权，JSON 为 `{"public_key":"ssh-ed25519 AAAA... comment"}`；已存在会去重，成功返回 `username`、`registered`、`already_present` 和 `authorized_keys_file`。若未配置 `authorized_keys_file` 返回 `409 authorized_keys_not_configured`。
+- `POST /auth/authorized-keys`：注册客户端 SSH 公钥到 `authorized_keys_file`。请求需通过面板 Token/OTP 鉴权，JSON 为 `{"public_key":"ecdsa-sha2-nistp256 AAAA... comment"}`；已存在会去重，成功返回 `username`、`registered`、`already_present` 和 `authorized_keys_file`。若未配置 `authorized_keys_file` 返回 `409 authorized_keys_not_configured`。
 - `POST /tasks`：添加动态子任务并写入 `panel_tasks_db_file`。JSON 字段包括必填 `name`、`port`、`command`，可选 `listen_address`、`working_dir`、`use_sftp`、`use_conpty`、`restart_limit`、`restart_window_sec`、`replay_buffer_bytes`、`replay_on_attach`、`repaint_on_attach`、`screen_snapshot`。成功返回 `201 Created` 和 `task` 对象；名称/端口冲突返回 `409`。
 - `POST /tasks/restart?name=<task>`：重新运行指定子任务命令。任务正在使用中返回 `409`；命令再次启动失败时接口仍返回最新 `task` 状态，`terminal.last_error` 会包含失败日志。
 - `PATCH /tasks?name=<task>`：修改 Flutter 面板创建的动态子任务并同步更新 `panel_tasks_db_file`。`name` 是唯一标识，不支持通过 PATCH 修改；JSON 可只包含需要修改的字段，例如 `listen_address`、`port`、`command`、`working_dir`、`use_sftp`、`use_conpty`。任务正在使用中返回 `409`；修改会重建该动态任务的运行时监听和终端进程。

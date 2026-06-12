@@ -2,6 +2,7 @@
 username = emtask
 password = emtask
 # hostkey_file = emtask_hostkey_p256.raw
+# 默认开启，并在启动时自动创建该文件；设为空可禁用公钥登录/面板公钥注册。
 authorized_keys_file = authorized_keys
 # timeout_ms = 30000
 # max_workers = 16
@@ -35,7 +36,7 @@ authorized_keys_file = authorized_keys
 # panel_qr_mode = if_missing  # preserve existing file; create only when missing
 # panel_qr_mode = disabled    # do not generate QR file
 # panel_qr_host = 127.0.0.1
-# 推荐保持 authorized_keys_file 开启：Flutter 扫码后会生成本地 SSH 密钥，
+# authorized_keys_file 默认开启并自动创建：Flutter 扫码后会生成本地 SSH 密钥，
 # 并通过面板鉴权把公钥注册到该文件，后续用私钥登录 SSH/SFTP。
 # QR 默认不写入 SSH 登录用户名/密码。仅在确认二维码文件会像密码一样保护时开启。
 # panel_qr_include_username = false

@@ -30,6 +30,7 @@ static int emtask_panel_decode_base32_secret(const char *text, uint8_t *out, siz
 static int emtask_panel_materialize_auth(emtask_config_t *config);
 static int emtask_panel_materialize_qr(const emtask_config_t *config);
 static int emtask_panel_tasks_db_check_runtime(const emtask_global_config_t *global);
+static int emtask_materialize_authorized_keys(const emtask_global_config_t *global);
 static int emtask_panel_tasks_db_load(emtask_config_t *config);
 static int emtask_panel_tasks_db_insert(const emtask_global_config_t *global, const emtask_task_config_t *task);
 static int emtask_panel_tasks_db_update(const emtask_global_config_t *global, const char *old_task_name, const emtask_task_config_t *task);
@@ -263,6 +264,10 @@ static void emtask_config_defaults(emtask_config_t *config)
     config->global.panel_port = (uint16_t)EMTASK_DEFAULT_PANEL_PORT;
     config->global.panel_auth = EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP;
     (void)emtask_copy_text(config->global.hostkey_file, sizeof(config->global.hostkey_file), "emtask_hostkey_p256.raw");
+    (void)emtask_copy_text(
+        config->global.authorized_keys_file,
+        sizeof(config->global.authorized_keys_file),
+        EMTASK_DEFAULT_AUTHORIZED_KEYS_FILE);
     (void)emtask_copy_text(
         config->global.panel_listen_address,
         sizeof(config->global.panel_listen_address),
@@ -916,6 +921,10 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
         return status;
     }
     status = emtask_panel_tasks_db_load(config);
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_materialize_authorized_keys(&config->global);
     if (status != SSH_OK) {
         return status;
     }
@@ -3167,6 +3176,27 @@ static int emtask_authorized_keys_append_line(const char *path, const char *line
     line_len = strlen(line);
     if (fwrite(line, 1u, line_len, file) != line_len || fwrite("\n", 1u, 1u, file) != 1u) {
         (void)fclose(file);
+        return SSH_ERR_PLATFORM;
+    }
+    if (fclose(file) != 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    return SSH_OK;
+}
+
+static int emtask_materialize_authorized_keys(const emtask_global_config_t *global)
+{
+    FILE *file;
+
+    if (global == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (global->authorized_keys_file[0] == '\0') {
+        return SSH_OK;
+    }
+
+    file = fopen(global->authorized_keys_file, "ab");
+    if (file == NULL) {
         return SSH_ERR_PLATFORM;
     }
     if (fclose(file) != 0) {

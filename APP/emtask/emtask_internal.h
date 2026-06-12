@@ -32,6 +32,7 @@
 #define EMTASK_DEFAULT_PANEL_AUTH_FILE "emtask_panel_auth.keys"
 #define EMTASK_DEFAULT_PANEL_QR_FILE "emtask_panel_connect.svg"
 #define EMTASK_DEFAULT_PANEL_TASKS_DB_FILE "emtask_tasks.sqlite3"
+#define EMTASK_DEFAULT_AUTHORIZED_KEYS_FILE "authorized_keys"
 #define EMTASK_DEFAULT_PANEL_QR_HOST "127.0.0.1"
 #define EMTASK_PANEL_AUTH_TOKEN 0x01u
 #define EMTASK_PANEL_AUTH_OTP 0x02u
