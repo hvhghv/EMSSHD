@@ -208,6 +208,10 @@ typedef struct program_options {
     int listen_overridden;
     int timeout_overridden;
     int root_overridden;
+    int password_authentication_overridden;
+    int password_authentication;
+    int permit_root_login_overridden;
+    int permit_root_login;
 } program_options_t;
 
 typedef struct app_shared {
@@ -233,12 +237,20 @@ typedef struct app_shared {
     crypto_provider_t crypto_provider;
     int sftp_trace_enabled;
     int conn_trace_enabled;
+    int password_authentication_overridden;
+    int password_authentication;
+    int permit_root_login_overridden;
+    int permit_root_login;
     ssh_kexinit_algorithm_set_t hostkey_kex_algorithms;
     const char *selected_hostkey_algorithm_list;
     int selected_hostkey_kind;
     uint8_t mbedtls_hostkey_private[LINUX_SERVER_MAX_MBEDTLS_HOSTKEY_PRIVATE];
     size_t mbedtls_hostkey_private_len;
 } app_shared_t;
+
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
+static int linux_password_auth_cb(void *ctx, const ssh_password_auth_request_t *request);
+#endif
 
 typedef struct auth_runtime_context {
     app_shared_t *shared;
@@ -268,6 +280,10 @@ static void usage(const char *program)
         "  --port <1-65535>         Listen port (default: 22)\n"
         "  --listen <addr>          Listen address (default: from sshd_config or any)\n"
         "  --sshd-config <path>     OpenSSH-compatible sshd_config (read via stdio_fs rooted at /)\n"
+        "  --password-authentication <yes|no>\n"
+        "                           Override sshd_config PasswordAuthentication\n"
+        "  --permit-root-login <yes|no|prohibit-password>\n"
+        "                           Override sshd_config PermitRootLogin\n"
         "  --passwd-file <path>     passwd file (default: /etc/passwd)\n"
         "  --shadow-file <path>     shadow file (default: /etc/shadow)\n"
         "  --timeout-ms <ms>        Session timeout (default: 30000)\n"
@@ -385,6 +401,48 @@ static int parse_crypto_provider(const char *text, crypto_provider_t *crypto_pro
 
     if (strcmp(text, "mbedtls") == 0 || strcmp(text, "mbedtls-legacy") == 0) {
         *crypto_provider = CRYPTO_PROVIDER_MBEDTLS;
+        return SSH_OK;
+    }
+
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
+static int parse_yes_no_value(const char *text, int *value_out)
+{
+    if (text == NULL || value_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (strcmp(text, "yes") == 0 || strcmp(text, "true") == 0 || strcmp(text, "on") == 0 || strcmp(text, "1") == 0) {
+        *value_out = 1;
+        return SSH_OK;
+    }
+    if (strcmp(text, "no") == 0 || strcmp(text, "false") == 0 || strcmp(text, "off") == 0 || strcmp(text, "0") == 0) {
+        *value_out = 0;
+        return SSH_OK;
+    }
+
+    return SSH_ERR_INVALID_ARGUMENT;
+}
+
+static int parse_permit_root_login_value_local(const char *text, int *value_out)
+{
+    if (text == NULL || value_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (strcmp(text, "yes") == 0) {
+        *value_out = EMSSH_PERMIT_ROOT_LOGIN_YES;
+        return SSH_OK;
+    }
+    if (strcmp(text, "no") == 0) {
+        *value_out = EMSSH_PERMIT_ROOT_LOGIN_NO;
+        return SSH_OK;
+    }
+    if (strcmp(text, "prohibit-password") == 0 ||
+        strcmp(text, "without-password") == 0 ||
+        strcmp(text, "forced-commands-only") == 0) {
+        *value_out = EMSSH_PERMIT_ROOT_LOGIN_PROHIBIT_PASSWORD;
         return SSH_OK;
     }
 
@@ -964,6 +1022,30 @@ static int fill_match_context_local(
     return SSH_OK;
 }
 
+static int apply_cli_auth_overrides(const app_shared_t *shared, ssh_server_config_t *server_config)
+{
+    if (shared == NULL || server_config == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (shared->password_authentication_overridden) {
+#if defined(EMSSH_BUILD_POSIX_PASSWD_AUTH)
+        server_config->password_auth = shared->password_authentication ? linux_password_auth_cb : NULL;
+#else
+        if (shared->password_authentication) {
+            return SSH_ERR_UNSUPPORTED;
+        }
+        server_config->password_auth = NULL;
+#endif
+    }
+
+    if (shared->permit_root_login_overridden) {
+        server_config->permit_root_login = shared->permit_root_login;
+    }
+
+    return SSH_OK;
+}
+
 static int load_runtime_policy_for_user(
     const auth_runtime_context_t *auth_ctx,
     const char *username,
@@ -999,13 +1081,18 @@ static int load_runtime_policy_for_user(
         return status;
     }
 
-    return ssh_sshd_config_file_apply(
+    status = ssh_sshd_config_file_apply(
         matched_config_out,
         policy_out,
         NULL,
         NULL,
         NULL,
         NULL);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    return apply_cli_auth_overrides(auth_ctx->shared, policy_out);
 }
 
 static int publickey_authorized_by_path_list(
@@ -1244,6 +1331,28 @@ static int parse_args(int argc, char **argv, program_options_t *opts)
                 return SSH_ERR_INVALID_ARGUMENT;
             }
             opts->sshd_config_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--password-authentication") == 0 || strcmp(argv[i], "--password-auth") == 0) {
+            if (i + 1 >= argc) {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+            status = parse_yes_no_value(argv[++i], &opts->password_authentication);
+            if (status != SSH_OK) {
+                return status;
+            }
+            opts->password_authentication_overridden = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--permit-root-login") == 0 || strcmp(argv[i], "--permit-root") == 0) {
+            if (i + 1 >= argc) {
+                return SSH_ERR_INVALID_ARGUMENT;
+            }
+            status = parse_permit_root_login_value_local(argv[++i], &opts->permit_root_login);
+            if (status != SSH_OK) {
+                return status;
+            }
+            opts->permit_root_login_overridden = 1;
             continue;
         }
         if (strcmp(argv[i], "--passwd-file") == 0) {
@@ -1862,6 +1971,10 @@ static int initialize_server_templates(
     if (!shared->sshd_config.has_pubkey_authentication || shared->sshd_config.pubkey_authentication) {
         shared->base_server_config.publickey_auth = linux_publickey_auth_cb;
     }
+    status = apply_cli_auth_overrides(shared, &shared->base_server_config);
+    if (status != SSH_OK) {
+        return status;
+    }
     shared->base_server_config.auth_ctx = NULL;
     return SSH_OK;
 }
@@ -2076,6 +2189,12 @@ static int run_worker_session(app_shared_t *shared, ssh_posix_conn_t *conn)
         }
     }
 
+    status = apply_cli_auth_overrides(shared, &config);
+    if (status != SSH_OK) {
+        crypto_instance_deinit(&crypto_instance);
+        return status;
+    }
+
     auth_ctx.shared = shared;
     auth_ctx.conn = conn;
     auth_ctx.session_server_config = &config;
@@ -2231,6 +2350,10 @@ int main(int argc, char **argv)
     shared.session_mode = opts.session_mode;
     shared.sftp_trace_enabled = env_flag_enabled("EMSSH_SFTP_TRACE");
     shared.conn_trace_enabled = env_flag_enabled("EMSSH_CONN_TRACE");
+    shared.password_authentication_overridden = opts.password_authentication_overridden;
+    shared.password_authentication = opts.password_authentication;
+    shared.permit_root_login_overridden = opts.permit_root_login_overridden;
+    shared.permit_root_login = opts.permit_root_login;
     if (opts.worker_stack_kb > (unsigned)(SIZE_MAX / 1024u)) {
         fprintf(stderr, "invalid --worker-stack-kb value: overflow\n");
         return 2;

@@ -19,7 +19,7 @@ env:
 
 jobs:
   emtask-server-windows-msvc:
-    name: emtask server / Windows MSVC ${{ matrix.arch }}
+    name: emtask server / windows msvc ${{ matrix.arch }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -145,7 +145,7 @@ jobs:
           if-no-files-found: error
 
   emtask-server-windows-msys2:
-    name: emtask server / Windows MSYS2 x64
+    name: emtask server / windows msys2 x64
     runs-on: windows-latest
 
     steps:
@@ -263,7 +263,7 @@ jobs:
           if-no-files-found: error
 
   emtask-server-windows-cygwin:
-    name: emtask server / Windows Cygwin x64
+    name: emtask server / windows cygwin x64
     runs-on: windows-latest
     env:
       CYGWIN_NOWINPATH: 1
@@ -398,7 +398,7 @@ jobs:
           if-no-files-found: error
 
   emtask-server-linux-glibc:
-    name: emtask server / Linux glibc ${{ matrix.arch }}
+    name: emtask server / linux glibc ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -512,7 +512,7 @@ jobs:
           if-no-files-found: error
 
   emtask-server-linux-musl:
-    name: emtask server / Linux musl ${{ matrix.arch }}
+    name: emtask server / linux musl ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -624,7 +624,7 @@ jobs:
           if-no-files-found: error
 
   emtask-client-android-apk:
-    name: emtask client / Android APK
+    name: emtask client / android apk
     runs-on: ubuntu-22.04
 
     steps:
@@ -686,7 +686,7 @@ jobs:
           if-no-files-found: error
 
   emtask-client-windows:
-    name: emtask client / Windows x64
+    name: emtask client / windows x64
     runs-on: windows-latest
 
     steps:
@@ -741,7 +741,7 @@ jobs:
           if-no-files-found: error
 
   emtask-client-linux:
-    name: emtask client / Linux x64
+    name: emtask client / linux x64
     runs-on: ubuntu-22.04
 
     steps:

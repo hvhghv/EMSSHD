@@ -85,6 +85,10 @@
   - 若 `PasswordAuthentication` 未配置或为 `yes`，启用密码认证回调；
   - 若 `PubkeyAuthentication` 未配置或为 `yes`，启用公钥认证回调；
   - 配置为 `no` 时分别禁用。
+- 命令行认证覆盖：
+  - `--password-authentication yes|no` 覆盖 `PasswordAuthentication`；别名：`--password-auth`。
+  - `--permit-root-login yes|no|prohibit-password` 覆盖 `PermitRootLogin`；别名：`--permit-root`。
+  - 覆盖会在全局配置和 `Match` 命中配置之后应用。
 - `AuthorizedKeysFile`：
   - 若未配置，默认使用 `.ssh/authorized_keys .ssh/authorized_keys2`；
   - 支持 `%u`、`%h`、`%%` 模板；
@@ -112,3 +116,5 @@
 - `ListenAddress`
 - `timeout`（`--timeout-ms` 覆盖配置/默认）
 - `SFTP root`（`--root-dir` 覆盖 `ChrootDirectory`）
+- `PasswordAuthentication`（`--password-authentication` 覆盖全局配置和 `Match` 配置）
+- `PermitRootLogin`（`--permit-root-login` 覆盖全局配置和 `Match` 配置）
