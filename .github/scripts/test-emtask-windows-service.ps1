@@ -247,6 +247,148 @@ function Invoke-SftpSessionProbe {
     }
 }
 
+function Invoke-PanelAuthorizedKeySyncProbe {
+    param(
+        [Parameter(Mandatory = $true)][int]$PanelPort,
+        [Parameter(Mandatory = $true)][int]$TaskPort,
+        [Parameter(Mandatory = $true)][string]$WorkRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+
+    $sshKeygenExe = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source
+    $sftpExe = (Get-Command sftp.exe -ErrorAction Stop).Source
+    $keyPath = Join-Path $WorkRoot 'panel-sync-ed25519'
+    $publicKeyPath = "$keyPath.pub"
+    $knownHosts = Join-Path $WorkRoot 'panel-sync-known_hosts'
+    $batch = Join-Path $WorkRoot 'panel-sync-sftp.batch'
+    $upload = Join-Path $WorkRoot 'panel-sync-upload.txt'
+    $download = Join-Path $WorkRoot 'panel-sync-download.txt'
+    $sftpOutput = Join-Path $WorkRoot 'panel-sync-sftp.out.log'
+    $sftpError = Join-Path $WorkRoot 'panel-sync-sftp.err.log'
+    $serverFile = Join-Path $RuntimeRoot 'panel-sync-server-file.txt'
+    $uploadedServerFile = Join-Path $RuntimeRoot 'panel-sync-uploaded-from-ci.txt'
+    $authorizedKeysFile = Join-Path $RuntimeRoot 'authorized_keys'
+
+    Remove-Item -LiteralPath $keyPath, $publicKeyPath, $knownHosts, $batch, $upload, $download, $sftpOutput, $sftpError, $uploadedServerFile -Force -ErrorAction SilentlyContinue
+
+    $keyComment = "emtask-ci-panel-sync-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $keygenArgs = @(
+        '-q',
+        '-t', 'ed25519',
+        '-N', '',
+        '-C', $keyComment,
+        '-f', $keyPath
+    )
+    & $sshKeygenExe @keygenArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "ssh-keygen failed while preparing panel key sync test. ExitCode=$LASTEXITCODE"
+    }
+    if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $publicKeyPath -PathType Leaf)) {
+        throw 'ssh-keygen did not create the expected key pair for panel key sync test.'
+    }
+
+    $publicKey = (Get-Content -LiteralPath $publicKeyPath -Raw).Trim()
+    if ($publicKey -notmatch '^ssh-ed25519\s+') {
+        throw "Panel key sync test generated an unexpected public key: $publicKey"
+    }
+
+    $registerUri = "http://127.0.0.1:$PanelPort/auth/authorized-keys"
+    $registerBody = @{ public_key = $publicKey } | ConvertTo-Json -Compress
+    $registration = Invoke-RestMethod -Method Post -Uri $registerUri -ContentType 'application/json' -Body $registerBody -TimeoutSec 5
+    Write-Host '--- panel /auth/authorized-keys registration ---'
+    $registration | ConvertTo-Json -Depth 8
+
+    if ($null -eq $registration.PSObject.Properties['username'] -or [string]$registration.username -ne 'emtask') {
+        throw "Panel key sync returned unexpected username: $($registration | ConvertTo-Json -Compress)"
+    }
+    if ($null -eq $registration.PSObject.Properties['registered'] -or $registration.registered -ne $true) {
+        throw "Panel key sync did not report a newly registered key: $($registration | ConvertTo-Json -Compress)"
+    }
+    if ($null -eq $registration.PSObject.Properties['already_present'] -or $registration.already_present -ne $false) {
+        throw "Panel key sync first registration should not be already_present: $($registration | ConvertTo-Json -Compress)"
+    }
+    if (-not (Test-Path -LiteralPath $authorizedKeysFile -PathType Leaf)) {
+        throw "Panel key sync did not create authorized_keys file: $authorizedKeysFile"
+    }
+    $authorizedKeyMatches = @(Get-Content -LiteralPath $authorizedKeysFile | Where-Object { $_.Trim() -eq $publicKey })
+    if ($authorizedKeyMatches.Count -ne 1) {
+        throw "Panel key sync did not write exactly one matching authorized_keys entry. Count=$($authorizedKeyMatches.Count)"
+    }
+
+    $duplicateRegistration = Invoke-RestMethod -Method Post -Uri $registerUri -ContentType 'application/json' -Body $registerBody -TimeoutSec 5
+    Write-Host '--- panel /auth/authorized-keys duplicate registration ---'
+    $duplicateRegistration | ConvertTo-Json -Depth 8
+    if ($null -eq $duplicateRegistration.PSObject.Properties['registered'] -or $duplicateRegistration.registered -ne $false -or
+        $null -eq $duplicateRegistration.PSObject.Properties['already_present'] -or $duplicateRegistration.already_present -ne $true) {
+        throw "Panel key sync duplicate registration did not report already_present=true: $($duplicateRegistration | ConvertTo-Json -Compress)"
+    }
+    $authorizedKeyMatches = @(Get-Content -LiteralPath $authorizedKeysFile | Where-Object { $_.Trim() -eq $publicKey })
+    if ($authorizedKeyMatches.Count -ne 1) {
+        throw "Panel key sync duplicate registration created duplicate authorized_keys entries. Count=$($authorizedKeyMatches.Count)"
+    }
+
+    Set-Content -LiteralPath $upload -Value 'emtask-panel-key-sync-upload-ok' -NoNewline -Encoding ASCII
+    Set-Content -LiteralPath $serverFile -Value 'emtask-panel-key-sync-download-ok' -NoNewline -Encoding ASCII
+    Remove-Item -LiteralPath $download, $uploadedServerFile -Force -ErrorAction SilentlyContinue
+
+    $uploadPath = $upload.Replace('\', '/')
+    $downloadPath = $download.Replace('\', '/')
+    Set-Content -LiteralPath $batch -Value @(
+        'pwd',
+        'ls',
+        "put `"$uploadPath`" panel-sync-uploaded-from-ci.txt",
+        "get panel-sync-server-file.txt `"$downloadPath`"",
+        'bye'
+    ) -Encoding ASCII
+
+    $username = [string]$registration.username
+    $sftpArgs = @(
+        '-P', [string]$TaskPort,
+        '-i', $keyPath,
+        '-o', 'BatchMode=yes',
+        '-o', 'PreferredAuthentications=publickey',
+        '-o', 'PasswordAuthentication=no',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', "UserKnownHostsFile=$knownHosts",
+        '-b', $batch,
+        "$username@127.0.0.1"
+    )
+
+    $client = Start-Process -FilePath $sftpExe `
+        -ArgumentList $sftpArgs `
+        -RedirectStandardOutput $sftpOutput `
+        -RedirectStandardError $sftpError `
+        -WindowStyle Hidden `
+        -PassThru
+
+    if (-not $client.WaitForExit(45000)) {
+        Stop-Process -Id $client.Id -Force -ErrorAction SilentlyContinue
+        throw 'Panel key sync SFTP publickey login probe timed out.'
+    }
+    $client.Refresh()
+
+    $stdout = if (Test-Path -LiteralPath $sftpOutput -PathType Leaf) { Get-Content -LiteralPath $sftpOutput -Raw } else { '' }
+    $stderr = if (Test-Path -LiteralPath $sftpError -PathType Leaf) { Get-Content -LiteralPath $sftpError -Raw } else { '' }
+    Write-Host '--- panel key sync sftp stdout ---'
+    Write-Host ($stdout -replace "`e", '<ESC>')
+    Write-Host '--- panel key sync sftp stderr ---'
+    Write-Host ($stderr -replace "`e", '<ESC>')
+
+    if ($client.ExitCode -ne 0) {
+        throw "Panel key sync SFTP publickey login probe failed. ExitCode=$($client.ExitCode)"
+    }
+    if (-not (Test-Path -LiteralPath $uploadedServerFile -PathType Leaf) -or
+        (Get-Content -LiteralPath $uploadedServerFile -Raw) -ne 'emtask-panel-key-sync-upload-ok') {
+        throw 'Panel key sync SFTP upload verification failed.'
+    }
+    if (-not (Test-Path -LiteralPath $download -PathType Leaf) -or
+        (Get-Content -LiteralPath $download -Raw) -ne 'emtask-panel-key-sync-download-ok') {
+        throw 'Panel key sync SFTP download verification failed.'
+    }
+}
+
 if (-not (Test-Administrator)) {
     throw 'Windows service integration test requires an elevated runner.'
 }
@@ -284,6 +426,7 @@ foreach ($required in @($emtaskExe, $sqliteDll, $serviceScript, $wrapperExe)) {
 username = emtask
 password = emtask
 hostkey_file = emtask_hostkey_p256.raw
+authorized_keys_file = authorized_keys
 timeout_ms = 30000
 max_workers = 8
 use_conpty = false
@@ -357,8 +500,10 @@ try {
     }
 
     Wait-TcpPort -Port $taskPort
-    if ($safeLabel -match 'cygwin|msys2') {
-        Write-Host 'Using SFTP session probe for MSYS2/Cygwin package because Win32 cmd.exe terminal echo is not stable under these service builds on GitHub-hosted runners.'
+    Invoke-PanelAuthorizedKeySyncProbe -PanelPort $panelPort -TaskPort $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
+
+    if ($safeLabel -match 'cygwin|msys2|msvc-x86') {
+        Write-Host 'Using SFTP session probe for MSYS2/Cygwin/MSVC x86 package because Win32 cmd.exe terminal echo is not stable under these service builds on GitHub-hosted runners.'
         Invoke-SftpSessionProbe -Port $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
     } else {
         Invoke-SshSessionProbe -Port $taskPort -WorkRoot $workRoot
