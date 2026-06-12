@@ -257,7 +257,7 @@ function Invoke-PanelAuthorizedKeySyncProbe {
 
     $sshKeygenExe = (Get-Command ssh-keygen.exe -ErrorAction Stop).Source
     $sftpExe = (Get-Command sftp.exe -ErrorAction Stop).Source
-    $keyPath = Join-Path $WorkRoot 'panel-sync-ed25519'
+    $keyPath = Join-Path $WorkRoot 'panel-sync-ecdsa-p256'
     $publicKeyPath = "$keyPath.pub"
     $knownHosts = Join-Path $WorkRoot 'panel-sync-known_hosts'
     $batch = Join-Path $WorkRoot 'panel-sync-sftp.batch'
@@ -271,10 +271,14 @@ function Invoke-PanelAuthorizedKeySyncProbe {
 
     Remove-Item -LiteralPath $keyPath, $publicKeyPath, $knownHosts, $batch, $upload, $download, $sftpOutput, $sftpError, $uploadedServerFile -Force -ErrorAction SilentlyContinue
 
+    # emtask package builds currently use the mbedTLS legacy backend, where
+    # ssh-ed25519 public-key verification is unsupported. Use ECDSA P-256 here
+    # to validate the panel account/key registration path with a supported key.
     $keyComment = "emtask-ci-panel-sync-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
     $keygenArgs = @(
         '-q',
-        '-t', 'ed25519',
+        '-t', 'ecdsa',
+        '-b', '256',
         '-N', '',
         '-C', $keyComment,
         '-f', $keyPath
@@ -289,7 +293,7 @@ function Invoke-PanelAuthorizedKeySyncProbe {
     }
 
     $publicKey = (Get-Content -LiteralPath $publicKeyPath -Raw).Trim()
-    if ($publicKey -notmatch '^ssh-ed25519\s+') {
+    if ($publicKey -notmatch '^ecdsa-sha2-nistp256\s+') {
         throw "Panel key sync test generated an unexpected public key: $publicKey"
     }
 
