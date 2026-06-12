@@ -261,17 +261,53 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       }
     }
 
+    final updatedPanel =
+        panel == null ? null : _buildPanelCredentialUpdate(panel, profile);
+
     setState(() {
+      if (updatedPanel != null) {
+        _upsertPanel(updatedPanel);
+      }
       if (connection == null) {
         _connections.add(EmTaskConnection(profile));
       } else {
         connection.profile = profile;
       }
     });
+    if (updatedPanel != null) {
+      await _savePanels();
+    }
     await _saveProfiles();
     if (panel != null) {
-      await _refreshPanel(panel, showSnackBar: false);
+      await _refreshPanel(updatedPanel ?? panel, showSnackBar: false);
     }
+  }
+
+  EmTaskPanelProfile? _buildPanelCredentialUpdate(
+    EmTaskPanelProfile panel,
+    EmTaskSessionProfile profile,
+  ) {
+    var changed = false;
+    var next = panel;
+    if (profile.panelTaskSyncCredentials &&
+        (panel.username != profile.username ||
+            panel.password != profile.password)) {
+      next = next.copyWith(
+        username: profile.username,
+        password: profile.password,
+      );
+      changed = true;
+    }
+    if (profile.panelTaskSyncPrivateKey &&
+        (panel.privateKeyPath != profile.privateKeyPath ||
+            panel.privateKeyPassphrase != profile.privateKeyPassphrase)) {
+      next = next.copyWith(
+        privateKeyPath: profile.privateKeyPath,
+        privateKeyPassphrase: profile.privateKeyPassphrase,
+      );
+      changed = true;
+    }
+    return changed ? next : null;
   }
 
   EmTaskPanelUpdateTaskRequest? _buildPanelUpdateRequest(
@@ -347,7 +383,9 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         .toList(growable: false);
     final endpointChanged = previous.host != updated.host ||
         previous.username != updated.username ||
-        previous.password != updated.password;
+        previous.password != updated.password ||
+        previous.privateKeyPath != updated.privateKeyPath ||
+        previous.privateKeyPassphrase != updated.privateKeyPassphrase;
     if (endpointChanged) {
       for (final connection in panelConnections) {
         if (connection.isConnected || connection.isConnecting) {
@@ -363,12 +401,30 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       _panels[index] = updated;
       for (final connection in panelConnections) {
         connection.profile =
-            _normalizePanelSession(updated, connection.profile);
+            _applyPanelCredentialDefaults(updated, connection.profile);
       }
     });
     await _savePanels();
     await _saveProfiles();
     await _refreshPanel(updated);
+  }
+
+  EmTaskSessionProfile _applyPanelCredentialDefaults(
+    EmTaskPanelProfile panel,
+    EmTaskSessionProfile profile,
+  ) {
+    return profile.copyWith(
+      username:
+          profile.panelTaskSyncCredentials ? panel.username : profile.username,
+      password:
+          profile.panelTaskSyncCredentials ? panel.password : profile.password,
+      privateKeyPath: profile.panelTaskSyncPrivateKey
+          ? panel.privateKeyPath
+          : profile.privateKeyPath,
+      privateKeyPassphrase: profile.panelTaskSyncPrivateKey
+          ? panel.privateKeyPassphrase
+          : profile.privateKeyPassphrase,
+    );
   }
 
   Future<void> _removePanel(EmTaskPanelProfile panel) async {
@@ -802,8 +858,16 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       id: '${panel.id}-${taskName.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '-')}-${local.panelTaskSyncPort ? remote.port : local.port}',
       name: displayName,
       host: local.panelTaskSyncHost ? remote.host : local.host,
-      username: panel.username,
-      password: panel.password,
+      username:
+          local.panelTaskSyncCredentials ? remote.username : local.username,
+      password:
+          local.panelTaskSyncCredentials ? remote.password : local.password,
+      privateKeyPath: local.panelTaskSyncPrivateKey
+          ? remote.privateKeyPath
+          : local.privateKeyPath,
+      privateKeyPassphrase: local.panelTaskSyncPrivateKey
+          ? remote.privateKeyPassphrase
+          : local.privateKeyPassphrase,
       port: local.panelTaskSyncPort ? remote.port : local.port,
       shellKind:
           local.panelTaskSyncCommand ? remote.shellKind : local.shellKind,
@@ -844,6 +908,8 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       host: profile.host.trim().isEmpty ? panel.host : profile.host,
       username: panel.username,
       password: panel.password,
+      privateKeyPath: panel.privateKeyPath,
+      privateKeyPassphrase: panel.privateKeyPassphrase,
       panelId: panel.id,
       panelTaskName: taskName,
       panelTaskCommand: profile.panelTaskCommand,
@@ -4118,6 +4184,8 @@ class _PanelDialogState extends State<_PanelDialog> {
   late final TextEditingController _otpWindowController;
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _privateKeyPathController;
+  late final TextEditingController _privateKeyPassphraseController;
   late EmTaskPanelAuthMode _authMode;
 
   @override
@@ -4134,6 +4202,10 @@ class _PanelDialogState extends State<_PanelDialog> {
     _otpWindowController = TextEditingController(text: '${panel.otpWindow}');
     _usernameController = TextEditingController(text: panel.username);
     _passwordController = TextEditingController(text: panel.password);
+    _privateKeyPathController =
+        TextEditingController(text: panel.privateKeyPath);
+    _privateKeyPassphraseController =
+        TextEditingController(text: panel.privateKeyPassphrase);
     _authMode = panel.authMode;
   }
 
@@ -4149,6 +4221,8 @@ class _PanelDialogState extends State<_PanelDialog> {
     _otpWindowController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _privateKeyPathController.dispose();
+    _privateKeyPassphraseController.dispose();
     super.dispose();
   }
 
@@ -4295,6 +4369,17 @@ class _PanelDialogState extends State<_PanelDialog> {
                           obscureText: true,
                         ),
                       ),
+                      const SizedBox(height: 10),
+                      _buildPrivateKeyPicker(),
+                      const SizedBox(height: 10),
+                      TextFormField(
+                        controller: _privateKeyPassphraseController,
+                        decoration: const InputDecoration(
+                          labelText: '私钥口令',
+                          hintText: '私钥未加密可留空',
+                        ),
+                        obscureText: true,
+                      ),
                     ],
                   ),
                 ),
@@ -4383,6 +4468,83 @@ class _PanelDialogState extends State<_PanelDialog> {
     );
   }
 
+  Widget _buildPrivateKeyPicker() {
+    final pathField = TextFormField(
+      controller: _privateKeyPathController,
+      readOnly: true,
+      decoration: const InputDecoration(
+        labelText: '默认登录密钥私钥文件',
+        hintText: '作为面板会话的默认 SSH 私钥',
+      ),
+    );
+    final buttons = Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        OutlinedButton.icon(
+          onPressed: _pickPrivateKeyFile,
+          icon: const Icon(Icons.key_outlined),
+          label: const Text('选择私钥'),
+        ),
+        if (_privateKeyPathController.text.isNotEmpty)
+          TextButton.icon(
+            onPressed: () {
+              setState(() {
+                _privateKeyPathController.clear();
+                _privateKeyPassphraseController.clear();
+              });
+            },
+            icon: const Icon(Icons.clear),
+            label: const Text('清除'),
+          ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 560) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              pathField,
+              const SizedBox(height: 8),
+              buttons,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(child: pathField),
+            const SizedBox(width: 10),
+            buttons,
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _pickPrivateKeyFile() async {
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: false,
+    );
+    final file = picked?.files.single;
+    if (file == null) {
+      return;
+    }
+    final path = file.path;
+    if (path == null || path.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法获取私钥文件路径，请重新选择本地文件。')),
+        );
+      }
+      return;
+    }
+    setState(() => _privateKeyPathController.text = path);
+  }
+
   void _submit() {
     if (!_formKey.currentState!.validate()) {
       return;
@@ -4401,6 +4563,8 @@ class _PanelDialogState extends State<_PanelDialog> {
         otpWindow: int.tryParse(_otpWindowController.text.trim()) ?? 1,
         username: _usernameController.text.trim(),
         password: _passwordController.text,
+        privateKeyPath: _privateKeyPathController.text.trim(),
+        privateKeyPassphrase: _privateKeyPassphraseController.text,
       ),
     );
   }
@@ -5353,6 +5517,8 @@ class _ProfileDialogState extends State<_ProfileDialog> {
   late bool _supportsSftp;
   late bool _syncPanelHost;
   late bool _syncPanelPort;
+  late bool _syncPanelCredentials;
+  late bool _syncPanelPrivateKey;
   late bool _syncPanelCommand;
   late bool _syncPanelWorkingDir;
   late bool _syncPanelSftp;
@@ -5383,6 +5549,8 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     _supportsSftp = profile.supportsSftp;
     _syncPanelHost = profile.panelTaskSyncHost;
     _syncPanelPort = profile.panelTaskSyncPort;
+    _syncPanelCredentials = profile.panelTaskSyncCredentials;
+    _syncPanelPrivateKey = profile.panelTaskSyncPrivateKey;
     _syncPanelCommand = profile.panelTaskSyncCommand;
     _syncPanelWorkingDir = profile.panelTaskSyncWorkingDir;
     _syncPanelSftp = profile.panelTaskSyncSftp;
@@ -5504,6 +5672,15 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                           obscureText: true,
                         ),
                       ),
+                      if (widget.isPanelSession)
+                        _buildPanelSyncSwitch(
+                          title: '用户名 / 密码同步到面板默认账号',
+                          subtitle: '勾选后保存为面板默认 SSH 账号；刷新面板会用默认账号覆盖此会话。',
+                          value: _syncPanelCredentials,
+                          onChanged: (value) => setState(
+                            () => _syncPanelCredentials = value,
+                          ),
+                        ),
                       const SizedBox(height: 10),
                       _buildPrivateKeyPicker(),
                       const SizedBox(height: 10),
@@ -5515,6 +5692,15 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                         ),
                         obscureText: true,
                       ),
+                      if (widget.isPanelSession)
+                        _buildPanelSyncSwitch(
+                          title: '登录密钥同步到面板默认密钥',
+                          subtitle: '勾选后保存为面板默认 SSH 私钥；刷新面板会用默认密钥覆盖此会话。',
+                          value: _syncPanelPrivateKey,
+                          onChanged: (value) => setState(
+                            () => _syncPanelPrivateKey = value,
+                          ),
+                        ),
                       const SizedBox(height: 8),
                       Align(
                         alignment: Alignment.centerLeft,
@@ -5691,6 +5877,7 @@ class _ProfileDialogState extends State<_ProfileDialog> {
     required String title,
     required bool value,
     required ValueChanged<bool> onChanged,
+    String subtitle = '不勾选时不上传到服务端，刷新面板也不会覆盖此项。',
   }) {
     return CheckboxListTile(
       contentPadding: EdgeInsets.zero,
@@ -5699,7 +5886,7 @@ class _ProfileDialogState extends State<_ProfileDialog> {
       onChanged: (value) => onChanged(value ?? false),
       controlAffinity: ListTileControlAffinity.leading,
       title: Text(title),
-      subtitle: const Text('不勾选时不上传到服务端，刷新面板也不会覆盖此项。'),
+      subtitle: Text(subtitle),
     );
   }
 
@@ -5817,6 +6004,10 @@ class _ProfileDialogState extends State<_ProfileDialog> {
         panelTaskSyncName: widget.isPanelSession ? false : true,
         panelTaskSyncHost: widget.isPanelSession ? _syncPanelHost : true,
         panelTaskSyncPort: widget.isPanelSession ? _syncPanelPort : true,
+        panelTaskSyncCredentials:
+            widget.isPanelSession ? _syncPanelCredentials : true,
+        panelTaskSyncPrivateKey:
+            widget.isPanelSession ? _syncPanelPrivateKey : false,
         panelTaskSyncCommand: widget.isPanelSession ? _syncPanelCommand : true,
         panelTaskSyncWorkingDir:
             widget.isPanelSession ? _syncPanelWorkingDir : true,

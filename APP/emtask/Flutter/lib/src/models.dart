@@ -274,6 +274,8 @@ class EmTaskPanelProfile {
     required this.otpWindow,
     required this.username,
     required this.password,
+    required this.privateKeyPath,
+    required this.privateKeyPassphrase,
     required this.startCommand,
     required this.stopCommand,
   });
@@ -291,6 +293,8 @@ class EmTaskPanelProfile {
     int otpWindow = 1,
     String username = 'emtask',
     String password = 'emtask',
+    String privateKeyPath = '',
+    String privateKeyPassphrase = '',
     String startCommand = '',
     String stopCommand = '',
   }) {
@@ -307,6 +311,8 @@ class EmTaskPanelProfile {
       otpWindow: otpWindow,
       username: username,
       password: password,
+      privateKeyPath: privateKeyPath,
+      privateKeyPassphrase: privateKeyPassphrase,
       startCommand: startCommand,
       stopCommand: stopCommand,
     );
@@ -328,6 +334,8 @@ class EmTaskPanelProfile {
       otpWindow: json['otpWindow'] as int? ?? 1,
       username: json['username'] as String? ?? 'emtask',
       password: json['password'] as String? ?? 'emtask',
+      privateKeyPath: json['privateKeyPath'] as String? ?? '',
+      privateKeyPassphrase: json['privateKeyPassphrase'] as String? ?? '',
       startCommand: json['startCommand'] as String? ?? '',
       stopCommand: json['stopCommand'] as String? ?? '',
     );
@@ -345,6 +353,8 @@ class EmTaskPanelProfile {
   final int otpWindow;
   final String username;
   final String password;
+  final String privateKeyPath;
+  final String privateKeyPassphrase;
   final String startCommand;
   final String stopCommand;
 
@@ -369,6 +379,8 @@ class EmTaskPanelProfile {
       'otpWindow': otpWindow,
       'username': username,
       'password': password,
+      'privateKeyPath': privateKeyPath,
+      'privateKeyPassphrase': privateKeyPassphrase,
       'startCommand': startCommand,
       'stopCommand': stopCommand,
     };
@@ -389,6 +401,8 @@ class EmTaskPanelProfile {
     int? otpWindow,
     String? username,
     String? password,
+    String? privateKeyPath,
+    String? privateKeyPassphrase,
     String? startCommand,
     String? stopCommand,
   }) {
@@ -405,6 +419,8 @@ class EmTaskPanelProfile {
       otpWindow: otpWindow ?? this.otpWindow,
       username: username ?? this.username,
       password: password ?? this.password,
+      privateKeyPath: privateKeyPath ?? this.privateKeyPath,
+      privateKeyPassphrase: privateKeyPassphrase ?? this.privateKeyPassphrase,
       startCommand: startCommand ?? this.startCommand,
       stopCommand: stopCommand ?? this.stopCommand,
     );
@@ -443,6 +459,8 @@ class EmTaskSessionProfile {
     required this.panelTaskSyncName,
     required this.panelTaskSyncHost,
     required this.panelTaskSyncPort,
+    required this.panelTaskSyncCredentials,
+    required this.panelTaskSyncPrivateKey,
     required this.panelTaskSyncCommand,
     required this.panelTaskSyncWorkingDir,
     required this.panelTaskSyncSftp,
@@ -474,6 +492,8 @@ class EmTaskSessionProfile {
     bool panelTaskSyncName = true,
     bool panelTaskSyncHost = true,
     bool panelTaskSyncPort = true,
+    bool panelTaskSyncCredentials = true,
+    bool panelTaskSyncPrivateKey = false,
     bool panelTaskSyncCommand = true,
     bool panelTaskSyncWorkingDir = true,
     bool panelTaskSyncSftp = true,
@@ -504,6 +524,8 @@ class EmTaskSessionProfile {
       panelTaskSyncName: panelTaskSyncName,
       panelTaskSyncHost: panelTaskSyncHost,
       panelTaskSyncPort: panelTaskSyncPort,
+      panelTaskSyncCredentials: panelTaskSyncCredentials,
+      panelTaskSyncPrivateKey: panelTaskSyncPrivateKey,
       panelTaskSyncCommand: panelTaskSyncCommand,
       panelTaskSyncWorkingDir: panelTaskSyncWorkingDir,
       panelTaskSyncSftp: panelTaskSyncSftp,
@@ -537,6 +559,10 @@ class EmTaskSessionProfile {
       panelTaskSyncName: json['panelTaskSyncName'] as bool? ?? true,
       panelTaskSyncHost: json['panelTaskSyncHost'] as bool? ?? true,
       panelTaskSyncPort: json['panelTaskSyncPort'] as bool? ?? true,
+      panelTaskSyncCredentials:
+          json['panelTaskSyncCredentials'] as bool? ?? true,
+      panelTaskSyncPrivateKey:
+          json['panelTaskSyncPrivateKey'] as bool? ?? false,
       panelTaskSyncCommand: json['panelTaskSyncCommand'] as bool? ?? true,
       panelTaskSyncWorkingDir: json['panelTaskSyncWorkingDir'] as bool? ?? true,
       panelTaskSyncSftp: json['panelTaskSyncSftp'] as bool? ?? true,
@@ -570,6 +596,8 @@ class EmTaskSessionProfile {
   final bool panelTaskSyncName;
   final bool panelTaskSyncHost;
   final bool panelTaskSyncPort;
+  final bool panelTaskSyncCredentials;
+  final bool panelTaskSyncPrivateKey;
   final bool panelTaskSyncCommand;
   final bool panelTaskSyncWorkingDir;
   final bool panelTaskSyncSftp;
@@ -603,6 +631,8 @@ class EmTaskSessionProfile {
       'panelTaskSyncName': panelTaskSyncName,
       'panelTaskSyncHost': panelTaskSyncHost,
       'panelTaskSyncPort': panelTaskSyncPort,
+      'panelTaskSyncCredentials': panelTaskSyncCredentials,
+      'panelTaskSyncPrivateKey': panelTaskSyncPrivateKey,
       'panelTaskSyncCommand': panelTaskSyncCommand,
       'panelTaskSyncWorkingDir': panelTaskSyncWorkingDir,
       'panelTaskSyncSftp': panelTaskSyncSftp,
@@ -637,6 +667,8 @@ class EmTaskSessionProfile {
     bool? panelTaskSyncName,
     bool? panelTaskSyncHost,
     bool? panelTaskSyncPort,
+    bool? panelTaskSyncCredentials,
+    bool? panelTaskSyncPrivateKey,
     bool? panelTaskSyncCommand,
     bool? panelTaskSyncWorkingDir,
     bool? panelTaskSyncSftp,
@@ -667,6 +699,10 @@ class EmTaskSessionProfile {
       panelTaskSyncName: panelTaskSyncName ?? this.panelTaskSyncName,
       panelTaskSyncHost: panelTaskSyncHost ?? this.panelTaskSyncHost,
       panelTaskSyncPort: panelTaskSyncPort ?? this.panelTaskSyncPort,
+      panelTaskSyncCredentials:
+          panelTaskSyncCredentials ?? this.panelTaskSyncCredentials,
+      panelTaskSyncPrivateKey:
+          panelTaskSyncPrivateKey ?? this.panelTaskSyncPrivateKey,
       panelTaskSyncCommand: panelTaskSyncCommand ?? this.panelTaskSyncCommand,
       panelTaskSyncWorkingDir:
           panelTaskSyncWorkingDir ?? this.panelTaskSyncWorkingDir,

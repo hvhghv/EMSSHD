@@ -474,8 +474,8 @@ class EmTaskPanelClient {
       port: task.port,
       username: panel.username,
       password: panel.password,
-      privateKeyPath: '',
-      privateKeyPassphrase: '',
+      privateKeyPath: panel.privateKeyPath,
+      privateKeyPassphrase: panel.privateKeyPassphrase,
       shellKind: _inferShellKind(task.command),
       initialPath: '.',
       supportsSftp: task.useSftp,
@@ -486,6 +486,8 @@ class EmTaskPanelClient {
       panelTaskSyncName: false,
       panelTaskSyncHost: true,
       panelTaskSyncPort: true,
+      panelTaskSyncCredentials: true,
+      panelTaskSyncPrivateKey: panel.privateKeyPath.trim().isNotEmpty,
       panelTaskSyncCommand: true,
       panelTaskSyncWorkingDir: true,
       panelTaskSyncSftp: true,
@@ -638,9 +640,13 @@ EmTaskImportedPanel parseEmTaskPanelQrText(String source) {
           port: sshPort,
           username: panel.username,
           password: panel.password,
+          privateKeyPath: panel.privateKeyPath,
+          privateKeyPassphrase: panel.privateKeyPassphrase,
           supportsSftp: (int.tryParse(fields['sf'] ?? '0') ?? 0) != 0,
           panelId: panel.id,
           panelTaskName: fields['sn'] ?? 'task',
+          panelTaskSyncCredentials: true,
+          panelTaskSyncPrivateKey: panel.privateKeyPath.trim().isNotEmpty,
         );
 
   return EmTaskImportedPanel(panel: panel, firstSession: firstSession);
