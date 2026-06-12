@@ -155,6 +155,98 @@ function Invoke-SshSessionProbe {
     }
 }
 
+function Invoke-SftpSessionProbe {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$WorkRoot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+
+    $sftpExe = (Get-Command sftp.exe -ErrorAction Stop).Source
+    $knownHosts = Join-Path $WorkRoot 'sftp-known_hosts'
+    $askpass = Join-Path $WorkRoot 'sftp-askpass.cmd'
+    $batch = Join-Path $WorkRoot 'sftp-session.batch'
+    $upload = Join-Path $WorkRoot 'sftp-upload.txt'
+    $download = Join-Path $WorkRoot 'sftp-download.txt'
+    $sftpOutput = Join-Path $WorkRoot 'sftp-session.out.log'
+    $sftpError = Join-Path $WorkRoot 'sftp-session.err.log'
+    $serverFile = Join-Path $RuntimeRoot 'sftp-server-file.txt'
+    $uploadedServerFile = Join-Path $RuntimeRoot 'uploaded-from-ci.txt'
+
+    Set-Content -LiteralPath $askpass -Value @('@echo off', 'echo emtask') -Encoding ASCII
+    Set-Content -LiteralPath $upload -Value 'emtask-service-sftp-upload-ok' -NoNewline -Encoding ASCII
+    Set-Content -LiteralPath $serverFile -Value 'emtask-service-sftp-download-ok' -NoNewline -Encoding ASCII
+    Remove-Item -LiteralPath $download, $uploadedServerFile -Force -ErrorAction SilentlyContinue
+
+    $uploadPath = $upload.Replace('\', '/')
+    $downloadPath = $download.Replace('\', '/')
+    Set-Content -LiteralPath $batch -Value @(
+        'pwd',
+        'ls',
+        "put `"$uploadPath`" uploaded-from-ci.txt",
+        "get sftp-server-file.txt `"$downloadPath`"",
+        'bye'
+    ) -Encoding ASCII
+
+    $oldAskpass = [Environment]::GetEnvironmentVariable('SSH_ASKPASS', 'Process')
+    $oldAskpassRequire = [Environment]::GetEnvironmentVariable('SSH_ASKPASS_REQUIRE', 'Process')
+    $oldDisplay = [Environment]::GetEnvironmentVariable('DISPLAY', 'Process')
+
+    try {
+        $env:SSH_ASKPASS = $askpass
+        $env:SSH_ASKPASS_REQUIRE = 'force'
+        $env:DISPLAY = 'emtask-service-ci'
+
+        $sftpArgs = @(
+            '-P', [string]$Port,
+            '-o', 'BatchMode=no',
+            '-o', 'PreferredAuthentications=password',
+            '-o', 'PubkeyAuthentication=no',
+            '-o', 'NumberOfPasswordPrompts=1',
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', "UserKnownHostsFile=$knownHosts",
+            '-b', $batch,
+            'emtask@127.0.0.1'
+        )
+
+        $client = Start-Process -FilePath $sftpExe `
+            -ArgumentList $sftpArgs `
+            -RedirectStandardOutput $sftpOutput `
+            -RedirectStandardError $sftpError `
+            -WindowStyle Hidden `
+            -PassThru
+
+        if (-not $client.WaitForExit(45000)) {
+            Stop-Process -Id $client.Id -Force -ErrorAction SilentlyContinue
+            throw 'SFTP session probe timed out.'
+        }
+        $client.Refresh()
+
+        $stdout = if (Test-Path -LiteralPath $sftpOutput -PathType Leaf) { Get-Content -LiteralPath $sftpOutput -Raw } else { '' }
+        $stderr = if (Test-Path -LiteralPath $sftpError -PathType Leaf) { Get-Content -LiteralPath $sftpError -Raw } else { '' }
+        Write-Host '--- sftp session stdout ---'
+        Write-Host ($stdout -replace "`e", '<ESC>')
+        Write-Host '--- sftp session stderr ---'
+        Write-Host ($stderr -replace "`e", '<ESC>')
+
+        if ($client.ExitCode -ne 0) {
+            throw "SFTP session probe failed. ExitCode=$($client.ExitCode)"
+        }
+        if (-not (Test-Path -LiteralPath $uploadedServerFile -PathType Leaf) -or
+            (Get-Content -LiteralPath $uploadedServerFile -Raw) -ne 'emtask-service-sftp-upload-ok') {
+            throw 'SFTP upload verification failed.'
+        }
+        if (-not (Test-Path -LiteralPath $download -PathType Leaf) -or
+            (Get-Content -LiteralPath $download -Raw) -ne 'emtask-service-sftp-download-ok') {
+            throw 'SFTP download verification failed.'
+        }
+    } finally {
+        if ($null -eq $oldAskpass) { Remove-Item Env:\SSH_ASKPASS -ErrorAction SilentlyContinue } else { $env:SSH_ASKPASS = $oldAskpass }
+        if ($null -eq $oldAskpassRequire) { Remove-Item Env:\SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue } else { $env:SSH_ASKPASS_REQUIRE = $oldAskpassRequire }
+        if ($null -eq $oldDisplay) { Remove-Item Env:\DISPLAY -ErrorAction SilentlyContinue } else { $env:DISPLAY = $oldDisplay }
+    }
+}
+
 if (-not (Test-Administrator)) {
     throw 'Windows service integration test requires an elevated runner.'
 }
@@ -265,7 +357,12 @@ try {
     }
 
     Wait-TcpPort -Port $taskPort
-    Invoke-SshSessionProbe -Port $taskPort -WorkRoot $workRoot
+    if ($safeLabel -match 'cygwin') {
+        Write-Host 'Using SFTP session probe for Cygwin package because Win32 cmd.exe terminal echo is not stable under the Cygwin service build on GitHub-hosted runners.'
+        Invoke-SftpSessionProbe -Port $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
+    } else {
+        Invoke-SshSessionProbe -Port $taskPort -WorkRoot $workRoot
+    }
 
     Write-Host "emtask Windows service integration test passed for $Label."
 } finally {

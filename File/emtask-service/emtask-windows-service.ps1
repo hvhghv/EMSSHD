@@ -6,8 +6,10 @@
 .DESCRIPTION
     This script installs emtask.exe as a hidden Windows service by copying a prebuilt
     .NET Framework ServiceBase wrapper to the service directory. Install uses the
-    current Windows user by default and prompts for that user's password. Pass
+    current Windows user by default and prompts for that user's Windows account password. Pass
     -LocalSystem only when the service should run as LocalSystem instead.
+    Windows services cannot use a Windows Hello PIN, and local accounts with blank
+    passwords are usually blocked from service logon by Windows policy.
     Install does not require a C# compiler when tools\emtask-service-wrapper.exe is already present.
 
     Use the build-wrapper action on a development machine to prebuild the wrapper from
@@ -134,6 +136,7 @@ Common options:
     -WrapperSource <path>     Wrapper C# source. Default: script directory\emtask-service-wrapper.cs
     -StartupType <type>       Automatic, Manual, or Disabled. Default: Automatic
     -Credential <credential>  Service account credential. Overrides the default current-user prompt.
+                              Use the account password, not Windows Hello PIN.
     -CurrentUser              Run the service as the current Windows user. This is the install default.
     -LocalSystem              Run the service as LocalSystem instead of the default current user.
     -Force                    Replace an existing service during install.
@@ -198,6 +201,14 @@ function Get-ServiceOrNull {
     return Get-Service -Name $Name -ErrorAction SilentlyContinue
 }
 
+function Close-ServiceController {
+    param([AllowNull()][System.ServiceProcess.ServiceController]$Service)
+    if ($Service) {
+        $Service.Close()
+        $Service.Dispose()
+    }
+}
+
 function Get-WrapperExePath {
     if ([string]::IsNullOrWhiteSpace($WrapperExe)) {
         return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $WrapperExeName))
@@ -244,7 +255,23 @@ function Get-CurrentUserCredential {
     if ([string]::IsNullOrWhiteSpace($userName)) {
         throw 'Cannot determine the current Windows user name.'
     }
-    return Get-Credential -UserName $userName -Message "Enter the Windows password for $userName to run the '$ServiceName' service."
+    return Get-Credential -UserName $userName -Message "Enter the Windows account password for $userName to run the '$ServiceName' service. Do not enter a Windows Hello PIN. Local accounts with blank passwords cannot run Windows services by default; use -LocalSystem or set an account password."
+}
+
+function Assert-ServiceCredentialCanRunService {
+    param(
+        [AllowNull()]
+        [System.Management.Automation.PSCredential]$ServiceCredential
+    )
+
+    if (-not $ServiceCredential) {
+        return
+    }
+
+    $password = $ServiceCredential.GetNetworkCredential().Password
+    if ([string]::IsNullOrEmpty($password)) {
+        throw "Windows refused to run services as '$($ServiceCredential.UserName)' with a blank password by default. Set a real Windows account password, pass -LocalSystem, or pass -Credential for an account with a non-empty password."
+    }
 }
 
 function Get-ServiceCimOrNull {
@@ -289,6 +316,8 @@ function Set-EmtaskServiceCredential {
         [Parameter(Mandatory = $true)]
         [System.Management.Automation.PSCredential]$ServiceCredential
     )
+
+    Assert-ServiceCredentialCanRunService -ServiceCredential $ServiceCredential
 
     $serviceCim = Get-ServiceCimOrNull -Name $ServiceName
     if (-not $serviceCim) {
@@ -383,12 +412,17 @@ function Write-WrapperConfig {
 function Wait-ServiceDeleted {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    for ($i = 0; $i -lt 20; ++$i) {
-        if (-not (Get-ServiceOrNull -Name $Name)) {
+    for ($i = 0; $i -lt 60; ++$i) {
+        $service = Get-ServiceOrNull -Name $Name
+        $serviceCim = Get-ServiceCimOrNull -Name $Name
+        if (-not $service -and -not $serviceCim) {
             return
         }
+        Close-ServiceController -Service $service
         Start-Sleep -Milliseconds 500
     }
+
+    throw "Service '$Name' is still present after delete, usually because Windows marked it for deletion while a process still holds a service handle. Close Services MMC and any PowerShell windows that queried this service, then retry."
 }
 
 function Stop-EmtaskService {
@@ -404,9 +438,29 @@ function Stop-EmtaskService {
         throw "Service '$ServiceName' does not exist."
     }
 
-    if ($service.Status -ne 'Stopped') {
-        Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    try {
+        if ($service.Status -ne 'Stopped') {
+            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+            $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        }
+    } finally {
+        Close-ServiceController -Service $service
+    }
+}
+
+function Write-RecentServiceControlManagerEvents {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    try {
+        $events = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 30 -ErrorAction Stop |
+            Where-Object { $_.Message -match [regex]::Escape($Name) } |
+            Select-Object -First 5
+        if ($events) {
+            Write-Host "Recent Service Control Manager events for '$Name':"
+            $events | Select-Object TimeCreated, Id, Message | Format-List
+        }
+    } catch {
+        Write-Warning "Failed to read Service Control Manager events: $($_.Exception.Message)"
     }
 }
 
@@ -427,6 +481,7 @@ function Install-EmtaskService {
     if (-not $LocalSystem -and -not $serviceCredential) {
         $serviceCredential = Get-CurrentUserCredential
     }
+    Assert-ServiceCredentialCanRunService -ServiceCredential $serviceCredential
 
     $exePath = Get-EmtaskExePath
     $configPath = Get-EmtaskConfigPath
@@ -447,11 +502,14 @@ function Install-EmtaskService {
     }
 
     $existing = Get-ServiceOrNull -Name $ServiceName
-    if ($existing -and -not $Force) {
+    $serviceExists = $null -ne $existing
+    if ($serviceExists -and -not $Force) {
+        Close-ServiceController -Service $existing
         throw "Service '$ServiceName' already exists. Use -Force to replace it."
     }
+    Close-ServiceController -Service $existing
 
-    if ($existing) {
+    if ($serviceExists) {
         Stop-EmtaskService -IgnoreMissing
         & sc.exe delete $ServiceName | Out-Null
         Wait-ServiceDeleted -Name $ServiceName
@@ -525,8 +583,17 @@ function Start-EmtaskService {
     }
 
     if ($service.Status -ne 'Running') {
-        Start-Service -Name $ServiceName
-        $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        try {
+            Start-Service -Name $ServiceName -ErrorAction Stop
+            $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        } catch {
+            Write-RecentServiceControlManagerEvents -Name $ServiceName
+            $serviceCim = Get-ServiceCimOrNull -Name $ServiceName
+            if ($serviceCim -and $serviceCim.StartName -notmatch 'LocalSystem|LocalService|NetworkService') {
+                Write-Warning "If Windows reports error 1069/logon failure, re-run install with the real Windows account password (not a Windows Hello PIN), or use -LocalSystem. Current service account: $($serviceCim.StartName)"
+            }
+            throw
+        }
     }
 }
 
@@ -534,7 +601,9 @@ function Uninstall-EmtaskService {
     Assert-Administrator
 
     $service = Get-ServiceOrNull -Name $ServiceName
-    if ($service) {
+    $serviceExists = $null -ne $service
+    Close-ServiceController -Service $service
+    if ($serviceExists) {
         Stop-EmtaskService -IgnoreMissing
         & sc.exe delete $ServiceName | Out-Null
         Wait-ServiceDeleted -Name $ServiceName
