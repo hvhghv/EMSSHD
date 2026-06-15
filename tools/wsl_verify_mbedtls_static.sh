@@ -71,8 +71,10 @@ cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
     -DEMSSH_USE_MBEDTLS=ON \
     -DEMSSH_USE_OPENSSL=OFF \
     -DEMSSH_USE_WOLFSSL=OFF \
+    -DEMSSH_MBEDTLS_USE_PSA=OFF \
     -DEMSSH_BUILD_POSIX_RUNTIME=ON \
     -DEMSSH_BUILD_POSIX_NET=ON \
+    -DEMSSH_BUILD_POSIX_TERM=ON \
     -DEMSSH_BUILD_STDIO_FS=ON \
     -DEMSSH_BUILD_POSIX_PASSWD_AUTH=ON \
     -DEMSSH_BUILD_SSHD_CONFIG_FILE=ON \
@@ -107,6 +109,9 @@ PasswordAuthentication yes
 Subsystem sftp internal-sftp
 EOF
 echo 'Port 0' > "${TMP_DIR}/sshd_config_bad"
+
+log "scenario S0: password-authentication cli startup"
+EMSSHD_VERIFY_PORT=2222 bash "${ROOT_DIR}/tools/verify_emsshd_linux_startup.sh" "${BIN}"
 
 log "run selected unit tests"
 "${BUILD_DIR}/test_posix_passwd_auth"

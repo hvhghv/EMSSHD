@@ -1186,7 +1186,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build ${{ matrix.apt_packages }}
+          sudo apt-get install -y build-essential cmake ninja-build python3 ${{ matrix.apt_packages }}
 
       - name: Configure
         run: |
@@ -1230,6 +1230,14 @@ jobs:
 
       - name: Build
         run: cmake --build build-emsshd-linux-glibc-${{ matrix.arch }} --target emssh_linux_posix_stdio_server --parallel
+
+      - name: Smoke test password-auth startup
+        if: ${{ matrix.arch == 'x64' }}
+        run: |
+          set -euo pipefail
+          EMSSHD_VERIFY_PORT=2222 \
+            bash tools/verify_emsshd_linux_startup.sh \
+            build-emsshd-linux-glibc-${{ matrix.arch }}/emssh_linux_posix_stdio_server
 
       - name: Package
         run: |
@@ -1324,7 +1332,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build curl file
+          sudo apt-get install -y build-essential cmake ninja-build curl file python3 qemu-user-static
 
       - name: Install musl cross toolchain
         run: |
@@ -1378,7 +1386,7 @@ jobs:
             -DEMSSH_BUILD_POSIX_RUNTIME=ON
             -DEMSSH_BUILD_POSIX_NET=ON
             -DEMSSH_BUILD_POSIX_TERM=ON
-            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=OFF
+            -DEMSSH_BUILD_POSIX_PASSWD_AUTH=ON
             -DEMSSH_BUILD_SSHD_CONFIG_FILE=ON
             -DEMSSH_BUILD_LINUX_POSIX_STDIO_SERVER=ON
             -DEMSSH_LINUX_POSIX_STDIO_SERVER_BACKEND=mbedtls
@@ -1402,6 +1410,36 @@ jobs:
           else
             grep -qi 'dynamically linked' linkage-check.txt
           fi
+
+      - name: Smoke test password-auth startup
+        if: ${{ matrix.linkage == 'static' }}
+        run: |
+          set -euo pipefail
+          runner=
+          case '${{ matrix.arch }}' in
+            x64)
+              ;;
+            arm)
+              runner=qemu-arm-static
+              ;;
+            aarch64)
+              runner=qemu-aarch64-static
+              ;;
+            riscv64)
+              runner=qemu-riscv64-static
+              ;;
+            *)
+              echo "unsupported smoke-test arch: ${{ matrix.arch }}" >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "$runner" ]; then
+            command -v "$runner"
+            export EMSSHD_RUNNER="$runner"
+          fi
+          EMSSHD_VERIFY_PORT=2222 \
+            bash tools/verify_emsshd_linux_startup.sh \
+            build-emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}/emssh_linux_posix_stdio_server
 
       - name: Package
         run: |
