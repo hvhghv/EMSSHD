@@ -43,6 +43,45 @@ Windows 平台终端通用实现位于 `src/platform/window_term.c`，由 `Windo
 
 Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获得更接近真实 TTY/TUI 的行为，系统不支持 ConPTY 时会回退普通管道子进程路径。
 
+## 更新程序
+
+发布包内包含通用 GitHub 更新器目录 `github-updater/`，下面按环境分成 `ps1/`、`flutter/`、`sh/` 三套实现，可复用于其他模块。仓库地址通过参数传入，支持 `owner/repo`、`https://github.com/owner/repo` 或 `git@github.com:owner/repo.git`。Flutter 客户端的内置更新模块也同步保留在 `APP/emtask/Flutter/lib/src/updater/`，复制该目录并传入 `GitHubUpdatePageConfig` 即可移植到其他 Flutter 项目。
+
+支持的更新渠道：
+
+- `release`：读取 GitHub Releases，并下载 Release assets。
+- `action`：读取 GitHub Actions 成功运行，并下载 run artifacts。下载 Actions artifacts 通常需要设置 `GITHUB_TOKEN`/`-Token`；未传入时脚本会尝试使用 `gh auth token`。
+
+列出当前渠道可用版本：
+
+```powershell
+# Release tags
+./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode list
+
+# Successful Actions runs
+./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel action -Mode list
+```
+
+下载或安装指定版本：
+
+```powershell
+# 下载指定 Release tag 的 Windows x64 包
+./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode download `
+  -Version v1.0.0 -NamePattern 'emtask-server-windows-msvc-x64*.zip' -OutputDir downloads
+
+# 安装最新 Release 中匹配的包
+./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode install `
+  -NamePattern 'emtask-server-windows-msvc-x64*.zip' -InstallDir C:\emtask-server -Force
+
+# 从指定 Actions run id/run number 下载构建产物
+./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel action -Mode download `
+  -Version 1234567890 -NamePattern 'emtask-server-windows-msvc-x64*' -OutputDir downloads
+```
+
+参数说明见包内 `github-updater/README.md` 以及各子目录 README。推送 `v*` tag 时，CI 会把 `emtask-server-*` 与 `emtask-client-*` 构建产物发布到 GitHub Release，供 `release` 渠道使用；普通分支构建仍可通过 `action` 渠道下载 artifacts。
+
+Linux musl 构建会同时产出动态链接和静态链接两套包，包名中分别包含 `linux-musl-dynamic-*` 与 `linux-musl-static-*`。
+
 `WindowMsys2` 版本用于 `MINGW/MSYS` 工具链构建，当前行为是：
 
 - 默认开启 `use_conpty`，优先使用 ConPTY；不支持时回退普通管道子进程路径。

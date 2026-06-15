@@ -13,6 +13,7 @@ import 'package:emtask_client/src/models.dart';
 import 'package:emtask_client/src/panel_client.dart';
 import 'package:emtask_client/src/panel_key_manager.dart';
 import 'package:emtask_client/src/profile_store.dart';
+import 'package:emtask_client/src/updater/updater.dart';
 
 void main() {
   testWidgets('home screen only shows sessions', (WidgetTester tester) async {
@@ -250,6 +251,49 @@ void main() {
       EmTaskClientSettings.defaults(sftpPreviewHeight: 9999).sftpPreviewHeight,
       EmTaskClientSettings.maxSftpPreviewHeight,
     );
+  });
+
+  test('github updater parses repository addresses', () {
+    expect(GitHubRepositoryRef.parse('owner/repo').toString(), 'owner/repo');
+    expect(
+      GitHubRepositoryRef.parse('https://github.com/owner/repo.git').toString(),
+      'owner/repo',
+    );
+    expect(
+      GitHubRepositoryRef.parse('git@github.com:owner/repo.git').toString(),
+      'owner/repo',
+    );
+  });
+
+  test('github updater models parse release and action json', () {
+    final release = GitHubUpdateVersion.fromReleaseJson(<String, Object?>{
+      'tag_name': 'v1.0.0',
+      'name': 'v1.0.0',
+      'prerelease': false,
+      'published_at': '2026-06-15T00:00:00Z',
+      'assets': <Object?>[<String, Object?>{}],
+    });
+    final run = GitHubUpdateVersion.fromActionRunJson(<String, Object?>{
+      'id': 123,
+      'run_number': 7,
+      'name': 'Build packages',
+      'display_title': 'main build',
+      'head_branch': 'main',
+      'head_sha': 'abcdef0123456789',
+      'created_at': '2026-06-15T00:00:00Z',
+    });
+    final asset = GitHubUpdateAsset.fromActionArtifactJson(<String, Object?>{
+      'name': 'emtask-client-windows-x64',
+      'size_in_bytes': 42,
+      'archive_download_url': 'https://api.github.com/download',
+    });
+
+    expect(release.id, 'v1.0.0');
+    expect(release.assetCount, 1);
+    expect(run.id, '123');
+    expect(run.subtitle, contains('#7'));
+    expect(asset.requiresToken, isTrue);
+    expect(asset.sizeBytes, 42);
   });
 
   test('terminal modifiers convert soft keyboard input', () {

@@ -18,6 +18,7 @@ import 'src/models.dart';
 import 'src/panel_client.dart';
 import 'src/panel_key_manager.dart';
 import 'src/profile_store.dart';
+import 'src/updater/updater.dart';
 import 'src/windows_screen_capture.dart';
 
 const _appDisplayName = 'emtask Client';
@@ -223,6 +224,20 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         builder: (context) => _SettingsPage(
           settings: _settings,
           onChanged: _applySettings,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openUpdater() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => GitHubUpdatePage(
+          config: GitHubUpdatePageConfig(
+            initialRepository: 'owner/repo',
+            defaultNamePattern: _defaultClientUpdatePattern(),
+            appVersion: _appVersion,
+          ),
         ),
       ),
     );
@@ -1325,6 +1340,8 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
                   await _addPanel();
                 case _HomeMenuAction.importPanelQr:
                   await _showQrImportOptions();
+                case _HomeMenuAction.updater:
+                  await _openUpdater();
                 case _HomeMenuAction.settings:
                   await _openSettings();
               }
@@ -1356,6 +1373,14 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
                 ),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem<_HomeMenuAction>(
+                value: _HomeMenuAction.updater,
+                child: ListTile(
+                  leading: Icon(Icons.system_update_alt_outlined),
+                  title: Text('检查更新'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
               const PopupMenuItem<_HomeMenuAction>(
                 value: _HomeMenuAction.settings,
                 child: ListTile(
@@ -3533,6 +3558,7 @@ enum _HomeMenuAction {
   refreshPanels,
   addPanel,
   importPanelQr,
+  updater,
   settings,
 }
 
@@ -5258,6 +5284,19 @@ class _ShortcutActionChip extends StatelessWidget {
     }
     return Tooltip(message: tooltip!, child: button);
   }
+}
+
+String _defaultClientUpdatePattern() {
+  if (Platform.isWindows) {
+    return 'emtask-client-windows-x64*';
+  }
+  if (Platform.isLinux) {
+    return 'emtask-client-linux-x64*';
+  }
+  if (Platform.isAndroid) {
+    return 'emtask-client-android*';
+  }
+  return 'emtask-client-*';
 }
 
 class _SettingsPage extends StatefulWidget {

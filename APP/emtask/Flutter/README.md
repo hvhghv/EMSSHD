@@ -22,6 +22,7 @@
 - 终端界面采用接近 SSH 终端的黑底全屏主体布局，尽量让终端输出覆盖页面。
 - 新增/编辑会话时可勾选“支持 SFTP”；开启后终端界面右上角可切换到 SFTP 文件查看界面，再切回终端。
 - 支持通过 SFTP 快速浏览 `emtask` 所在目录并预览文件内容。
+- 内置 GitHub 更新模块，可按项目地址选择 Release 或 Actions 渠道，列出版本并查看/复制匹配安装包下载链接。
 - 支持响应式布局：窄屏使用单列会话列表，宽屏使用会话网格；详情页会根据宽度调整终端和 SFTP 内容布局。
 
 ## 运行
@@ -64,12 +65,24 @@ flutter run -d ios
 - 添加成功后客户端会请求面板 `/tasks`，按任务端口自动生成会话。
 - 在首页“面板”区域点击刷新按钮，可重新获取面板中的所有会话。
 - 点击右上角二维码按钮可导入面板：
-	- 移动端支持拍照实时扫描二维码。
-	- Windows 使用内置截图选择器，框选屏幕中的二维码区域后识别。
-	- 支持选择 `emtask_panel_connect.svg` 或包含 `emtask1|...` payload 的文本文件。
+  - 移动端支持拍照实时扫描二维码。
+  - Windows 使用内置截图选择器，框选屏幕中的二维码区域后识别。
+  - 支持选择 `emtask_panel_connect.svg` 或包含 `emtask1|...` payload 的文本文件。
 - 扫码导入后，客户端会在本机应用数据目录生成 Ed25519 私钥，只把公钥通过面板 Token/OTP 鉴权注册到服务端 `authorized_keys_file`；后续 SSH/SFTP 会优先使用该私钥登录。也可在面板菜单中手动点击“注册 SSH 公钥”重新注册或复用已有私钥。
 
 注意：面板 Token/OTP 二维码包含鉴权材料，应按密码保护。OTP 模式会根据二维码里的 secret 自动生成当前 TOTP 动态码。服务端配置 `panel_name` 后，扫码会用它作为默认面板名称。推荐服务端配置 `authorized_keys_file = authorized_keys` 并使用公钥注册流程。服务端若显式开启 `panel_qr_include_username` / `panel_qr_include_password`，扫码还会自动填入 SSH 默认用户名/密码；此时二维码应按 SSH 密码级别保护。
+
+## 更新检查
+
+首页右上角“更多操作” → “检查更新”可打开内置 GitHub 更新模块：
+
+- `Repo` 支持 `owner/repo`、`https://github.com/owner/repo` 或 SSH GitHub 地址。
+- `Release` 渠道读取 GitHub Releases 的 assets。
+- `Action` 渠道读取成功的 GitHub Actions runs 和 artifacts，通常需要 GitHub Token。
+- 可用 `NamePattern` 匹配当前平台安装包，例如 `emtask-client-windows-x64*`、`emtask-client-linux-x64*`、`emtask-client-android*`。
+- 当前模块先提供版本/资源发现和下载链接复制；安装包替换仍建议交给系统安装器或外部脚本处理。
+
+更新模块已抽离到 `lib/src/updater/`，入口为 `updater.dart`，复制该目录到其他 Flutter 项目后传入 `GitHubUpdatePageConfig` 即可复用；通用副本同步放在仓库的 `File/github-updater/flutter/`。详细移植方式见 `lib/src/updater/README.md` 或 `File/github-updater/flutter/README.md`。
 
 ## 文件查看说明
 

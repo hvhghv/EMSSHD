@@ -114,6 +114,7 @@ jobs:
           Copy-Item File/emtask-service/emtask-windows-service.ps1 $packageRoot/
           Copy-Item build-service-wrapper-msvc-${{ matrix.arch }}/emtask-service-wrapper.exe $packageRoot/
           Copy-Item File/emtask-service/emtask-service-wrapper.cs $packageRoot/
+          Copy-Item File/github-updater $packageRoot/github-updater -Recurse
           Copy-Item APP/emtask/README.md $packageRoot/emtask-README.md
           Copy-Item LICENSE $packageRoot/
 
@@ -220,6 +221,8 @@ jobs:
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
           cp build-service-wrapper-msys2-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
+          cp -a File/github-updater $package_root/
+          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
 
@@ -343,6 +346,8 @@ jobs:
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
           cp build-service-wrapper-cygwin-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
+          cp -a File/github-updater $package_root/
+          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
 
@@ -495,6 +500,8 @@ jobs:
             ln -s libsqlite3.so.0 $package_root/libsqlite3.so
           fi
           cp APP/emtask/emtask.conf.example $package_root/
+          cp -a File/github-updater $package_root/
+          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
           chmod +x $package_root/emtask
@@ -512,25 +519,49 @@ jobs:
           if-no-files-found: error
 
   emtask-server-linux-musl:
-    name: emtask server / linux musl ${{ matrix.arch }}
+    name: emtask server / linux musl ${{ matrix.linkage }} ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
+            linkage: dynamic
+            processor: x86_64
+            toolchain: x86_64-linux-musl
+            toolchain_asset: musl-toolchain-x86_64.tar.gz
+          - arch: x64
+            linkage: static
             processor: x86_64
             toolchain: x86_64-linux-musl
             toolchain_asset: musl-toolchain-x86_64.tar.gz
           - arch: arm
+            linkage: dynamic
+            processor: arm
+            toolchain: arm-linux-musleabi
+            toolchain_asset: musl-toolchain-arm.tar.gz
+          - arch: arm
+            linkage: static
             processor: arm
             toolchain: arm-linux-musleabi
             toolchain_asset: musl-toolchain-arm.tar.gz
           - arch: aarch64
+            linkage: dynamic
+            processor: aarch64
+            toolchain: aarch64-linux-musl
+            toolchain_asset: musl-toolchain-aarch64.tar.gz
+          - arch: aarch64
+            linkage: static
             processor: aarch64
             toolchain: aarch64-linux-musl
             toolchain_asset: musl-toolchain-aarch64.tar.gz
           - arch: riscv64
+            linkage: dynamic
+            processor: riscv64
+            toolchain: riscv64-linux-musl
+            toolchain_asset: musl-toolchain-riscv64.tar.gz
+          - arch: riscv64
+            linkage: static
             processor: riscv64
             toolchain: riscv64-linux-musl
             toolchain_asset: musl-toolchain-riscv64.tar.gz
@@ -544,7 +575,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build curl
+          sudo apt-get install -y build-essential cmake ninja-build curl file
 
       - name: Install musl cross toolchain
         run: |
@@ -553,7 +584,8 @@ jobs:
           asset=${{ matrix.toolchain_asset }}
           mkdir -p $RUNNER_TEMP/musl-cross
           archive=$RUNNER_TEMP/$asset
-          curl -L --fail --retry 5 --retry-all-errors --connect-timeout 30 -o $archive https://github.com/hvhghv/musl-gcc/releases/download/musl-gcc/$asset
+          musl_base=https://github.com/${{ github.repository_owner }}/musl-gcc/releases/download/musl-gcc
+          curl -L --fail --retry 5 --retry-all-errors --connect-timeout 30 -o $archive $musl_base/$asset
           test -s $archive
           tar -xzf $archive -C $RUNNER_TEMP/musl-cross
           compiler_path=$(find $RUNNER_TEMP/musl-cross -type f -name "${toolchain}-gcc" | head -n 1)
@@ -570,7 +602,7 @@ jobs:
 
       - name: Configure
         run: |
-          build_dir=build-emtask-linux-musl-${{ matrix.arch }}
+          build_dir=build-emtask-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           cmake_args=(
             -S .
             -B $build_dir
@@ -590,15 +622,29 @@ jobs:
             -DEMSSH_BUILD_POSIX_PASSWD_AUTH=OFF
             -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR=${{ github.workspace }}/Libs/external/mbedtls
           )
+          if [ '${{ matrix.linkage }}' = 'static' ]; then
+            cmake_args+=(-DCMAKE_EXE_LINKER_FLAGS=-static)
+          fi
           cmake ${cmake_args[@]}
 
       - name: Build
-        run: cmake --build build-emtask-linux-musl-${{ matrix.arch }} --target emtask --parallel
+        run: cmake --build build-emtask-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }} --target emtask --parallel
+
+      - name: Verify binary linkage
+        run: |
+          set -euo pipefail
+          binary=build-emtask-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}/emtask
+          file "$binary" | tee linkage-check.txt
+          if [ '${{ matrix.linkage }}' = 'static' ]; then
+            grep -qi 'statically linked' linkage-check.txt
+          else
+            grep -qi 'dynamically linked' linkage-check.txt
+          fi
 
       - name: Package
         run: |
-          package_name=emtask-server-linux-musl-${{ matrix.arch }}
-          build_dir=build-emtask-linux-musl-${{ matrix.arch }}
+          package_name=emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
+          build_dir=build-emtask-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           package_root=dist/$package_name
           rm -rf $package_root
           mkdir -p $package_root
@@ -607,6 +653,8 @@ jobs:
           $MUSL_CC -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/libsqlite3.so.0 -pthread
           ln -s libsqlite3.so.0 $package_root/libsqlite3.so
           cp APP/emtask/emtask.conf.example $package_root/
+          cp -a File/github-updater $package_root/
+          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
           chmod +x $package_root/emtask
@@ -617,10 +665,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emtask-server-linux-musl-${{ matrix.arch }}
+          name: emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           path: |
-            dist/emtask-server-linux-musl-${{ matrix.arch }}.tar.gz
-            dist/emtask-server-linux-musl-${{ matrix.arch }}.tar.gz.sha256
+            dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
+            dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
   emtask-client-android-apk:
@@ -1220,25 +1268,49 @@ jobs:
           if-no-files-found: error
 
   emsshd-linux-musl:
-    name: emsshd / linux musl ${{ matrix.arch }}
+    name: emsshd / linux musl ${{ matrix.linkage }} ${{ matrix.arch }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x64
+            linkage: dynamic
+            processor: x86_64
+            toolchain: x86_64-linux-musl
+            toolchain_asset: musl-toolchain-x86_64.tar.gz
+          - arch: x64
+            linkage: static
             processor: x86_64
             toolchain: x86_64-linux-musl
             toolchain_asset: musl-toolchain-x86_64.tar.gz
           - arch: arm
+            linkage: dynamic
+            processor: arm
+            toolchain: arm-linux-musleabi
+            toolchain_asset: musl-toolchain-arm.tar.gz
+          - arch: arm
+            linkage: static
             processor: arm
             toolchain: arm-linux-musleabi
             toolchain_asset: musl-toolchain-arm.tar.gz
           - arch: aarch64
+            linkage: dynamic
+            processor: aarch64
+            toolchain: aarch64-linux-musl
+            toolchain_asset: musl-toolchain-aarch64.tar.gz
+          - arch: aarch64
+            linkage: static
             processor: aarch64
             toolchain: aarch64-linux-musl
             toolchain_asset: musl-toolchain-aarch64.tar.gz
           - arch: riscv64
+            linkage: dynamic
+            processor: riscv64
+            toolchain: riscv64-linux-musl
+            toolchain_asset: musl-toolchain-riscv64.tar.gz
+          - arch: riscv64
+            linkage: static
             processor: riscv64
             toolchain: riscv64-linux-musl
             toolchain_asset: musl-toolchain-riscv64.tar.gz
@@ -1252,7 +1324,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build curl
+          sudo apt-get install -y build-essential cmake ninja-build curl file
 
       - name: Install musl cross toolchain
         run: |
@@ -1261,7 +1333,8 @@ jobs:
           asset=${{ matrix.toolchain_asset }}
           mkdir -p $RUNNER_TEMP/musl-cross
           archive=$RUNNER_TEMP/$asset
-          curl -L --fail --retry 5 --retry-all-errors --connect-timeout 30 -o $archive https://github.com/hvhghv/musl-gcc/releases/download/musl-gcc/$asset
+          musl_base=https://github.com/${{ github.repository_owner }}/musl-gcc/releases/download/musl-gcc
+          curl -L --fail --retry 5 --retry-all-errors --connect-timeout 30 -o $archive $musl_base/$asset
           test -s $archive
           tar -xzf $archive -C $RUNNER_TEMP/musl-cross
           compiler_path=$(find $RUNNER_TEMP/musl-cross -type f -name "${toolchain}-gcc" | head -n 1)
@@ -1281,7 +1354,7 @@ jobs:
       - name: Configure
         run: |
           toolchain=${{ matrix.toolchain }}
-          build_dir=build-emsshd-linux-musl-${{ matrix.arch }}
+          build_dir=build-emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           cmake_args=(
             -S .
             -B $build_dir
@@ -1293,7 +1366,6 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH=$MUSL_SYSROOT
             -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
-            -DCMAKE_EXE_LINKER_FLAGS=-static
             -DEMSSH_USE_MBEDTLS=ON
             -DEMSSH_USE_OPENSSL=OFF
             -DEMSSH_USE_WOLFSSL=OFF
@@ -1312,15 +1384,29 @@ jobs:
             -DEMSSH_LINUX_POSIX_STDIO_SERVER_BACKEND=mbedtls
             -DEMSSH_MBEDTLS_CLASSIC_SOURCE_DIR=${{ github.workspace }}/Libs/external/mbedtls
           )
+          if [ '${{ matrix.linkage }}' = 'static' ]; then
+            cmake_args+=(-DCMAKE_EXE_LINKER_FLAGS=-static)
+          fi
           cmake ${cmake_args[@]}
 
       - name: Build
-        run: cmake --build build-emsshd-linux-musl-${{ matrix.arch }} --target emssh_linux_posix_stdio_server --parallel
+        run: cmake --build build-emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }} --target emssh_linux_posix_stdio_server --parallel
+
+      - name: Verify binary linkage
+        run: |
+          set -euo pipefail
+          binary=build-emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}/emssh_linux_posix_stdio_server
+          file "$binary" | tee linkage-check.txt
+          if [ '${{ matrix.linkage }}' = 'static' ]; then
+            grep -qi 'statically linked' linkage-check.txt
+          else
+            grep -qi 'dynamically linked' linkage-check.txt
+          fi
 
       - name: Package
         run: |
-          package_name=emsshd-linux-musl-${{ matrix.arch }}
-          build_dir=build-emsshd-linux-musl-${{ matrix.arch }}
+          package_name=emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
+          build_dir=build-emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           package_root=dist/$package_name
           rm -rf $package_root
           mkdir -p $package_root/bin $package_root/config $package_root/docs $package_root/init.d
@@ -1347,8 +1433,38 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emsshd-linux-musl-${{ matrix.arch }}
+          name: emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}
           path: |
-            dist/emsshd-linux-musl-${{ matrix.arch }}.tar.gz
-            dist/emsshd-linux-musl-${{ matrix.arch }}.tar.gz.sha256
+            dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
+            dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
+
+  release-emtask-packages:
+    name: release / emtask packages
+    runs-on: ubuntu-22.04
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: write
+    needs:
+      - emtask-server-windows-msvc
+      - emtask-server-windows-msys2
+      - emtask-server-windows-cygwin
+      - emtask-server-linux-glibc
+      - emtask-server-linux-musl
+      - emtask-client-android-apk
+      - emtask-client-windows
+      - emtask-client-linux
+
+    steps:
+      - name: Download emtask artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: emtask-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**
+          fail_on_unmatched_files: true
