@@ -1250,7 +1250,7 @@ jobs:
 
           cp $build_dir/emssh_linux_posix_stdio_server $package_root/bin/emsshd
           cp APP/emsshd/Linux/init.d/S98emsshd $package_root/init.d/
-          cp sshd_config $package_root/config/sshd_config.example
+          cp File/ssh/sshd_config $package_root/config/sshd_config.example
           cp LICENSE $package_root/docs/
           cat > $package_root/docs/README-linux.txt <<'EOF'
           emsshd Linux package
@@ -1452,7 +1452,7 @@ jobs:
 
           cp $build_dir/emssh_linux_posix_stdio_server $package_root/bin/emsshd
           cp APP/emsshd/Linux/init.d/S98emsshd $package_root/init.d/
-          cp sshd_config $package_root/config/sshd_config.example
+          cp File/ssh/sshd_config $package_root/config/sshd_config.example
           cp LICENSE $package_root/docs/
           cat > $package_root/docs/README-linux.txt <<'EOF'
           emsshd Linux musl package
@@ -1478,8 +1478,8 @@ jobs:
             dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
 
-  release-emtask-packages:
-    name: release / emtask packages
+  release-packages:
+    name: release / packages
     runs-on: ubuntu-22.04
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     permissions:
@@ -1493,12 +1493,17 @@ jobs:
       - emtask-client-android-apk
       - emtask-client-windows
       - emtask-client-linux
+      - emsshd-windows-msvc
+      - emsshd-windows-msys2
+      - emsshd-windows-cygwin
+      - emsshd-linux-glibc
+      - emsshd-linux-musl
 
     steps:
-      - name: Download emtask artifacts
+      - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: emtask-*
+          pattern: em*-*
           merge-multiple: true
           path: release-artifacts
 
