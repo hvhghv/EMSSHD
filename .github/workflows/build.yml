@@ -267,7 +267,7 @@ jobs:
 
   emtask-server-windows-cygwin:
     name: emtask server / windows cygwin x64
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       CYGWIN_NOWINPATH: 1
       SHELLOPTS: igncr
@@ -346,7 +346,8 @@ jobs:
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
           cp build-service-wrapper-cygwin-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
-          cp -a File/github-updater $package_root/
+          mkdir -p $package_root/github-updater
+          cp -R File/github-updater/. $package_root/github-updater/
           chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
@@ -735,7 +736,7 @@ jobs:
 
   emtask-client-windows:
     name: emtask client / windows x64
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
@@ -847,7 +848,7 @@ jobs:
 
   emsshd-windows-msvc:
     name: emsshd / windows msvc ${{ matrix.arch }}
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
