@@ -7,6 +7,8 @@
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_error.h"
 
+#include "openssh_key.h"
+
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
 
 #include <mbedtls/aes.h>
@@ -1305,18 +1307,42 @@ static int mbedtls_hostkey_import_private_auto(
         int rc;
         int has_nul;
         uint8_t pem_buf[SSH_MBEDTLS_LEGACY_PEM_PARSE_MAX_BYTES + 1u];
+        size_t pem_len;
+        int openssh_status;
         size_t i;
 
         mbedtls_pk_init(&parsed);
-        rc = mbedtls_pk_parse_key(
-            &parsed,
+        openssh_status = emssh_mbedtls_openssh_rsa_private_to_pkcs1_pem(
             private_key_data,
             private_key_data_len,
-            NULL,
-            0u,
-            state->drbg_ready ? mbedtls_ctr_drbg_random : NULL,
-            state->drbg_ready ? &state->drbg : NULL);
-        if (rc != 0) {
+            pem_buf,
+            sizeof(pem_buf),
+            &pem_len);
+        if (openssh_status == SSH_OK) {
+            rc = mbedtls_pk_parse_key(
+                &parsed,
+                pem_buf,
+                pem_len + 1u,
+                NULL,
+                0u,
+                state->drbg_ready ? mbedtls_ctr_drbg_random : NULL,
+                state->drbg_ready ? &state->drbg : NULL);
+            secure_zero_bytes(pem_buf, pem_len + 1u);
+        } else {
+            if (openssh_status != SSH_ERR_NOT_FOUND) {
+                mbedtls_pk_free(&parsed);
+                return openssh_status;
+            }
+            rc = mbedtls_pk_parse_key(
+                &parsed,
+                private_key_data,
+                private_key_data_len,
+                NULL,
+                0u,
+                state->drbg_ready ? mbedtls_ctr_drbg_random : NULL,
+                state->drbg_ready ? &state->drbg : NULL);
+        }
+        if (rc != 0 && openssh_status == SSH_ERR_NOT_FOUND) {
             has_nul = 0;
             for (i = 0u; i < private_key_data_len; ++i) {
                 if (private_key_data[i] == 0u) {

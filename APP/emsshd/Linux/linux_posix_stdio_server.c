@@ -1588,6 +1588,7 @@ static int import_hostkey_auto_with_kind(
     }
 
     if (bytes_contain_ascii(private_key_data, private_key_data_len, "BEGIN RSA PRIVATE KEY") ||
+        bytes_contain_ascii(private_key_data, private_key_data_len, "BEGIN OPENSSH PRIVATE KEY") ||
         bytes_contain_ascii(private_key_data, private_key_data_len, "BEGIN PRIVATE KEY")) {
         order = rsa_first_order;
         order_len = sizeof(rsa_first_order) / sizeof(rsa_first_order[0]);
@@ -1796,6 +1797,7 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
     int status;
     mbedtls_hostkey_kind_t detected_kind;
     int has_pem_rsa;
+    int has_pem_openssh;
     int has_pem_pkcs8;
     int has_pem_ec;
 
@@ -1824,6 +1826,7 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
             return SSH_ERR_INVALID_ARGUMENT;
         }
         has_pem_rsa = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN RSA PRIVATE KEY");
+        has_pem_openssh = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN OPENSSH PRIVATE KEY");
         has_pem_pkcs8 = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN PRIVATE KEY");
         has_pem_ec = bytes_contain_ascii(hostkey_file_data, hostkey_file_len, "BEGIN EC PRIVATE KEY");
         memset(&bootstrap_crypto_ctx, 0, sizeof(bootstrap_crypto_ctx));
@@ -1840,10 +1843,11 @@ static int prepare_mbedtls_hostkey_if_needed(app_shared_t *shared)
         if (status != SSH_OK) {
             fprintf(
                 stderr,
-                "diag: hostkey import failed: path=%s bytes=%lu pem-rsa=%d pem-pkcs8=%d pem-ec=%d status=%s\n",
+                "diag: hostkey import failed: path=%s bytes=%lu pem-rsa=%d pem-openssh=%d pem-pkcs8=%d pem-ec=%d status=%s\n",
                 shared->hostkey_path_from_config != NULL ? shared->hostkey_path_from_config : "(null)",
                 (unsigned long)hostkey_file_len,
                 has_pem_rsa,
+                has_pem_openssh,
                 has_pem_pkcs8,
                 has_pem_ec,
                 ssh_status_string(status));

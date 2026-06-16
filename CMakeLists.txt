@@ -144,6 +144,7 @@ endif()
 add_library(emssh STATIC
     $<$<AND:$<BOOL:${EMSSH_USE_MBEDTLS}>,$<BOOL:${EMSSH_MBEDTLS_USE_PSA}>>:src/crypto/mbedtls/ssh_crypto_mbedtls.c>
     $<$<AND:$<BOOL:${EMSSH_USE_MBEDTLS}>,$<NOT:$<BOOL:${EMSSH_MBEDTLS_USE_PSA}>>>:src/crypto/mbedtls/ssh_crypto_mbedtls_legacy.c>
+    $<$<BOOL:${EMSSH_USE_MBEDTLS}>:src/crypto/mbedtls/openssh_key.c>
     $<$<BOOL:${EMSSH_USE_OPENSSL}>:src/crypto/openssl/ssh_crypto_openssl.c>
     $<$<BOOL:${EMSSH_USE_WOLFSSL}>:src/crypto/wolfssl/ssh_crypto_wolfssl.c>
     $<$<BOOL:${EMSSH_BUILD_STDIO_FS}>:src/platform/stdio_fs.c>
@@ -676,6 +677,10 @@ if(EMSSH_BUILD_TESTS)
         add_executable(test_mbedtls_crypto tests/test_mbedtls_crypto.c)
         target_link_libraries(test_mbedtls_crypto PRIVATE emssh)
         add_test(NAME test_mbedtls_crypto COMMAND test_mbedtls_crypto)
+
+        add_executable(test_mbedtls_openssh_key tests/test_mbedtls_openssh_key.c)
+        target_link_libraries(test_mbedtls_openssh_key PRIVATE emssh)
+        add_test(NAME test_mbedtls_openssh_key COMMAND test_mbedtls_openssh_key)
 
         add_executable(test_mbedtls_transport tests/test_mbedtls_transport.c)
         target_link_libraries(test_mbedtls_transport PRIVATE emssh)

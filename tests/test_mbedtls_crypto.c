@@ -157,47 +157,125 @@ static int rsa_signature_blob_encode(
     return SSH_OK;
 }
 
-static int der_to_rsa_private_pem(
+typedef struct rsa_private_der_views {
+    ssh_string_view_t n;
+    ssh_string_view_t e;
+    ssh_string_view_t d;
+    ssh_string_view_t p;
+    ssh_string_view_t q;
+    ssh_string_view_t iqmp;
+} rsa_private_der_views_t;
+
+static int rsa_private_der_parse(
     const uint8_t *der,
     size_t der_len,
+    rsa_private_der_views_t *key)
+{
+    ssh_string_view_t version;
+    ssh_string_view_t ignored;
+    size_t offset;
+    size_t sequence_len;
+    size_t sequence_end;
+    int status;
+
+    if (der == NULL || key == NULL || der_len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    memset(key, 0, sizeof(*key));
+    offset = 0u;
+    if (der[offset++] != 0x30u) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+    status = der_get_length(der, der_len, &offset, &sequence_len);
+    if (status != SSH_OK) {
+        return status;
+    }
+    sequence_end = offset + sequence_len;
+    if (sequence_end > der_len) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+
+    status = der_get_integer_view(der, sequence_end, &offset, &version);
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->n);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->e);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->d);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->p);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->q);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &ignored);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &ignored);
+    }
+    if (status == SSH_OK) {
+        status = der_get_integer_view(der, sequence_end, &offset, &key->iqmp);
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+    if (version.len != 1u || version.data[0] != 0u || offset != sequence_end) {
+        return SSH_ERR_MALFORMED_PACKET;
+    }
+
+    return SSH_OK;
+}
+
+static int pem_wrap_base64(
+    const uint8_t *data,
+    size_t data_len,
+    const char *begin,
+    const char *end,
     char *pem,
     size_t pem_capacity,
     size_t *pem_len)
 {
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    static const char begin[] = "-----BEGIN RSA PRIVATE KEY-----\n";
-    static const char end[] = "-----END RSA PRIVATE KEY-----\n";
     size_t i;
     size_t used;
     size_t line;
+    size_t begin_len;
+    size_t end_len;
 
-    if (der == NULL || pem == NULL || pem_len == NULL) {
+    if (data == NULL || begin == NULL || end == NULL || pem == NULL || pem_len == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    begin_len = strlen(begin);
+    end_len = strlen(end);
     used = 0u;
-    if (sizeof(begin) - 1u + sizeof(end) - 1u + 1u > pem_capacity) {
+    if (begin_len + end_len + 1u > pem_capacity) {
         return SSH_ERR_BUFFER_TOO_SMALL;
     }
-    memcpy(pem + used, begin, sizeof(begin) - 1u);
-    used += sizeof(begin) - 1u;
+    memcpy(pem + used, begin, begin_len);
+    used += begin_len;
     line = 0u;
 
-    for (i = 0u; i < der_len; i += 3u) {
+    for (i = 0u; i < data_len; i += 3u) {
         uint32_t triple = 0u;
-        size_t rem = der_len - i;
+        size_t rem = data_len - i;
         if (rem > 3u) {
             rem = 3u;
         }
-        triple |= ((uint32_t)der[i]) << 16;
+        triple |= ((uint32_t)data[i]) << 16;
         if (rem > 1u) {
-            triple |= ((uint32_t)der[i + 1u]) << 8;
+            triple |= ((uint32_t)data[i + 1u]) << 8;
         }
         if (rem > 2u) {
-            triple |= (uint32_t)der[i + 2u];
+            triple |= (uint32_t)data[i + 2u];
         }
 
-        if (used + 4u + 2u + (sizeof(end) - 1u) + 1u > pem_capacity) {
+        if (used + 4u + 2u + end_len + 1u > pem_capacity) {
             return SSH_ERR_BUFFER_TOO_SMALL;
         }
 
@@ -215,11 +293,147 @@ static int der_to_rsa_private_pem(
     if (line != 0u) {
         pem[used++] = '\n';
     }
-    memcpy(pem + used, end, sizeof(end) - 1u);
-    used += sizeof(end) - 1u;
+    memcpy(pem + used, end, end_len);
+    used += end_len;
     pem[used] = '\0';
     *pem_len = used;
     return SSH_OK;
+}
+
+static int der_to_rsa_private_pem(
+    const uint8_t *der,
+    size_t der_len,
+    char *pem,
+    size_t pem_capacity,
+    size_t *pem_len)
+{
+    return pem_wrap_base64(
+        der,
+        der_len,
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "-----END RSA PRIVATE KEY-----\n",
+        pem,
+        pem_capacity,
+        pem_len);
+}
+
+static int rsa_private_der_to_openssh_pem(
+    const uint8_t *der,
+    size_t der_len,
+    char *pem,
+    size_t pem_capacity,
+    size_t *pem_len)
+{
+    static const uint8_t magic[] = "openssh-key-v1";
+    static const uint8_t empty[] = "";
+    rsa_private_der_views_t key;
+    uint8_t public_blob[512];
+    uint8_t private_blob[2048];
+    uint8_t openssh_blob[3072];
+    ssh_buffer_t public_buf;
+    ssh_buffer_t private_buf;
+    ssh_buffer_t outer;
+    size_t pad_len;
+    size_t i;
+    int status;
+
+    if (der == NULL || pem == NULL || pem_len == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    status = rsa_private_der_parse(der, der_len, &key);
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    ssh_buffer_init(&public_buf, public_blob, sizeof(public_blob));
+    status = ssh_buffer_put_cstring(&public_buf, "ssh-rsa");
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&public_buf, key.e.data, key.e.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&public_buf, key.n.data, key.n.len);
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    ssh_buffer_init(&private_buf, private_blob, sizeof(private_blob));
+    status = ssh_buffer_put_u32(&private_buf, 0x12345678u);
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_u32(&private_buf, 0x12345678u);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_cstring(&private_buf, "ssh-rsa");
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.n.data, key.n.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.e.data, key.e.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.d.data, key.d.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.iqmp.data, key.iqmp.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.p.data, key.p.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_mpint_positive(&private_buf, key.q.data, key.q.len);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_cstring(&private_buf, "emssh-test");
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    pad_len = 8u - (ssh_buffer_len(&private_buf) % 8u);
+    if (pad_len == 0u) {
+        pad_len = 8u;
+    }
+    for (i = 1u; status == SSH_OK && i <= pad_len; ++i) {
+        status = ssh_buffer_put_u8(&private_buf, (uint8_t)i);
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    ssh_buffer_init(&outer, openssh_blob, sizeof(openssh_blob));
+    status = ssh_buffer_put_bytes(&outer, magic, sizeof(magic));
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_cstring(&outer, "none");
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_cstring(&outer, "none");
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_string(&outer, empty, 0u);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_u32(&outer, 1u);
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_string(&outer, public_blob, ssh_buffer_len(&public_buf));
+    }
+    if (status == SSH_OK) {
+        status = ssh_buffer_put_string(&outer, private_blob, ssh_buffer_len(&private_buf));
+    }
+    if (status != SSH_OK) {
+        return status;
+    }
+
+    return pem_wrap_base64(
+        openssh_blob,
+        ssh_buffer_len(&outer),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        "-----END OPENSSH PRIVATE KEY-----\n",
+        pem,
+        pem_capacity,
+        pem_len);
 }
 
 int main(void)
@@ -247,8 +461,11 @@ int main(void)
     uint8_t rsa_legacy_signature_blob[256];
     uint8_t rsa_private_der[2048];
     char rsa_private_pem[3072];
+    char rsa_private_openssh_pem[4096];
     uint8_t rsa_hostkey_blob[EMSSH_MAX_HOST_KEY_BLOB];
+    uint8_t rsa_openssh_hostkey_blob[EMSSH_MAX_HOST_KEY_BLOB];
     uint8_t rsa_hostkey_signature[EMSSH_MAX_SIGNATURE];
+    uint8_t rsa_openssh_hostkey_signature[EMSSH_MAX_SIGNATURE];
     uint8_t hostkey_private[128];
     uint8_t hash[EMSSH_MAX_EXCHANGE_HASH];
     uint8_t signature[EMSSH_MAX_SIGNATURE];
@@ -273,8 +490,11 @@ int main(void)
     size_t rsa_legacy_signature_blob_len;
     size_t rsa_private_der_len;
     size_t rsa_private_pem_len;
+    size_t rsa_private_openssh_pem_len;
     size_t rsa_hostkey_blob_len;
+    size_t rsa_openssh_hostkey_blob_len;
     size_t rsa_hostkey_signature_len;
+    size_t rsa_openssh_hostkey_signature_len;
     size_t hostkey_private_len;
     size_t hash_len;
     size_t signature_len;
@@ -489,6 +709,12 @@ int main(void)
                 rsa_private_pem,
                 sizeof(rsa_private_pem),
                 &rsa_private_pem_len) == SSH_OK);
+            CHECK(rsa_private_der_to_openssh_pem(
+                rsa_private_der,
+                rsa_private_der_len,
+                rsa_private_openssh_pem,
+                sizeof(rsa_private_openssh_pem),
+                &rsa_private_openssh_pem_len) == SSH_OK);
             CHECK(psa_export_public_key(rsa_key, rsa_public_der, sizeof(rsa_public_der), &rsa_public_der_len) == PSA_SUCCESS);
             CHECK(psa_sign_message(
                 rsa_key,
@@ -567,6 +793,37 @@ int main(void)
                 hash_len,
                 rsa_hostkey_signature,
                 rsa_hostkey_signature_len) == SSH_OK);
+
+            CHECK(imported_crypto->hostkey_import_private_auto(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                (const uint8_t *)rsa_private_openssh_pem,
+                rsa_private_openssh_pem_len) == SSH_OK);
+            CHECK(imported_crypto->hostkey_public(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                rsa_openssh_hostkey_blob,
+                sizeof(rsa_openssh_hostkey_blob),
+                &rsa_openssh_hostkey_blob_len) == SSH_OK);
+            CHECK(rsa_openssh_hostkey_blob_len == rsa_hostkey_blob_len);
+            CHECK(memcmp(rsa_openssh_hostkey_blob, rsa_hostkey_blob, rsa_hostkey_blob_len) == 0);
+            CHECK(imported_crypto->hostkey_sign(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                hash,
+                hash_len,
+                rsa_openssh_hostkey_signature,
+                sizeof(rsa_openssh_hostkey_signature),
+                &rsa_openssh_hostkey_signature_len) == SSH_OK);
+            CHECK(imported_crypto->publickey_verify(
+                imported_crypto->ctx,
+                sv("rsa-sha2-256"),
+                rsa_openssh_hostkey_blob,
+                rsa_openssh_hostkey_blob_len,
+                hash,
+                hash_len,
+                rsa_openssh_hostkey_signature,
+                rsa_openssh_hostkey_signature_len) == SSH_OK);
 
             CHECK(psa_destroy_key(rsa_key) == PSA_SUCCESS);
             rsa_key = 0;

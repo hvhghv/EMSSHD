@@ -7,6 +7,8 @@
 #include "emssh/ssh_config.h"
 #include "emssh/ssh_error.h"
 
+#include "openssh_key.h"
+
 #include <psa/crypto.h>
 
 static int view_eq(ssh_string_view_t view, const char *value)
@@ -1920,6 +1922,14 @@ static int import_rsa_hostkey_auto(
         der,
         sizeof(der),
         &der_len);
+    if (status == SSH_ERR_NOT_FOUND) {
+        status = emssh_mbedtls_openssh_rsa_private_to_pkcs1_der(
+            private_key_data,
+            private_key_data_len,
+            der,
+            sizeof(der),
+            &der_len);
+    }
     if (status == SSH_ERR_NOT_FOUND) {
         status = decode_pem_block(
             private_key_data,
