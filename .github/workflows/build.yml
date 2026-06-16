@@ -111,14 +111,15 @@ jobs:
           Copy-Item build-emtask-msvc-${{ matrix.arch }}/Release/emtask.exe $packageRoot/
           Copy-Item build-sqlite-msvc-${{ matrix.arch }}/Release/sqlite3.dll $packageRoot/
           Copy-Item APP/emtask/emtask.conf.example $packageRoot/
+          Copy-Item APP/emtask/install.ps1 $packageRoot/install.ps1
           Copy-Item File/emtask-service/emtask-windows-service.ps1 $packageRoot/
           Copy-Item build-service-wrapper-msvc-${{ matrix.arch }}/emtask-service-wrapper.exe $packageRoot/
           Copy-Item File/emtask-service/emtask-service-wrapper.cs $packageRoot/
-          Copy-Item File/github-updater $packageRoot/github-updater -Recurse
           Copy-Item APP/emtask/README.md $packageRoot/emtask-README.md
           Copy-Item LICENSE $packageRoot/
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -143,6 +144,7 @@ jobs:
           path: |
             dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip
             dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emtask-server-windows-msys2:
@@ -218,11 +220,10 @@ jobs:
           cp build-emtask-msys2-x64/emtask.exe $package_root/
           cp build-sqlite-msys2-x64/sqlite3.dll $package_root/
           cp APP/emtask/emtask.conf.example $package_root/
+          cp APP/emtask/install.ps1 $package_root/install.ps1
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
           cp build-service-wrapper-msys2-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
-          cp -a File/github-updater $package_root/
-          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
 
@@ -252,7 +253,8 @@ jobs:
           $packageName = 'emtask-server-windows-msys2-x64'
           $packageRoot = 'dist/' + $packageName
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -263,6 +265,7 @@ jobs:
           path: |
             dist/emtask-server-windows-msys2-x64.zip
             dist/emtask-server-windows-msys2-x64.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emtask-server-windows-cygwin:
@@ -343,12 +346,10 @@ jobs:
           cp build-emtask-cygwin-x64/emtask.exe $package_root/
           cp build-sqlite-cygwin-x64/sqlite3.dll $package_root/
           cp APP/emtask/emtask.conf.example $package_root/
+          cp APP/emtask/install.ps1 $package_root/install.ps1
           cp File/emtask-service/emtask-windows-service.ps1 $package_root/
           cp build-service-wrapper-cygwin-x64/emtask-service-wrapper.exe $package_root/
           cp File/emtask-service/emtask-service-wrapper.cs $package_root/
-          mkdir -p $package_root/github-updater
-          cp -R File/github-updater/. $package_root/github-updater/
-          chmod +x $package_root/github-updater/sh/github-update.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
 
@@ -390,7 +391,8 @@ jobs:
           $packageName = 'emtask-server-windows-cygwin-x64'
           $packageRoot = 'dist/' + $packageName
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -401,6 +403,7 @@ jobs:
           path: |
             dist/emtask-server-windows-cygwin-x64.zip
             dist/emtask-server-windows-cygwin-x64.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emtask-server-linux-glibc:
@@ -501,13 +504,14 @@ jobs:
             ln -s libsqlite3.so.0 $package_root/libsqlite3.so
           fi
           cp APP/emtask/emtask.conf.example $package_root/
-          cp -a File/github-updater $package_root/
-          chmod +x $package_root/github-updater/sh/github-update.sh
+          cp APP/emtask/Linux/install.sh $package_root/install.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
-          chmod +x $package_root/emtask
+          chmod +x $package_root/emtask $package_root/install.sh
 
-          tar -czf dist/$package_name.tar.gz -C dist $package_name
+          cp File/github-updater/sh/github-update.sh dist/github-update.sh
+          chmod +x dist/github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -517,6 +521,7 @@ jobs:
           path: |
             dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz
             dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
+            dist/github-update.sh
           if-no-files-found: error
 
   emtask-server-linux-musl:
@@ -654,13 +659,14 @@ jobs:
           $MUSL_CC -O2 -fPIC -shared -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -Wl,-soname,libsqlite3.so.0 Libs/external/sqlite/src/sqlite3.c -o $package_root/libsqlite3.so.0 -pthread
           ln -s libsqlite3.so.0 $package_root/libsqlite3.so
           cp APP/emtask/emtask.conf.example $package_root/
-          cp -a File/github-updater $package_root/
-          chmod +x $package_root/github-updater/sh/github-update.sh
+          cp APP/emtask/Linux/install.sh $package_root/install.sh
           cp APP/emtask/README.md $package_root/emtask-README.md
           cp LICENSE $package_root/
-          chmod +x $package_root/emtask
+          chmod +x $package_root/emtask $package_root/install.sh
 
-          tar -czf dist/$package_name.tar.gz -C dist $package_name
+          cp File/github-updater/sh/github-update.sh dist/github-update.sh
+          chmod +x dist/github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -670,6 +676,7 @@ jobs:
           path: |
             dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
             dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
+            dist/github-update.sh
           if-no-files-found: error
 
   emtask-client-android-apk:
@@ -723,15 +730,12 @@ jobs:
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk dist/emtask-client-android-release.apk
-          sha256sum dist/emtask-client-android-release.apk > dist/emtask-client-android-release.apk.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: emtask-client-android-apk
-          path: |
-            APP/emtask/Flutter/dist/emtask-client-android-release.apk
-            APP/emtask/Flutter/dist/emtask-client-android-release.apk.sha256
+          path: APP/emtask/Flutter/dist/emtask-client-android-release.apk
           if-no-files-found: error
 
   emtask-client-windows:
@@ -774,9 +778,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $packageRoot, $packageRoot/docs | Out-Null
           Copy-Item $bundleSource/* $packageRoot -Recurse -Force
           Copy-Item $project/README.md $packageRoot/docs/emtask-client-README.md
+          Copy-Item $project/install.ps1 $packageRoot/install.ps1
           Copy-Item LICENSE $packageRoot/docs/
 
-          Compress-Archive -Path $packageRoot -DestinationPath $project/dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 $project/dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, $project/dist/github-update.ps1 -DestinationPath $project/dist/$packageName.zip -Force
           (Get-FileHash $project/dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline $project/dist/$packageName.zip.sha256
 
@@ -787,6 +793,7 @@ jobs:
           path: |
             APP/emtask/Flutter/dist/emtask-client-windows-x64.zip
             APP/emtask/Flutter/dist/emtask-client-windows-x64.zip.sha256
+            APP/emtask/Flutter/dist/github-update.ps1
           if-no-files-found: error
 
   emtask-client-linux:
@@ -832,9 +839,13 @@ jobs:
           mkdir -p $package_root/docs
           cp -a $bundle_source/. $package_root/
           cp $project/README.md $package_root/docs/emtask-client-README.md
+          cp $project/install.sh $package_root/install.sh
           cp LICENSE $package_root/docs/
+          chmod +x $package_root/install.sh
 
-          tar -czf $project/dist/$package_name.tar.gz -C $project/dist $package_name
+          cp File/github-updater/sh/github-update.sh $project/dist/github-update.sh
+          chmod +x $project/dist/github-update.sh
+          tar -czf $project/dist/$package_name.tar.gz -C $project/dist $package_name github-update.sh
           sha256sum $project/dist/$package_name.tar.gz > $project/dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -844,6 +855,7 @@ jobs:
           path: |
             APP/emtask/Flutter/dist/emtask-client-linux-x64.tar.gz
             APP/emtask/Flutter/dist/emtask-client-linux-x64.tar.gz.sha256
+            APP/emtask/Flutter/dist/github-update.sh
           if-no-files-found: error
 
   emsshd-windows-msvc:
@@ -901,6 +913,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $packageRoot/bin, $packageRoot/docs | Out-Null
 
           Copy-Item build-emsshd-msvc-${{ matrix.arch }}/Release/emssh_concurrent_server.exe $packageRoot/bin/emsshd.exe
+          Copy-Item APP/emsshd/install.ps1 $packageRoot/install.ps1
           Copy-Item LICENSE $packageRoot/docs/
 
           @'
@@ -914,7 +927,8 @@ jobs:
             emsshd.exe <port> <root-dir> <username> <password> [hostkey-file] [--max-workers N] [--max-connections N] [--timeout-ms N]
           '@ | Set-Content -Encoding UTF8 $packageRoot/docs/README-windows.txt
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -925,6 +939,7 @@ jobs:
           path: |
             dist/emsshd-windows-msvc-${{ matrix.arch }}.zip
             dist/emsshd-windows-msvc-${{ matrix.arch }}.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emsshd-windows-msys2:
@@ -982,6 +997,7 @@ jobs:
           mkdir -p $package_root/bin $package_root/docs
 
           cp build-emsshd-msys2-x64/emssh_concurrent_server.exe $package_root/bin/emsshd.exe
+          cp APP/emsshd/install.ps1 $package_root/install.ps1
           cp LICENSE $package_root/docs/
           cat > $package_root/docs/README-windows.txt <<'EOF'
           emsshd Windows MSYS2 package
@@ -1011,7 +1027,8 @@ jobs:
           $packageName = 'emsshd-windows-msys2-x64'
           $packageRoot = 'dist/' + $packageName
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -1022,6 +1039,7 @@ jobs:
           path: |
             dist/emsshd-windows-msys2-x64.zip
             dist/emsshd-windows-msys2-x64.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emsshd-windows-cygwin:
@@ -1081,6 +1099,7 @@ jobs:
           mkdir -p $package_root/bin $package_root/docs
 
           cp build-emsshd-cygwin-x64/emssh_concurrent_server.exe $package_root/bin/emsshd.exe
+          cp APP/emsshd/install.ps1 $package_root/install.ps1
           cp LICENSE $package_root/docs/
           cat > $package_root/docs/README-windows.txt <<'EOF'
           emsshd Windows Cygwin package
@@ -1122,7 +1141,8 @@ jobs:
           $packageName = 'emsshd-windows-cygwin-x64'
           $packageRoot = 'dist/' + $packageName
 
-          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
+          Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
+          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -1133,6 +1153,7 @@ jobs:
           path: |
             dist/emsshd-windows-cygwin-x64.zip
             dist/emsshd-windows-cygwin-x64.zip.sha256
+            dist/github-update.ps1
           if-no-files-found: error
 
   emsshd-linux-glibc:
@@ -1256,6 +1277,7 @@ jobs:
           mkdir -p $package_root/bin $package_root/config $package_root/docs $package_root/init.d
 
           cp $build_dir/emssh_linux_posix_stdio_server $package_root/bin/emsshd
+          cp APP/emsshd/Linux/install.sh $package_root/install.sh
           cp APP/emsshd/Linux/init.d/S98emsshd $package_root/init.d/
           cp File/ssh/sshd_config $package_root/config/sshd_config.example
           cp LICENSE $package_root/docs/
@@ -1269,9 +1291,11 @@ jobs:
           Basic usage:
             emsshd --sshd-config <path> --passwd-file <path> --shadow-file <path> --session-mode auto
           EOF
-          chmod +x $package_root/bin/emsshd $package_root/init.d/S98emsshd
+          chmod +x $package_root/bin/emsshd $package_root/init.d/S98emsshd $package_root/install.sh
 
-          tar -czf dist/$package_name.tar.gz -C dist $package_name
+          cp File/github-updater/sh/github-update.sh dist/github-update.sh
+          chmod +x dist/github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -1281,6 +1305,7 @@ jobs:
           path: |
             dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz
             dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
+            dist/github-update.sh
           if-no-files-found: error
 
   emsshd-linux-musl:
@@ -1465,6 +1490,7 @@ jobs:
           mkdir -p $package_root/bin $package_root/config $package_root/docs $package_root/init.d
 
           cp $build_dir/emssh_linux_posix_stdio_server $package_root/bin/emsshd
+          cp APP/emsshd/Linux/install.sh $package_root/install.sh
           cp APP/emsshd/Linux/init.d/S98emsshd $package_root/init.d/
           cp File/ssh/sshd_config $package_root/config/sshd_config.example
           cp LICENSE $package_root/docs/
@@ -1478,9 +1504,11 @@ jobs:
           Basic usage:
             emsshd --sshd-config <path> --passwd-file <path> --shadow-file <path> --session-mode auto
           EOF
-          chmod +x $package_root/bin/emsshd $package_root/init.d/S98emsshd
+          chmod +x $package_root/bin/emsshd $package_root/init.d/S98emsshd $package_root/install.sh
 
-          tar -czf dist/$package_name.tar.gz -C dist $package_name
+          cp File/github-updater/sh/github-update.sh dist/github-update.sh
+          chmod +x dist/github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -1490,6 +1518,7 @@ jobs:
           path: |
             dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
             dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
+            dist/github-update.sh
           if-no-files-found: error
 
   release-packages:
@@ -1524,5 +1553,8 @@ jobs:
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/**
+          files: |
+            release-artifacts/*.zip
+            release-artifacts/*.tar.gz
+            release-artifacts/*.apk
           fail_on_unmatched_files: true

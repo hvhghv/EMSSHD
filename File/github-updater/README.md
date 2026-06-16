@@ -4,9 +4,9 @@
 
 ## 目录结构
 
-- `ps1/`：PowerShell 更新脚本，适合 Windows 和 PowerShell 环境。
+- `ps1/`：PowerShell 更新脚本，适合 Windows 和 PowerShell 环境，含 `github-update.ps1`。
 - `flutter/`：Flutter/Dart 内置更新页面和 GitHub API 客户端。
-- `sh/`：POSIX shell 更新脚本，适合 Linux/macOS 环境。
+- `sh/`：POSIX shell 更新脚本，适合 Linux/macOS 环境，含 `github-update.sh`。
 - `SKILL.md`：技能包入口，用于“先分析 APP 更新方案、用户确认后再改代码”的接入流程。
 
 三套实现都以 GitHub 项目地址作为参数，支持：
@@ -19,6 +19,15 @@
 
 - `release` / `Release`：读取 GitHub Releases 和 assets。
 - `action` / `Action`：读取成功的 GitHub Actions runs 和 artifacts。
+
+脚本实现支持 `list`、`download`、`install`、`uninstall`。`install` 会把包安装到 `--install-dir` / `-InstallDir` 指定位置；未传入时安装到当前目录。更新覆盖时会删除旧的 `xxx/` 目录并安装新的 `xxx/`，最后执行 `xxx/install.*`。`github-update.*` 与 `xxx/` 同目录。`uninstall` 会先执行 `xxx/install.* --uninstall` / `-Uninstall`，再删除 `xxx/`。
+
+规范包结构：
+
+- action 普通 artifact：外层 `xxx.zip` 内含内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*`。
+- release 普通 asset：直接发布 `xxx.zip` / `xxx.tar.gz`，包内含 `xxx/` 与同级 `github-update.*`，`xxx/` 内含 `install.*`。
+- action APK artifact：外层 `xxx.zip` 内含 `xxx.apk`。
+- release APK asset：直接发布 `xxx.apk`。
 
 ## 快速入口
 

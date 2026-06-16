@@ -10,26 +10,34 @@ workflow=""
 branch=""
 output_dir="."
 install_dir=""
+package_name=""
 token="${GITHUB_TOKEN:-}"
 include_prerelease="false"
 force="false"
+script_path=${BASH_SOURCE[0]:-$0}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 
 usage() {
   cat <<'EOF'
 Usage: github-update.sh --repo owner/repo [options]
+       github-update.sh --mode uninstall [--install-dir DIR] [--package-name NAME]
+  github-update.sh --uninstall [--install-dir DIR] [--package-name NAME]
 
 Options:
-  --channel release|action     Update channel, default: release
-  --mode list|download|install Mode, default: list
-  --version VALUE              Release tag/name or Actions run id/run number/SHA prefix/title
-  --name-pattern PATTERN       Asset/artifact wildcard, default: *
-  --workflow VALUE             Workflow file/name/id for Actions
-  --branch VALUE               Branch filter for Actions
-  --output-dir DIR             Download directory, default: .
-  --install-dir DIR            Install/extract directory for install mode
-  --token TOKEN                GitHub token, default: GITHUB_TOKEN; Actions can also use gh auth
-  --include-prerelease         Include prerelease releases
-  --force                      Allow install into non-empty directory
+  --channel release|action       Update channel, default: release
+  --mode list|download|install|uninstall
+                                 Mode, default: list
+  --uninstall                    Alias for --mode uninstall
+  --version VALUE                Release tag/name or Actions run id/run number/SHA prefix/title
+  --name-pattern PATTERN         Asset/artifact wildcard, default: *
+  --workflow VALUE               Workflow file/name/id for Actions
+  --branch VALUE                 Branch filter for Actions
+  --output-dir DIR               Download directory, default: .
+  --install-dir DIR              Install root, default for install/uninstall: current directory
+  --package-name NAME            Installed xxx directory name, inferred during install
+  --token TOKEN                  GitHub token, default: GITHUB_TOKEN; Actions can also use gh auth
+  --include-prerelease           Include prerelease releases
+  --force                        Reserved for compatibility; install always supports overwrite
 EOF
 }
 
@@ -38,12 +46,14 @@ while [ $# -gt 0 ]; do
     --repo|-r) repo=${2:?}; shift 2 ;;
     --channel) channel=${2:?}; shift 2 ;;
     --mode) mode=${2:?}; shift 2 ;;
+    --uninstall) mode="uninstall"; shift ;;
     --version) version=${2:?}; shift 2 ;;
     --name-pattern) name_pattern=${2:?}; shift 2 ;;
     --workflow) workflow=${2:?}; shift 2 ;;
     --branch) branch=${2:?}; shift 2 ;;
     --output-dir) output_dir=${2:?}; shift 2 ;;
     --install-dir) install_dir=${2:?}; shift 2 ;;
+    --package-name) package_name=${2:?}; shift 2 ;;
     --token) token=${2:?}; shift 2 ;;
     --include-prerelease) include_prerelease="true"; shift ;;
     --force) force="true"; shift ;;
@@ -52,13 +62,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$repo" ]; then
-  echo "--repo is required" >&2
-  usage >&2
-  exit 2
-fi
 case "$channel" in release|action) ;; *) echo "Invalid --channel: $channel" >&2; exit 2 ;; esac
-case "$mode" in list|download|install) ;; *) echo "Invalid --mode: $mode" >&2; exit 2 ;; esac
+case "$mode" in list|download|install|uninstall) ;; *) echo "Invalid --mode: $mode" >&2; exit 2 ;; esac
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -66,8 +71,10 @@ need_cmd() {
     exit 2
   fi
 }
-need_cmd gh
-need_cmd tar
+
+need_archive_cmds() {
+  need_cmd tar
+}
 
 resolve_repo() {
   local value=${1%.git}
@@ -83,12 +90,18 @@ resolve_repo() {
   fi
 }
 
-if [ "$channel" = "action" ] && [ -z "$token" ]; then
-  token=$(gh auth token 2>/dev/null || true)
-fi
-
-repo_path=$(resolve_repo "$repo")
-mkdir -p "$output_dir"
+install_root() {
+  local root=$install_dir
+  if [ -z "$root" ]; then
+    if { [ "$mode" = "install" ] || [ "$mode" = "uninstall" ]; } && [ "$(basename "$script_dir")" != "sh" ]; then
+      root=$script_dir
+    else
+      root="."
+    fi
+  fi
+  mkdir -p "$root"
+  (cd "$root" && pwd)
+}
 
 gh_api() {
   if [ -n "$token" ]; then
@@ -103,45 +116,173 @@ match_name() {
   [[ "$name" == $name_pattern ]]
 }
 
-extract_archive() {
+extract_to_dir() {
   local archive=$1
   local dest=$2
-  if [ -z "$dest" ]; then
-    echo "--install-dir is required for install mode" >&2
-    exit 2
-  fi
-  mkdir -p "$dest"
-  if [ "$force" != "true" ] && [ -n "$(find "$dest" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
-    echo "Install dir is not empty: $dest. Use --force." >&2
-    exit 2
-  fi
-
-  local tmp
-  tmp=$(mktemp -d)
   case "$archive" in
     *.zip)
       need_cmd unzip
-      unzip -q "$archive" -d "$tmp"
+      unzip -q "$archive" -d "$dest"
       ;;
     *.tar.gz|*.tgz)
-      tar -xzf "$archive" -C "$tmp"
+      tar -xzf "$archive" -C "$dest"
       ;;
     *)
-      cp -f "$archive" "$dest/"
-      rm -rf "$tmp"
-      return
+      echo "Unsupported package archive: $archive" >&2
+      exit 2
       ;;
   esac
+}
 
-  local src="$tmp"
-  local first count
-  first=$(find "$tmp" -mindepth 1 -maxdepth 1 | head -n 1 || true)
-  count=$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
-  if [ "$count" = "1" ] && [ -d "$first" ]; then
-    src="$first"
+find_package_dir() {
+  local root=$1
+  local selected=""
+  if [ -n "$package_name" ] && [ -d "$root/$package_name" ]; then
+    printf '%s\n' "$root/$package_name"
+    return 0
   fi
-  cp -a "$src"/. "$dest"/
+  while IFS= read -r dir; do
+    if [ -f "$dir/install.sh" ] || [ -f "$dir/install.ps1" ]; then
+      if [ -n "$selected" ]; then
+        echo "Multiple package directories with install script found. Use --package-name." >&2
+        exit 2
+      fi
+      selected=$dir
+    fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d | sort)
+  if [ -z "$selected" ]; then
+    selected=$(find "$root" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1 || true)
+  fi
+  if [ -z "$selected" ]; then
+    echo "No top-level package directory found in archive" >&2
+    exit 2
+  fi
+  printf '%s\n' "$selected"
+}
+
+run_install_script() {
+  local package_dir=$1
+  local script="$package_dir/install.sh"
+  if [ -f "$script" ]; then
+    chmod +x "$script"
+    "$script"
+  else
+    echo "No install.sh found in $(basename "$package_dir"); skipping project-specific install." >&2
+  fi
+}
+
+run_uninstall_script() {
+  local package_dir=$1
+  local script="$package_dir/install.sh"
+  if [ -f "$script" ]; then
+    chmod +x "$script"
+    "$script" --uninstall
+  else
+    echo "No install.sh found in $(basename "$package_dir"); skipping project-specific uninstall." >&2
+  fi
+}
+
+verify_sha256() {
+  local sha_file=$1
+  local archive=$2
+  if [ ! -f "$sha_file" ]; then
+    return 0
+  fi
+  local sha_tool=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha_tool="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    sha_tool="shasum -a 256"
+  else
+    echo "No sha256sum/shasum found for checksum verification" >&2
+    exit 2
+  fi
+
+  local expected actual first second
+  read -r first second < "$sha_file" || true
+  if [ -n "${second:-}" ]; then
+    (cd "$(dirname "$archive")" && $sha_tool -c "$sha_file")
+  else
+    expected=$first
+    actual=$($sha_tool "$archive" | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+      echo "Checksum mismatch for $archive" >&2
+      exit 1
+    fi
+  fi
+}
+
+install_archive_package() {
+  local archive=$1
+  local updater_root=$2
+  local root=$3
+  local tmp package_dir name
+  tmp=$(mktemp -d)
+  extract_to_dir "$archive" "$tmp"
+  if [ -f "$tmp/github-update.sh" ]; then
+    cp -f "$tmp/github-update.sh" "$root/github-update.sh"
+    chmod +x "$root/github-update.sh"
+  elif [ -f "$updater_root/github-update.sh" ]; then
+    cp -f "$updater_root/github-update.sh" "$root/github-update.sh"
+    chmod +x "$root/github-update.sh"
+  fi
+  package_dir=$(find_package_dir "$tmp")
+  name=$(basename "$package_dir")
+  rm -rf "$root/$name"
+  cp -a "$package_dir" "$root/"
   rm -rf "$tmp"
+  run_install_script "$root/$name"
+  echo "Installed: $root/$name"
+}
+
+prepare_action_package() {
+  local artifact_zip=$1
+  local root=$2
+  local outer inner sha_file
+  outer=$(mktemp -d)
+  extract_to_dir "$artifact_zip" "$outer"
+  inner=$(find "$outer" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.tgz' \) ! -name '*.artifact.zip' | sort | head -n 1 || true)
+  if [ -z "$inner" ]; then
+    echo "No inner package archive found in action artifact: $artifact_zip" >&2
+    exit 2
+  fi
+  sha_file="$outer/$(basename "$inner").sha256"
+  if [ ! -f "$sha_file" ]; then
+    sha_file=$(find "$outer" -maxdepth 1 -type f -name '*.sha256' | sort | head -n 1 || true)
+  fi
+  if [ -n "$sha_file" ]; then
+    verify_sha256 "$sha_file" "$inner"
+  fi
+  install_archive_package "$inner" "$outer" "$root"
+  rm -rf "$outer"
+}
+
+uninstall_package() {
+  local root package_dir name selected count
+  root=$(install_root)
+  if [ -n "$package_name" ]; then
+    package_dir="$root/$package_name"
+  else
+    selected=""
+    count=0
+    while IFS= read -r dir; do
+      count=$((count + 1))
+      selected=$dir
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/install.sh' \; -print | sort)
+    if [ "$count" -ne 1 ]; then
+      echo "Unable to infer installed package directory. Use --package-name." >&2
+      exit 2
+    fi
+    package_dir=$selected
+  fi
+  if [ ! -d "$package_dir" ]; then
+    echo "Installed package directory not found: $package_dir" >&2
+    exit 1
+  fi
+  name=$(basename "$package_dir")
+  run_uninstall_script "$package_dir"
+  rm -rf "$package_dir"
+  echo "Uninstalled: $name"
 }
 
 jq_release_filter() {
@@ -192,7 +333,7 @@ list_action_runs() {
 }
 
 select_action_run_id() {
-  local line id run_number name display_title head_branch head_sha
+  local id run_number name display_title head_branch head_sha
   while IFS=$'\t' read -r id run_number name display_title head_branch head_sha; do
     run_number=${run_number#\#}
     if [ -z "$version" ] || [ "$id" = "$version" ] || [ "$run_number" = "$version" ] || [ "$name" = "$version" ] || [ "$display_title" = "$version" ] || [[ "$head_sha" == "$version"* ]]; then
@@ -207,6 +348,27 @@ list_action_artifacts() {
   local run_id=$1
   gh_api "/repos/$repo_path/actions/runs/$run_id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired|not) | [.id, .name, (.size_in_bytes | tostring)] | @tsv'
 }
+
+if [ "$mode" = "uninstall" ]; then
+  uninstall_package
+  exit 0
+fi
+
+if [ -z "$repo" ]; then
+  echo "--repo is required unless --mode uninstall is used" >&2
+  usage >&2
+  exit 2
+fi
+
+need_cmd gh
+need_archive_cmds
+
+if [ "$channel" = "action" ] && [ -z "$token" ]; then
+  token=$(gh auth token 2>/dev/null || true)
+fi
+
+repo_path=$(resolve_repo "$repo")
+mkdir -p "$output_dir"
 
 if [ "$channel" = "release" ]; then
   if [ "$mode" = "list" ]; then
@@ -234,7 +396,7 @@ if [ "$channel" = "release" ]; then
         gh release download "$release_tag" --repo "$repo_path" --pattern "$asset_name" --dir "$output_dir"
       fi
       echo "Saved: $target"
-      [ "$mode" = "install" ] && extract_archive "$target" "$install_dir"
+      [ "$mode" = "install" ] && install_archive_package "$target" "$output_dir" "$(install_root)"
     fi
   done < <(list_release_assets "$release_id")
   if [ "$matched" != "true" ]; then
@@ -263,11 +425,11 @@ matched="false"
 while IFS=$'\t' read -r artifact_id artifact_name artifact_size; do
   if match_name "$artifact_name"; then
     matched="true"
-    target="$output_dir/$artifact_name.artifact.zip"
+    target="$output_dir/$artifact_name.zip"
     echo "Downloading action artifact: $artifact_name ($artifact_size bytes)"
     gh_api "/repos/$repo_path/actions/artifacts/$artifact_id/zip" > "$target"
     echo "Saved: $target"
-    [ "$mode" = "install" ] && extract_archive "$target" "$install_dir"
+    [ "$mode" = "install" ] && prepare_action_package "$target" "$(install_root)"
   fi
 done < <(list_action_artifacts "$run_id")
 if [ "$matched" != "true" ]; then

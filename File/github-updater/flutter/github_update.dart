@@ -155,6 +155,10 @@ class GitHubUpdateAsset {
   final Uri downloadUrl;
   final bool requiresToken;
 
+  bool get isApk => name.toLowerCase().endsWith('.apk');
+  bool get isActionArtifactZip =>
+      requiresToken && name.toLowerCase().endsWith('.zip');
+
   static GitHubUpdateAsset fromReleaseAssetJson(Map<String, Object?> json) {
     return GitHubUpdateAsset(
       name: _jsonString(json['name']),
@@ -172,6 +176,23 @@ class GitHubUpdateAsset {
       requiresToken: true,
     );
   }
+}
+
+class GitHubApkInstallRequest {
+  const GitHubApkInstallRequest({
+    required this.asset,
+    this.token,
+  });
+
+  final GitHubUpdateAsset asset;
+  final String? token;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'url': asset.downloadUrl.toString(),
+        'name': asset.name,
+        'token': token,
+        'isActionArtifactZip': asset.isActionArtifactZip,
+      };
 }
 
 class GitHubUpdateClient {

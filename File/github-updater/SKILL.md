@@ -86,27 +86,26 @@ Action 渠道下载普通包时，artifact 本身应为 `xxx.zip`，内部结构
 
 ```text
 xxx.zip
-├── xxx.sha256
-├── xxx.zip / xxx.tar.gz
-│   └── xxx/
-│       ├── 文件1
-│       ├── 文件2
-│       ├── 文件3
-│       └── install.sh / install.ps1
+├── xxx.zip.sha256 / xxx.tar.gz.sha256
 ├── github-update.sh / github-update.ps1
-└── uninstall.sh / uninstall.ps1
+└── xxx.zip / xxx.tar.gz
+    └── xxx/
+        ├── 文件1
+        ├── 文件2
+        ├── 文件3
+        └── install.sh / install.ps1
 ```
 
 Release 渠道普通包应直接发布 `xxx.zip` 或 `xxx.tar.gz`，内部结构为：
 
 ```text
 xxx.zip / xxx.tar.gz
-├── xxx/
-│   ├── 文件1
-│   ├── 文件2
-│   ├── 文件3
-│   └── install.sh / install.ps1
-└── github-update.sh / github-update.ps1
+├── github-update.sh / github-update.ps1
+└── xxx/
+   ├── 文件1
+   ├── 文件2
+   ├── 文件3
+   └── install.sh / install.ps1
 ```
 
 Action 渠道 APK artifact 应为：
@@ -260,9 +259,9 @@ xxx.apk
 
 如果采用脚本方案：
 
-1. 打包时复制完整 `github-updater/` 目录。
-2. Windows 包优先说明 `github-updater/ps1/github-update.ps1`。
-3. Linux/macOS 包优先说明 `github-updater/sh/github-update.sh`。
+1. 打包时只复制目标平台对应的 `github-update.ps1` 或 `github-update.sh` 到安装包根部，与 `xxx/` 目录同级。
+2. Windows 包优先说明根部 `github-update.ps1`。
+3. Linux/macOS 包优先说明根部 `github-update.sh`。
 4. GitHub Actions Release job 应发布对应安装包。
 5. 文档中明确：
    - Release 渠道读取 GitHub Release assets。
@@ -277,6 +276,11 @@ xxx.apk
 - `install`：下载并安装。
 - `uninstall`：卸载当前安装。
 
+同时必须支持卸载别名参数：
+
+- `github-update.sh --uninstall` 等价于 `github-update.sh --mode uninstall`。
+- `github-update.ps1 -Uninstall` 等价于 `github-update.ps1 -Mode uninstall`。
+
 安装路径规则：
 
 - 如果用户传入安装路径参数，使用该路径作为安装根目录。
@@ -287,27 +291,23 @@ xxx.apk
 
 1. 下载 action artifact 或 release asset。
 2. 如果是 action artifact，先从外层 `xxx.zip` 中取出：
-    - `xxx.sha256`
-    - 内层真正安装包 `xxx.zip` / `xxx.tar.gz`
-    - `github-update.sh` / `github-update.ps1`
-    - `uninstall.sh` / `uninstall.ps1`
-3. 校验 `xxx.sha256`（存在时必须校验）。
-4. 先覆盖安装根目录中的 `github-update.sh` / `github-update.ps1`。
-5. 删除旧的 `xxx/` 目录。
-6. 解压新的 `xxx/` 目录到安装根目录。
-7. 执行 `xxx/install.sh` 或 `xxx/install.ps1`。
+   - `xxx.zip.sha256` / `xxx.tar.gz.sha256`
+   - `github-update.sh` / `github-update.ps1`
+   - 内层真正安装包 `xxx.zip` / `xxx.tar.gz`
+3. 校验 `xxx.zip.sha256` / `xxx.tar.gz.sha256`（存在时必须校验）。
+4. 删除旧的 `xxx/` 目录。
+5. 解压新的 `xxx/` 目录到安装根目录，并将 `github-update.sh` 或 `github-update.ps1` 放到与 `xxx/` 同级的安装根目录。
+6. 执行 `xxx/install.sh` 或 `xxx/install.ps1`。
 
 卸载流程：
 
 1. 定位安装根目录下的 `xxx/` 目录。
 2. 先执行 `xxx/install.sh --uninstall` 或 `xxx/install.ps1 -Uninstall` / `--uninstall`。
 3. 删除 `xxx/` 目录。
-4. 删除安装根目录中的 `github-update.sh` / `github-update.ps1`。
-5. 删除安装根目录中的 `uninstall.sh` / `uninstall.ps1`（如果存在）。
 
 更新脚本必须避免把通用逻辑写入项目特定安装脚本：
 
-- 通用脚本负责：下载、校验、解包、覆盖 updater、自身目录替换、调用 install/uninstall。
+- 通用脚本负责：下载、校验、解包、自身目录替换、调用 install/uninstall。
 - 项目脚本负责：服务注册、自启动、配置文件、外部文件等项目特定操作。
 
 ### 5. 项目特定 install 脚本规范
@@ -354,13 +354,13 @@ xxx.apk
 普通包 action artifact：
 
 - artifact 名称可为 `xxx` 或平台相关名称。
-- artifact 下载后的 `xxx.zip` 内必须包含 `xxx.sha256`、内层安装包、对应平台 `github-update.*` 和 `uninstall.*`。
+- artifact 下载后的 `xxx.zip` 内必须包含 `xxx.zip.sha256` / `xxx.tar.gz.sha256`、内层安装包与对应平台 `github-update.*`。
 - 内层安装包内必须包含顶层目录 `xxx/`，且 `xxx/` 内包含项目文件与 `install.*`。
 
 普通包 release asset：
 
 - 直接发布 `xxx.zip` 或 `xxx.tar.gz`。
-- 包内必须包含顶层目录 `xxx/` 和对应平台 `github-update.*`。
+- 包内必须包含顶层目录 `xxx/` 和对应平台 `github-update.*`，且 `xxx/` 内包含 `install.*`。
 
 APK action artifact：
 

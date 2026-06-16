@@ -12,6 +12,7 @@ class GitHubUpdatePageConfig {
     this.initialChannel = GitHubUpdateChannel.release,
     this.title = '检查更新',
     this.description = '以项目 GitHub 地址作为参数，支持 Release 与 Actions 构建产物两个渠道。',
+    this.apkInstallerChannel = 'github_updater/apk_installer',
   });
 
   final String initialRepository;
@@ -21,6 +22,7 @@ class GitHubUpdatePageConfig {
   final GitHubUpdateChannel initialChannel;
   final String title;
   final String description;
+  final String apkInstallerChannel;
 }
 
 class GitHubUpdatePage extends StatefulWidget {
@@ -145,6 +147,33 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     await Clipboard.setData(ClipboardData(text: asset.downloadUrl.toString()));
     if (mounted) {
       _showSnackBar('已复制下载链接：${asset.name}');
+    }
+  }
+
+  Future<void> _installApkAsset(GitHubUpdateAsset asset) async {
+    final channel = MethodChannel(widget.config.apkInstallerChannel);
+    try {
+      await channel.invokeMethod<void>(
+        'downloadAndInstallApk',
+        GitHubApkInstallRequest(
+          asset: asset,
+          token: _tokenController.text.trim().isEmpty
+              ? null
+              : _tokenController.text.trim(),
+        ).toJson(),
+      );
+      if (mounted) {
+        _showSnackBar('已开始后台下载并安装：${asset.name}');
+      }
+    } on MissingPluginException {
+      if (mounted) {
+        _showSnackBar(
+            '宿主 App 尚未实现 APK 安装通道：${widget.config.apkInstallerChannel}');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showSnackBar('启动 APK 安装失败：${_formatError(error)}');
+      }
     }
   }
 
@@ -348,11 +377,27 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
               subtitle: Text(
                 '${formatGitHubUpdateBytes(asset.sizeBytes)}${asset.requiresToken ? ' · 需要 Token 下载' : ''}',
               ),
-              trailing: IconButton(
-                tooltip: '复制下载链接',
-                onPressed: () => _copyAssetUrl(asset),
-                icon: const Icon(Icons.copy_outlined),
-              ),
+              trailing: asset.isApk || asset.isActionArtifactZip
+                  ? Wrap(
+                      spacing: 4,
+                      children: <Widget>[
+                        IconButton(
+                          tooltip: '后台下载并安装 APK',
+                          onPressed: () => _installApkAsset(asset),
+                          icon: const Icon(Icons.install_mobile_outlined),
+                        ),
+                        IconButton(
+                          tooltip: '复制下载链接',
+                          onPressed: () => _copyAssetUrl(asset),
+                          icon: const Icon(Icons.copy_outlined),
+                        ),
+                      ],
+                    )
+                  : IconButton(
+                      tooltip: '复制下载链接',
+                      onPressed: () => _copyAssetUrl(asset),
+                      icon: const Icon(Icons.copy_outlined),
+                    ),
             ),
           )
           .toList(growable: false),

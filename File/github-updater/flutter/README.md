@@ -50,7 +50,21 @@ Navigator.of(context).push(
 - `Action` 渠道：列出成功的 GitHub Actions runs，读取匹配 artifacts。
 - `NamePattern` 支持 `*` / `?` 通配符。
 - 可输入 GitHub Token，用于私有仓库或 Actions artifacts 下载链接。
-- 页面当前只负责发现版本/资源并复制下载链接，实际安装替换可由宿主 App、系统安装器或外部脚本处理。
+- Android APK 资源支持点击“后台下载并安装 APK”。Release 渠道直接下载 `xxx.apk`；Action 渠道会把 artifact `xxx.zip` 交给宿主安装通道处理，宿主应在后台下载、解出唯一 APK 并触发系统安装器。
+
+## Android APK 安装通道
+
+Flutter 模块不直接包含 Android 原生安装代码，而是通过 `MethodChannel` 调用宿主 App：
+
+- 默认通道名：`github_updater/apk_installer`
+- 方法名：`downloadAndInstallApk`
+- 参数：
+  - `url`：下载地址。
+  - `name`：资源名。
+  - `token`：可选 GitHub Token。
+  - `isActionArtifactZip`：是否为 Actions artifact zip；为 `true` 时宿主应解压其中的 `xxx.apk`。
+
+宿主 Android 实现应在后台下载 APK，并使用系统安装器发起安装；除非具备合法设备管理/企业分发权限，不应静默安装。
 
 ## 纯 Dart API 示例
 

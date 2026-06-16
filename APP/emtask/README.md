@@ -45,7 +45,7 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 
 ## 更新程序
 
-发布包内包含通用 GitHub 更新器目录 `github-updater/`，下面按环境分成 `ps1/`、`flutter/`、`sh/` 三套实现，可复用于其他模块。仓库地址通过参数传入，支持 `owner/repo`、`https://github.com/owner/repo` 或 `git@github.com:owner/repo.git`。Flutter 客户端的内置更新模块也同步保留在 `APP/emtask/Flutter/lib/src/updater/`，复制该目录并传入 `GitHubUpdatePageConfig` 即可移植到其他 Flutter 项目。
+发布包根目录包含通用 GitHub 更新脚本 `github-update.ps1`（Windows 包）或 `github-update.sh`（Linux 包），与 `emtask-*` 目录同级；包内 `emtask-*` 目录包含项目安装脚本 `install.ps1` 或 `install.sh`。仓库地址通过参数传入，支持 `owner/repo`、`https://github.com/owner/repo` 或 `git@github.com:owner/repo.git`。Flutter 客户端的内置更新模块也同步保留在 `APP/emtask/Flutter/lib/src/updater/`，复制该目录并传入 `GitHubUpdatePageConfig` 即可移植到其他 Flutter 项目。
 
 支持的更新渠道：
 
@@ -56,29 +56,29 @@ Linux 上当前实现使用 PTY；Windows 默认尝试 `use_conpty=true` 以获�
 
 ```powershell
 # Release tags
-./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode list
+./github-update.ps1 -Repo owner/repo -Channel release -Mode list
 
 # Successful Actions runs
-./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel action -Mode list
+./github-update.ps1 -Repo owner/repo -Channel action -Mode list
 ```
 
 下载或安装指定版本：
 
 ```powershell
 # 下载指定 Release tag 的 Windows x64 包
-./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode download `
+./github-update.ps1 -Repo owner/repo -Channel release -Mode download `
   -Version v1.0.0 -NamePattern 'emtask-server-windows-msvc-x64*.zip' -OutputDir downloads
 
 # 安装最新 Release 中匹配的包
-./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel release -Mode install `
+./github-update.ps1 -Repo owner/repo -Channel release -Mode install `
   -NamePattern 'emtask-server-windows-msvc-x64*.zip' -InstallDir C:\emtask-server -Force
 
 # 从指定 Actions run id/run number 下载构建产物
-./github-updater/ps1/github-update.ps1 -Repo owner/repo -Channel action -Mode download `
+./github-update.ps1 -Repo owner/repo -Channel action -Mode download `
   -Version 1234567890 -NamePattern 'emtask-server-windows-msvc-x64*' -OutputDir downloads
 ```
 
-参数说明见包内 `github-updater/README.md` 以及各子目录 README。推送 `v*` tag 时，CI 会把 `emtask-server-*` 与 `emtask-client-*` 构建产物发布到 GitHub Release，供 `release` 渠道使用；普通分支构建仍可通过 `action` 渠道下载 artifacts。
+参数说明见仓库 `File/github-updater/README.md` 以及各子目录 README。推送 `v*` tag 时，CI 会把 `emtask-server-*` 与 `emtask-client-*` 构建产物发布到 GitHub Release，供 `release` 渠道使用；普通分支构建仍可通过 `action` 渠道下载 artifacts。
 
 Linux musl 构建会同时产出动态链接和静态链接两套包，包名中分别包含 `linux-musl-dynamic-*` 与 `linux-musl-static-*`。
 
