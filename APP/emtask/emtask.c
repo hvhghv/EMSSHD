@@ -263,6 +263,7 @@ static void emtask_config_defaults(emtask_config_t *config)
     config->global.panel_enabled = 1;
     config->global.panel_port = (uint16_t)EMTASK_DEFAULT_PANEL_PORT;
     config->global.panel_auth = EMTASK_PANEL_AUTH_TOKEN | EMTASK_PANEL_AUTH_OTP;
+    (void)emtask_copy_text(config->global.username, sizeof(config->global.username), EMTASK_DEFAULT_USERNAME);
     (void)emtask_copy_text(config->global.hostkey_file, sizeof(config->global.hostkey_file), "emtask_hostkey_p256.raw");
     (void)emtask_copy_text(
         config->global.authorized_keys_file,
@@ -1203,19 +1204,24 @@ static int emtask_sqlite_load_library(emtask_sqlite_api_t *api)
 
 static int emtask_sqlite_open_database(const char *path, emtask_sqlite_api_t *api, emtask_sqlite3_t **db_out)
 {
+    char sqlite_path[EMTASK_MAX_PATH];
     int status;
 
     if (path == NULL || path[0] == '\0' || api == NULL || db_out == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
     *db_out = NULL;
+    status = emtask_platform_sqlite_database_path(path, sqlite_path);
+    if (status != SSH_OK) {
+        return status;
+    }
     status = emtask_sqlite_load_library(api);
     if (status != SSH_OK) {
         return status;
     }
-    if (api->open_v2(path, db_out, EMTASK_SQLITE_OPEN_READWRITE | EMTASK_SQLITE_OPEN_CREATE, NULL) != EMTASK_SQLITE_OK) {
+    if (api->open_v2(sqlite_path, db_out, EMTASK_SQLITE_OPEN_READWRITE | EMTASK_SQLITE_OPEN_CREATE, NULL) != EMTASK_SQLITE_OK) {
         const char *msg = *db_out != NULL ? api->errmsg(*db_out) : "open failed";
-        emtask_logf("sqlite open %s failed: %s", path, msg != NULL ? msg : "unknown");
+        emtask_logf("sqlite open %s failed: %s", sqlite_path, msg != NULL ? msg : "unknown");
         if (*db_out != NULL) {
             (void)api->close(*db_out);
             *db_out = NULL;

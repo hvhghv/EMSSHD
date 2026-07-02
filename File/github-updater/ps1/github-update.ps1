@@ -345,6 +345,18 @@ function Test-Sha256File {
     if ($expected -ne $actual) { throw "Checksum mismatch for $ArchivePath" }
 }
 
+function Copy-DirectoryContents {
+    param(
+        [string]$SourceDir,
+        [string]$DestinationDir
+    )
+
+    New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $SourceDir -Force) {
+        Copy-Item -LiteralPath $item.FullName -Destination $DestinationDir -Recurse -Force
+    }
+}
+
 function Install-ArchivePackage {
     param(
         [string]$ArchivePath,
@@ -356,6 +368,12 @@ function Install-ArchivePackage {
     )
 
     $temp = Join-Path ([System.IO.Path]::GetTempPath()) ('github-package-' + [guid]::NewGuid().ToString('N'))
+    $stage = $null
+    $backup = $null
+    $updaterStage = $null
+    $updaterBackup = $null
+    $target = $null
+    $installed = $false
     New-Item -ItemType Directory -Force -Path $temp | Out-Null
     try {
         Expand-PackageArchive -ArchivePath $ArchivePath -Destination $temp
@@ -364,20 +382,86 @@ function Install-ArchivePackage {
         Assert-PackageInfoCompatible -Info $packageInfo -Source (Split-Path -Leaf $ArchivePath)
         $archiveUpdater = Join-Path $temp 'github-update.ps1'
         $outerUpdater = Join-Path $UpdaterRoot 'github-update.ps1'
+        $updaterSource = $null
         if (Test-Path -LiteralPath $archiveUpdater -PathType Leaf) {
-            Copy-Item -LiteralPath $archiveUpdater -Destination (Join-Path $InstallRoot 'github-update.ps1') -Force
+            $updaterSource = $archiveUpdater
         } elseif (Test-Path -LiteralPath $outerUpdater -PathType Leaf) {
-            Copy-Item -LiteralPath $outerUpdater -Destination (Join-Path $InstallRoot 'github-update.ps1') -Force
+            $updaterSource = $outerUpdater
         }
         $name = Split-Path -Leaf $packageDir
         $target = Join-Path $InstallRoot $name
-        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
-        Copy-Item -LiteralPath $packageDir -Destination $InstallRoot -Recurse -Force
-        Write-UpdaterInfo -PackageDir $target -Info $packageInfo -SourceChannel $SourceChannel -SourceNamePattern $SourceNamePattern -RepoValue $RepoValue
+        $suffix = [guid]::NewGuid().ToString('N')
+        $stage = Join-Path $InstallRoot (".$name.new-$suffix")
+        $backup = Join-Path $InstallRoot (".$name.backup-$suffix")
+
+        Copy-DirectoryContents -SourceDir $packageDir -DestinationDir $stage
+        Write-UpdaterInfo -PackageDir $stage -Info $packageInfo -SourceChannel $SourceChannel -SourceNamePattern $SourceNamePattern -RepoValue $RepoValue
+
+        $updaterTarget = Join-Path $InstallRoot 'github-update.ps1'
+        if ($updaterSource) {
+            $updaterStage = Join-Path $InstallRoot (".github-update.ps1.new-$suffix")
+            Copy-Item -LiteralPath $updaterSource -Destination $updaterStage -Force
+            if (Test-Path -LiteralPath $updaterTarget -PathType Leaf) {
+                $updaterBackup = Join-Path $InstallRoot (".github-update.ps1.backup-$suffix")
+                Copy-Item -LiteralPath $updaterTarget -Destination $updaterBackup -Force
+            }
+        }
+
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            try {
+                Move-Item -LiteralPath $target -Destination $backup -ErrorAction Stop
+            } catch {
+                throw "Installed package appears to be in use or cannot be replaced: $target. Stop the running service/process and retry. $($_.Exception.Message)"
+            }
+        }
+
+        try {
+            Move-Item -LiteralPath $stage -Destination $target -ErrorAction Stop
+            $stage = $null
+        } catch {
+            if ($backup -and (Test-Path -LiteralPath $backup -PathType Container) -and -not (Test-Path -LiteralPath $target)) {
+                Move-Item -LiteralPath $backup -Destination $target -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+
         Invoke-InstallScript -PackageDir $target
+        if ($updaterStage) {
+            Copy-Item -LiteralPath $updaterStage -Destination $updaterTarget -Force
+        }
+        $installed = $true
         Write-Host "Installed: $target"
+    } catch {
+        if (-not $installed -and $updaterBackup -and (Test-Path -LiteralPath $updaterBackup -PathType Leaf)) {
+            Copy-Item -LiteralPath $updaterBackup -Destination (Join-Path $InstallRoot 'github-update.ps1') -Force -ErrorAction SilentlyContinue
+        }
+        if (-not $installed -and $target -and $backup -and (Test-Path -LiteralPath $backup -PathType Container)) {
+            if (Test-Path -LiteralPath $target -PathType Container) {
+                Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $target -PathType Container)) {
+                Move-Item -LiteralPath $backup -Destination $target -ErrorAction SilentlyContinue
+            }
+        }
+        throw
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+        if ($stage -and (Test-Path -LiteralPath $stage -PathType Container)) {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($updaterStage -and (Test-Path -LiteralPath $updaterStage -PathType Leaf)) {
+            Remove-Item -LiteralPath $updaterStage -Force -ErrorAction SilentlyContinue
+        }
+        if ($updaterBackup -and (Test-Path -LiteralPath $updaterBackup -PathType Leaf)) {
+            Remove-Item -LiteralPath $updaterBackup -Force -ErrorAction SilentlyContinue
+        }
+        if ($installed -and $backup -and (Test-Path -LiteralPath $backup -PathType Container)) {
+            try {
+                Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "Installed successfully, but old backup could not be removed: $backup"
+            }
+        }
     }
 }
 

@@ -99,6 +99,20 @@ int emtask_platform_join_path(const char *base_dir, const char *value, char out[
     return SSH_OK;
 }
 
+int emtask_platform_sqlite_database_path(const char *path, char out[EMTASK_MAX_PATH])
+{
+    int written;
+
+    if (path == NULL || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    written = snprintf(out, EMTASK_MAX_PATH, "%s", path);
+    if (written < 0 || (size_t)written >= EMTASK_MAX_PATH) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return SSH_OK;
+}
+
 int emtask_platform_default_use_conpty(void)
 {
     return 1;

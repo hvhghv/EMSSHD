@@ -33,6 +33,7 @@
 #define EMTASK_DEFAULT_PANEL_QR_FILE "emtask_panel_connect.svg"
 #define EMTASK_DEFAULT_PANEL_TASKS_DB_FILE "emtask_tasks.sqlite3"
 #define EMTASK_DEFAULT_AUTHORIZED_KEYS_FILE "authorized_keys"
+#define EMTASK_DEFAULT_USERNAME "emtask"
 #define EMTASK_DEFAULT_PANEL_QR_HOST "127.0.0.1"
 #define EMTASK_PANEL_AUTH_TOKEN 0x01u
 #define EMTASK_PANEL_AUTH_OTP 0x02u
@@ -272,6 +273,7 @@ int emtask_platform_library_open(const char *path, void **handle_out);
 void emtask_platform_library_close(void *handle);
 void *emtask_platform_library_symbol(void *handle, const char *name);
 int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out);
+int emtask_platform_sqlite_database_path(const char *path, char out[EMTASK_MAX_PATH]);
 void emtask_platform_sleep_ms(uint32_t timeout_ms);
 
 int emtask_mutex_init(emtask_mutex_t *lock);

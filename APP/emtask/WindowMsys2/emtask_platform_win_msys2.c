@@ -104,6 +104,32 @@ int emtask_platform_join_path(const char *base_dir, const char *value, char out[
     return SSH_OK;
 }
 
+int emtask_platform_sqlite_database_path(const char *path, char out[EMTASK_MAX_PATH])
+{
+    char full[EMTASK_MAX_PATH];
+    DWORD written;
+    char *cursor;
+    int formatted;
+
+    if (path == NULL || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    written = GetFullPathNameA(path, (DWORD)sizeof(full), full, NULL);
+    if (written == 0u || written >= (DWORD)sizeof(full)) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    for (cursor = full; *cursor != '\0'; ++cursor) {
+        if (*cursor == '/') {
+            *cursor = '\\';
+        }
+    }
+    formatted = snprintf(out, EMTASK_MAX_PATH, "%s", full);
+    if (formatted < 0 || (size_t)formatted >= EMTASK_MAX_PATH) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return SSH_OK;
+}
+
 int emtask_platform_default_use_conpty(void)
 {
     return 1;

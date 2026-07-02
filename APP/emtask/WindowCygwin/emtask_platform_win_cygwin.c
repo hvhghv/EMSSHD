@@ -11,6 +11,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <pthread.h>
+#include <sys/cygwin.h>
 #include <strings.h>
 
 #include "emtask_internal.h"
@@ -97,6 +98,43 @@ int emtask_platform_join_path(const char *base_dir, const char *value, char out[
     }
     written = snprintf(out, EMTASK_MAX_PATH, "%s/%s", base_dir, value);
     if (written < 0 || (size_t)written >= EMTASK_MAX_PATH) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return SSH_OK;
+}
+
+int emtask_platform_sqlite_database_path(const char *path, char out[EMTASK_MAX_PATH])
+{
+    char full[EMTASK_MAX_PATH];
+    DWORD written;
+    char *cursor;
+    int formatted;
+
+    if (path == NULL || out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    if (!emtask_platform_path_is_absolute(path) || path[0] == '/') {
+        if (cygwin_conv_path(CCP_POSIX_TO_WIN_A, path, full, sizeof(full)) == 0) {
+            formatted = snprintf(out, EMTASK_MAX_PATH, "%s", full);
+            if (formatted < 0 || (size_t)formatted >= EMTASK_MAX_PATH) {
+                return SSH_ERR_BUFFER_TOO_SMALL;
+            }
+            return SSH_OK;
+        }
+    }
+
+    written = GetFullPathNameA(path, (DWORD)sizeof(full), full, NULL);
+    if (written == 0u || written >= (DWORD)sizeof(full)) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    for (cursor = full; *cursor != '\0'; ++cursor) {
+        if (*cursor == '/') {
+            *cursor = '\\';
+        }
+    }
+    formatted = snprintf(out, EMTASK_MAX_PATH, "%s", full);
+    if (formatted < 0 || (size_t)formatted >= EMTASK_MAX_PATH) {
         return SSH_ERR_BUFFER_TOO_SMALL;
     }
     return SSH_OK;

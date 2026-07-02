@@ -100,7 +100,7 @@ Linux musl 构建会同时产出动态链接和静态链接两套包，包名中
 
 全局键：
 
-- `username`
+- `username`：默认 `emtask`。
 - `password`
 - `hostkey_file`
 - `authorized_keys_file`：默认 `authorized_keys`，启动时自动创建；设为空可禁用公钥登录和面板公钥注册。
@@ -193,7 +193,7 @@ command = powershell.exe -NoLogo
 
 约束：
 
-- `auth_backend = internal` 时，`username` 必填。
+- `auth_backend = internal` 时，`username` 默认使用 `emtask`，可按需覆盖。
 - `auth_backend = internal` 时，`password` 与 `authorized_keys_file` 至少要有一个可用。
 - 未开启面板时至少声明一个任务；开启 `panel_enabled = true` 时可不声明静态任务，后续通过 Flutter 面板动态添加。
 - 每个任务必须有 `name`、`port` 与 `command`。
