@@ -133,8 +133,7 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <artifact>.zip
 ├── <package>.zip
 ├── <package>.zip.sha256
-├── github-update.ps1
-└── info.Dat
+└── github-update.ps1
 ```
 
 其中内层 `<package>.zip` 只包含安装目录：
@@ -153,8 +152,7 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <artifact>.zip
 ├── <package>.tar.gz
 ├── <package>.tar.gz.sha256
-├── github-update.sh
-└── info.Dat
+└── github-update.sh
 ```
 
 其中内层 `<package>.tar.gz` 只包含安装目录：
@@ -190,7 +188,7 @@ APK：
 <app>.apk
 ```
 
-`info.Dat` 使用 JSON 内容，最少应包含 `schema`、`repo`、`package_type`、`artifact`、`package`、`app`、`platform`、`toolchain`、`arch`、`updater`、`install_script`。Action 外层的 `info.Dat` 用于 updater 在下载后判断包类型；内层安装目录的 `info.Dat` 用于后续默认更新时识别当前安装的包。
+`info.Dat` 使用 JSON 内容，最少应包含 `schema`、`repo`、`package_type`、`artifact`、`package`、`app`、`platform`、`toolchain`、`arch`、`updater`、`install_script`。普通包只在内层安装目录放 `info.Dat`，用于安装时校验包类型并在后续默认更新时识别当前安装包。APK artifact 没有内层安装目录，因此在 Action 外层放 `info.Dat` 来标记 `package_type: apk`。
 
 ## 迁移步骤
 

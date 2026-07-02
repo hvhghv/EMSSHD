@@ -26,7 +26,7 @@
 
 规范包结构：
 
-- action 普通 artifact：外层 `xxx.zip` 内含 `info.Dat`、内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*` 和 `info.Dat`。
+- action 普通 artifact：外层 `xxx.zip` 内含内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*` 和 `info.Dat`。
 - release 普通 asset：直接发布 `xxx.zip` / `xxx.tar.gz`，包内含 `xxx/` 与同级 `github-update.*`，`xxx/` 内含 `install.*` 和 `info.Dat`。
 - action APK artifact：外层 `xxx.zip` 内含 `info.Dat` 与 `xxx.apk`。
 - release APK asset：直接发布 `xxx.apk`。

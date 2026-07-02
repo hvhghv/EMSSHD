@@ -55,7 +55,7 @@
 
 `install` 模式未显式传 `--name-pattern` 时，脚本会先按已安装目录中的 `info.Dat` 选择同一包；否则只接受当前平台上唯一可安装的普通包。匹配到多个 Linux/macOS 包时会要求显式指定包名，不会按 GitHub API 返回顺序盲装。未显式传 `--output-dir` 时，安装下载文件会放在临时目录，成功或失败都会清理。
 
-普通包的 Action 外层 artifact 与内层 `xxx/` 都应包含 `info.Dat`。APK artifact 的 `info.Dat` 使用 `package_type: apk`，shell updater 会明确提示 APK 不能由该脚本安装。
+普通包只在内层安装目录 `xxx/` 中包含 `info.Dat`。APK artifact 没有内层安装目录，因此在外层包含 `info.Dat`，并使用 `package_type: apk`；shell updater 会明确提示 APK 不能由该脚本安装。
 
 ## 参数
 

@@ -31,7 +31,6 @@
       install_script = 'install.ps1'
     }
     $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-    Copy-Item (Join-Path $packageRoot 'info.Dat') (Join-Path $distDir 'info.Dat') -Force
     Copy-Item File/github-updater/ps1/github-update.ps1 (Join-Path $distDir 'github-update.ps1')
     Compress-Archive `
       -Path $packageRoot `
@@ -49,5 +48,4 @@
       <dist-dir>/<package-name>.zip
       <dist-dir>/<package-name>.zip.sha256
       <dist-dir>/github-update.ps1
-      <dist-dir>/info.Dat
     if-no-files-found: error

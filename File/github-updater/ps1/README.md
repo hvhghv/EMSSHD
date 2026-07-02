@@ -57,7 +57,7 @@ When `-Mode install` uses the default `-NamePattern '*'`, the updater does not i
 Expected package layout:
 
 - `release`: the downloaded `xxx.zip` / `xxx.tar.gz` contains top-level `xxx/` and same-level `github-update.ps1`.
-- `action`: the outer artifact `xxx.zip` contains `info.Dat`, inner `xxx.zip` / `xxx.tar.gz`, matching `.sha256`, and `github-update.ps1`.
+- `action`: the outer artifact `xxx.zip` contains inner `xxx.zip` / `xxx.tar.gz`, matching `.sha256`, and `github-update.ps1`.
 - The top-level `xxx/` contains the project-specific `install.ps1` and `info.Dat`.
 - APK artifacts contain `package_type: apk` in `info.Dat`; this script reports that clearly instead of treating them as archive packages.
 

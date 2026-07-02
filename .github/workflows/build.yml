@@ -132,7 +132,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -160,7 +159,6 @@ jobs:
             dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip
             dist/emtask-server-windows-msvc-${{ matrix.arch }}.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emtask-server-windows-msys2:
@@ -283,7 +281,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -297,7 +294,6 @@ jobs:
             dist/emtask-server-windows-msys2-x64.zip
             dist/emtask-server-windows-msys2-x64.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emtask-server-windows-cygwin:
@@ -437,7 +433,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -451,7 +446,6 @@ jobs:
             dist/emtask-server-windows-cygwin-x64.zip
             dist/emtask-server-windows-cygwin-x64.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emtask-server-linux-glibc:
@@ -572,7 +566,6 @@ jobs:
             "install_script": "install.sh"
           }
           EOF
-          cp $package_root/info.Dat dist/info.Dat
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
           tar -czf dist/$package_name.tar.gz -C dist $package_name
@@ -586,7 +579,6 @@ jobs:
             dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz
             dist/emtask-server-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
             dist/github-update.sh
-            dist/info.Dat
           if-no-files-found: error
 
   emtask-server-linux-musl:
@@ -744,7 +736,6 @@ jobs:
             "install_script": "install.sh"
           }
           EOF
-          cp $package_root/info.Dat dist/info.Dat
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
           tar -czf dist/$package_name.tar.gz -C dist $package_name
@@ -758,7 +749,6 @@ jobs:
             dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
             dist/emtask-server-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
             dist/github-update.sh
-            dist/info.Dat
           if-no-files-found: error
 
   emtask-client-android-apk:
@@ -894,7 +884,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') $project/dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 $project/dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath $project/dist/$packageName.zip -Force
           (Get-FileHash $project/dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -908,7 +897,6 @@ jobs:
             APP/emtask/Flutter/dist/emtask-client-windows-x64.zip
             APP/emtask/Flutter/dist/emtask-client-windows-x64.zip.sha256
             APP/emtask/Flutter/dist/github-update.ps1
-            APP/emtask/Flutter/dist/info.Dat
           if-no-files-found: error
 
   emtask-client-linux:
@@ -973,7 +961,6 @@ jobs:
             "install_script": "install.sh"
           }
           EOF
-          cp $package_root/info.Dat $project/dist/info.Dat
           cp File/github-updater/sh/github-update.sh $project/dist/github-update.sh
           chmod +x $project/dist/github-update.sh
           tar -czf $project/dist/$package_name.tar.gz -C $project/dist $package_name
@@ -987,7 +974,6 @@ jobs:
             APP/emtask/Flutter/dist/emtask-client-linux-x64.tar.gz
             APP/emtask/Flutter/dist/emtask-client-linux-x64.tar.gz.sha256
             APP/emtask/Flutter/dist/github-update.sh
-            APP/emtask/Flutter/dist/info.Dat
           if-no-files-found: error
 
   emsshd-windows-msvc:
@@ -1073,7 +1059,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -1087,7 +1072,6 @@ jobs:
             dist/emsshd-windows-msvc-${{ matrix.arch }}.zip
             dist/emsshd-windows-msvc-${{ matrix.arch }}.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emsshd-windows-msys2:
@@ -1189,7 +1173,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -1203,7 +1186,6 @@ jobs:
             dist/emsshd-windows-msys2-x64.zip
             dist/emsshd-windows-msys2-x64.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emsshd-windows-cygwin:
@@ -1319,7 +1301,6 @@ jobs:
             install_script = 'install.ps1'
           }
           $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
-          Copy-Item (Join-Path $packageRoot 'info.Dat') dist/info.Dat -Force
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
           Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
@@ -1333,7 +1314,6 @@ jobs:
             dist/emsshd-windows-cygwin-x64.zip
             dist/emsshd-windows-cygwin-x64.zip.sha256
             dist/github-update.ps1
-            dist/info.Dat
           if-no-files-found: error
 
   emsshd-linux-glibc:
@@ -1488,7 +1468,6 @@ jobs:
             "install_script": "install.sh"
           }
           EOF
-          cp $package_root/info.Dat dist/info.Dat
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
           tar -czf dist/$package_name.tar.gz -C dist $package_name
@@ -1502,7 +1481,6 @@ jobs:
             dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz
             dist/emsshd-linux-glibc-${{ matrix.arch }}.tar.gz.sha256
             dist/github-update.sh
-            dist/info.Dat
           if-no-files-found: error
 
   emsshd-linux-musl:
@@ -1718,7 +1696,6 @@ jobs:
             "install_script": "install.sh"
           }
           EOF
-          cp $package_root/info.Dat dist/info.Dat
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
           tar -czf dist/$package_name.tar.gz -C dist $package_name
@@ -1732,7 +1709,6 @@ jobs:
             dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz
             dist/emsshd-linux-musl-${{ matrix.linkage }}-${{ matrix.arch }}.tar.gz.sha256
             dist/github-update.sh
-            dist/info.Dat
           if-no-files-found: error
 
   release-packages:
