@@ -1,10 +1,20 @@
 param(
-    [Alias('uninstall')]
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingArgs
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+$extraArgs = @($RemainingArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($extraArgs -contains '--uninstall') {
+    $Uninstall = $true
+    $extraArgs = @($extraArgs | Where-Object { $_ -ne '--uninstall' })
+}
+if ($extraArgs.Count -gt 0) {
+    throw "Unsupported argument(s): $($extraArgs -join ' ')"
+}
 
 $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $manifestPath = Join-Path $packageDir 'install-manifest.psd1'

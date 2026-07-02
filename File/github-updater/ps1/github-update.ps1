@@ -272,11 +272,24 @@ function Get-PackageDirectory {
     throw 'No top-level package directory found in archive.'
 }
 
+function Repair-InstallScriptCompatibility {
+    param([string]$ScriptPath)
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { return }
+
+    $text = Get-Content -LiteralPath $ScriptPath -Raw
+    $fixed = $text -replace "(?m)^[ \t]*\[Alias\('uninstall'\)\]\r?\n(?=[ \t]*\[switch\]\`$Uninstall\b)", ''
+    if ($fixed -ne $text) {
+        Set-Content -LiteralPath $ScriptPath -Encoding UTF8 -NoNewline -Value $fixed
+    }
+}
+
 function Invoke-InstallScript {
     param([string]$PackageDir)
 
     $ps1 = Join-Path $PackageDir 'install.ps1'
     if (Test-Path -LiteralPath $ps1 -PathType Leaf) {
+        Repair-InstallScriptCompatibility -ScriptPath $ps1
         & $ps1
         return
     }
@@ -288,6 +301,7 @@ function Invoke-UninstallScript {
 
     $ps1 = Join-Path $PackageDir 'install.ps1'
     if (Test-Path -LiteralPath $ps1 -PathType Leaf) {
+        Repair-InstallScriptCompatibility -ScriptPath $ps1
         & $ps1 -Uninstall
         return
     }
