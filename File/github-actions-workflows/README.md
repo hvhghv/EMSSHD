@@ -127,17 +127,7 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 
 ## 约定包结构
 
-普通 Windows 包：
-
-```text
-<package>.zip
-├── github-update.ps1
-└── <package>/
-    ├── ...项目文件
-    └── install.ps1
-```
-
-对应 Action artifact 下载后的外层 zip 中包含：
+普通 Windows Action artifact 下载后的外层 zip 中包含：
 
 ```text
 <artifact>.zip
@@ -146,23 +136,41 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 └── github-update.ps1
 ```
 
-普通 Linux/macOS 包：
+其中内层 `<package>.zip` 只包含安装目录：
 
 ```text
-<package>.tar.gz
-├── github-update.sh
+<package>.zip
 └── <package>/
     ├── ...项目文件
-    └── install.sh
+    └── install.ps1
 ```
 
-对应 Action artifact 下载后的外层 zip 中包含：
+普通 Linux/macOS Action artifact 下载后的外层 zip 中包含：
 
 ```text
 <artifact>.zip
 ├── <package>.tar.gz
 ├── <package>.tar.gz.sha256
 └── github-update.sh
+```
+
+其中内层 `<package>.tar.gz` 只包含安装目录：
+
+```text
+<package>.tar.gz
+└── <package>/
+    ├── ...项目文件
+    └── install.sh
+```
+
+Release job 下载 Action artifacts 后，会在发布前重新把对应 `github-update.ps1` / `github-update.sh` 注入 Release asset。因此 Release asset 仍是可独立安装的包：
+
+```text
+<package>.zip / <package>.tar.gz
+├── github-update.ps1 / github-update.sh
+└── <package>/
+    ├── ...项目文件
+    └── install.ps1 / install.sh
 ```
 
 APK：

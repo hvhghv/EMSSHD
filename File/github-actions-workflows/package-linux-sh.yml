@@ -22,7 +22,7 @@
 
     cp File/github-updater/sh/github-update.sh "$dist_dir/github-update.sh"
     chmod +x "$dist_dir/github-update.sh"
-    tar -czf "$dist_dir/$package_name.tar.gz" -C "$dist_dir" "$package_name" github-update.sh
+    tar -czf "$dist_dir/$package_name.tar.gz" -C "$dist_dir" "$package_name"
     sha256sum "$dist_dir/$package_name.tar.gz" > "$dist_dir/$package_name.tar.gz.sha256"
 
 - name: Upload Linux package artifact

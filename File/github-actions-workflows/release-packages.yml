@@ -22,6 +22,45 @@ release-packages:
         merge-multiple: true
         path: release-artifacts
 
+    - name: Prepare Release packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        for package in release-artifacts/*.zip; do
+          case "$(basename "$package")" in
+            *android*.zip)
+              continue
+              ;;
+          esac
+
+          work_dir=$(mktemp -d)
+          unzip -q "$package" -d "$work_dir"
+          cp release-artifacts/github-update.ps1 "$work_dir/github-update.ps1"
+          rm -f "$package"
+          (
+            cd "$work_dir"
+            zip -qr "$GITHUB_WORKSPACE/$package" *
+          )
+          rm -rf "$work_dir"
+          sha256sum "$package" > "$package.sha256"
+        done
+
+        for package in release-artifacts/*.tar.gz; do
+          work_dir=$(mktemp -d)
+          tar -xzf "$package" -C "$work_dir"
+          cp release-artifacts/github-update.sh "$work_dir/github-update.sh"
+          chmod +x "$work_dir/github-update.sh"
+          rm -f "$package"
+          (
+            cd "$work_dir"
+            tar -czf "$GITHUB_WORKSPACE/$package" *
+          )
+          rm -rf "$work_dir"
+          sha256sum "$package" > "$package.sha256"
+        done
+
     - name: Publish GitHub Release assets
       uses: softprops/action-gh-release@v2
       with:

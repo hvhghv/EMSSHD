@@ -19,7 +19,7 @@
 
     Copy-Item File/github-updater/ps1/github-update.ps1 (Join-Path $distDir 'github-update.ps1')
     Compress-Archive `
-      -Path $packageRoot, (Join-Path $distDir 'github-update.ps1') `
+      -Path $packageRoot `
       -DestinationPath (Join-Path $distDir "$packageName.zip") `
       -Force
 

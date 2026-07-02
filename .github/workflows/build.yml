@@ -119,7 +119,7 @@ jobs:
           Copy-Item LICENSE $packageRoot/
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -254,7 +254,7 @@ jobs:
           $packageRoot = 'dist/' + $packageName
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -392,7 +392,7 @@ jobs:
           $packageRoot = 'dist/' + $packageName
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -511,7 +511,7 @@ jobs:
 
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
-          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -666,7 +666,7 @@ jobs:
 
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
-          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -782,7 +782,7 @@ jobs:
           Copy-Item LICENSE $packageRoot/docs/
 
           Copy-Item File/github-updater/ps1/github-update.ps1 $project/dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, $project/dist/github-update.ps1 -DestinationPath $project/dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath $project/dist/$packageName.zip -Force
           (Get-FileHash $project/dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline $project/dist/$packageName.zip.sha256
 
@@ -845,7 +845,7 @@ jobs:
 
           cp File/github-updater/sh/github-update.sh $project/dist/github-update.sh
           chmod +x $project/dist/github-update.sh
-          tar -czf $project/dist/$package_name.tar.gz -C $project/dist $package_name github-update.sh
+          tar -czf $project/dist/$package_name.tar.gz -C $project/dist $package_name
           sha256sum $project/dist/$package_name.tar.gz > $project/dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -928,7 +928,7 @@ jobs:
           '@ | Set-Content -Encoding UTF8 $packageRoot/docs/README-windows.txt
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -1028,7 +1028,7 @@ jobs:
           $packageRoot = 'dist/' + $packageName
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -1142,7 +1142,7 @@ jobs:
           $packageRoot = 'dist/' + $packageName
 
           Copy-Item File/github-updater/ps1/github-update.ps1 dist/github-update.ps1
-          Compress-Archive -Path $packageRoot, dist/github-update.ps1 -DestinationPath dist/$packageName.zip -Force
+          Compress-Archive -Path $packageRoot -DestinationPath dist/$packageName.zip -Force
           (Get-FileHash dist/$packageName.zip -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
             Set-Content -NoNewline dist/$packageName.zip.sha256
 
@@ -1295,7 +1295,7 @@ jobs:
 
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
-          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -1508,7 +1508,7 @@ jobs:
 
           cp File/github-updater/sh/github-update.sh dist/github-update.sh
           chmod +x dist/github-update.sh
-          tar -czf dist/$package_name.tar.gz -C dist $package_name github-update.sh
+          tar -czf dist/$package_name.tar.gz -C dist $package_name
           sha256sum dist/$package_name.tar.gz > dist/$package_name.tar.gz.sha256
 
       - name: Upload artifact
@@ -1549,6 +1549,45 @@ jobs:
           pattern: em*-*
           merge-multiple: true
           path: release-artifacts
+
+      - name: Prepare Release packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          for package in release-artifacts/*.zip; do
+            case "$(basename "$package")" in
+              *android*.zip)
+                continue
+                ;;
+            esac
+
+            work_dir=$(mktemp -d)
+            unzip -q "$package" -d "$work_dir"
+            cp release-artifacts/github-update.ps1 "$work_dir/github-update.ps1"
+            rm -f "$package"
+            (
+              cd "$work_dir"
+              zip -qr "$GITHUB_WORKSPACE/$package" *
+            )
+            rm -rf "$work_dir"
+            sha256sum "$package" > "$package.sha256"
+          done
+
+          for package in release-artifacts/*.tar.gz; do
+            work_dir=$(mktemp -d)
+            tar -xzf "$package" -C "$work_dir"
+            cp release-artifacts/github-update.sh "$work_dir/github-update.sh"
+            chmod +x "$work_dir/github-update.sh"
+            rm -f "$package"
+            (
+              cd "$work_dir"
+              tar -czf "$GITHUB_WORKSPACE/$package" *
+            )
+            rm -rf "$work_dir"
+            sha256sum "$package" > "$package.sha256"
+          done
 
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
