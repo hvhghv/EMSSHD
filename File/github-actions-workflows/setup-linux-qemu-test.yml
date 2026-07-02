@@ -1,0 +1,63 @@
+# Reusable QEMU test setup snippets for Linux cross-compiled binaries.
+# Paste this after build/linkage verification and replace placeholders.
+# It supports native x64 and cross targets through qemu-user-static.
+
+- name: Set up QEMU test runner
+  shell: bash
+  run: |
+    set -euo pipefail
+    sudo apt-get update
+    sudo apt-get install -y qemu-user-static file
+
+    runner=''
+    qemu_ld_prefix=''
+    case '${{ matrix.arch }}' in
+      x64|x86_64)
+        ;;
+      x86|i386|i686)
+        runner=qemu-i386-static
+        qemu_ld_prefix='<glibc-or-musl-sysroot>'
+        ;;
+      arm|armhf|armv7)
+        runner=qemu-arm-static
+        qemu_ld_prefix='<glibc-or-musl-sysroot>'
+        ;;
+      aarch64|arm64)
+        runner=qemu-aarch64-static
+        qemu_ld_prefix='<glibc-or-musl-sysroot>'
+        ;;
+      riscv64)
+        runner=qemu-riscv64-static
+        qemu_ld_prefix='<glibc-or-musl-sysroot>'
+        ;;
+      *)
+        echo "unsupported qemu test arch: ${{ matrix.arch }}" >&2
+        exit 1
+        ;;
+    esac
+
+    if [ -n "$runner" ]; then
+      command -v "$runner"
+      echo "QEMU_RUNNER=$runner" >> "$GITHUB_ENV"
+      echo "QEMU_LD_PREFIX=$qemu_ld_prefix" >> "$GITHUB_ENV"
+    else
+      echo 'QEMU_RUNNER=' >> "$GITHUB_ENV"
+      echo 'QEMU_LD_PREFIX=' >> "$GITHUB_ENV"
+    fi
+
+- name: Run QEMU smoke test
+  shell: bash
+  run: |
+    set -euo pipefail
+    binary='<binary-path>'
+    file "$binary"
+
+    if [ -n "${QEMU_RUNNER:-}" ]; then
+      if [ -n "${QEMU_LD_PREFIX:-}" ] && [ "${QEMU_LD_PREFIX}" != '<glibc-or-musl-sysroot>' ]; then
+        $QEMU_RUNNER -L "$QEMU_LD_PREFIX" "$binary" <test-args>
+      else
+        $QEMU_RUNNER "$binary" <test-args>
+      fi
+    else
+      "$binary" <test-args>
+    fi

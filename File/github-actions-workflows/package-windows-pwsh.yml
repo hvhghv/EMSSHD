@@ -1,0 +1,37 @@
+# Reusable Windows package snippet.
+# Paste this under a job's `steps:` list and replace placeholders.
+
+- name: Package Windows bundle
+  shell: pwsh
+  run: |
+    $packageName = '<package-name>'
+    $distDir = '<dist-dir>'
+    $packageRoot = Join-Path $distDir $packageName
+
+    Remove-Item -LiteralPath $packageRoot -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+
+    # Copy project files into $packageRoot.
+    # Examples:
+    # Copy-Item <binary-path> $packageRoot/
+    # Copy-Item <config-example> $packageRoot/
+    Copy-Item '<install-script.ps1>' (Join-Path $packageRoot 'install.ps1')
+
+    Copy-Item File/github-updater/ps1/github-update.ps1 (Join-Path $distDir 'github-update.ps1')
+    Compress-Archive `
+      -Path $packageRoot, (Join-Path $distDir 'github-update.ps1') `
+      -DestinationPath (Join-Path $distDir "$packageName.zip") `
+      -Force
+
+    (Get-FileHash (Join-Path $distDir "$packageName.zip") -Algorithm SHA256).Hash.ToLower() + '  ' + $packageName + '.zip' |
+      Set-Content -NoNewline (Join-Path $distDir "$packageName.zip.sha256")
+
+- name: Upload Windows package artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: <artifact-name>
+    path: |
+      <dist-dir>/<package-name>.zip
+      <dist-dir>/<package-name>.zip.sha256
+      <dist-dir>/github-update.ps1
+    if-no-files-found: error

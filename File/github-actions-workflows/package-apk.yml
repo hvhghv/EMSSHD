@@ -1,0 +1,16 @@
+# Reusable Android APK artifact snippet.
+# Paste this under an Android/Flutter job's `steps:` list and replace placeholders.
+
+- name: Package APK
+  shell: bash
+  run: |
+    set -euo pipefail
+    mkdir -p '<dist-dir>'
+    cp '<built-apk-path>' '<dist-dir>/<apk-name>.apk'
+
+- name: Upload APK artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: <artifact-name>
+    path: <dist-dir>/<apk-name>.apk
+    if-no-files-found: error

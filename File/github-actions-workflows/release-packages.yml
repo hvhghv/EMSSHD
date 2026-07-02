@@ -1,0 +1,32 @@
+# Reusable Release job for package assets.
+# Paste this under `jobs:` and replace placeholders.
+# It publishes only real install packages/APKs. It intentionally does not publish
+# *.sha256 or bare github-update.* files as Release assets.
+
+release-packages:
+  name: release / packages
+  runs-on: ubuntu-22.04
+  if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+  permissions:
+    contents: write
+  needs:
+    # - <build-job-1>
+    # - <build-job-2>
+    - <release-needs>
+
+  steps:
+    - name: Download package artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: <artifact-pattern>
+        merge-multiple: true
+        path: release-artifacts
+
+    - name: Publish GitHub Release assets
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          release-artifacts/*.zip
+          release-artifacts/*.tar.gz
+          release-artifacts/*.apk
+        fail_on_unmatched_files: true

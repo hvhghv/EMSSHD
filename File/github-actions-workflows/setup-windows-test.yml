@@ -1,0 +1,94 @@
+# Reusable Windows test environment snippets.
+# Paste the needed parts into a windows job and replace placeholders.
+# Covers MSVC, MSYS2, Cygwin, CTest, smoke tests, and optional service tests.
+
+# Optional: initialize MSVC developer environment for command-line tools.
+# Use this before CMake/Ninja/MSBuild tests when the job does not use a Visual Studio generator.
+- name: Set up MSVC developer command prompt
+  if: ${{ matrix.toolchain == 'msvc' }}
+  uses: ilammy/msvc-dev-cmd@v1
+  with:
+    arch: ${{ matrix.vs_arch }}
+
+- name: Set up Windows test workspace
+  shell: pwsh
+  run: |
+    $ErrorActionPreference = 'Stop'
+    New-Item -ItemType Directory -Force -Path '<test-output-dir>' | Out-Null
+    Write-Host "Runner OS: $env:RUNNER_OS"
+    Write-Host "Processor architecture: $env:PROCESSOR_ARCHITECTURE"
+    cmake --version
+
+- name: Run CTest on Windows
+  shell: pwsh
+  run: |
+    $ErrorActionPreference = 'Stop'
+    ctest --test-dir '<build-dir>' -C <config> --output-on-failure
+
+- name: Run Windows binary smoke test
+  shell: pwsh
+  run: |
+    $ErrorActionPreference = 'Stop'
+    $binary = '<binary-path.exe>'
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+      throw "Binary not found: $binary"
+    }
+
+    $process = Start-Process -FilePath $binary -ArgumentList '<test-args>' -NoNewWindow -PassThru
+    if (-not $process.WaitForExit(<timeout-ms>)) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+      throw "Smoke test timed out: $binary"
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Smoke test failed with exit code $($process.ExitCode): $binary"
+    }
+
+# Optional: skip runtime tests for non-native binaries on GitHub-hosted Windows runners.
+- name: Skip non-native Windows runtime test
+  if: ${{ matrix.arch == 'arm64' }}
+  shell: pwsh
+  run: Write-Host 'Skipping runtime test: GitHub-hosted x64 Windows runners cannot execute ARM64 binaries.'
+
+# Optional: run a project-specific PowerShell package/service test.
+- name: Run Windows package test
+  if: ${{ matrix.arch != 'arm64' }}
+  shell: pwsh
+  run: |
+    $ErrorActionPreference = 'Stop'
+    & '<test-script.ps1>' `
+      -PackageRoot '<package-root>' `
+      -Label '<test-label>'
+
+# MSYS2 test environment. Put this before MSYS2 build/test steps.
+- name: Set up MSYS2 test environment
+  if: ${{ matrix.toolchain == 'msys2' }}
+  uses: msys2/setup-msys2@v2
+  with:
+    msystem: MINGW64
+    update: true
+    install: >-
+      mingw-w64-x86_64-gcc
+      mingw-w64-x86_64-cmake
+      mingw-w64-x86_64-ninja
+      mingw-w64-x86_64-pkgconf
+
+- name: Run MSYS2 CTest
+  if: ${{ matrix.toolchain == 'msys2' }}
+  shell: msys2 {0}
+  run: |
+    set -euo pipefail
+    ctest --test-dir '<build-dir>' --output-on-failure
+
+# Cygwin test environment. Put this before Cygwin build/test steps.
+- name: Set up Cygwin test environment
+  if: ${{ matrix.toolchain == 'cygwin' }}
+  uses: cygwin/cygwin-install-action@v6
+  with:
+    packages: cmake gcc-core ninja make procps-ng
+
+- name: Run Cygwin CTest
+  if: ${{ matrix.toolchain == 'cygwin' }}
+  shell: bash
+  run: |
+    set -euo pipefail
+    ctest --test-dir '<build-dir>' --output-on-failure

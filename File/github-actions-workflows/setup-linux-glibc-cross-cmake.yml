@@ -1,0 +1,153 @@
+# Reusable Linux glibc cross-compile setup snippets.
+# Paste the needed parts into an ubuntu job and replace placeholders.
+
+# Example matrix:
+# strategy:
+#   fail-fast: false
+#   matrix:
+#     include:
+#       - arch: x64
+#         processor: x86_64
+#         triplet: x86_64-linux-gnu
+#         c_compiler: gcc
+#         apt_packages: ''
+#         cross: 'false'
+#       - arch: x86
+#         processor: i686
+#         triplet: i686-linux-gnu
+#         c_compiler: i686-linux-gnu-gcc
+#         apt_packages: gcc-i686-linux-gnu
+#         cross: 'true'
+#       - arch: arm
+#         processor: arm
+#         triplet: arm-linux-gnueabihf
+#         c_compiler: arm-linux-gnueabihf-gcc
+#         apt_packages: gcc-arm-linux-gnueabihf
+#         cross: 'true'
+#       - arch: aarch64
+#         processor: aarch64
+#         triplet: aarch64-linux-gnu
+#         c_compiler: aarch64-linux-gnu-gcc
+#         apt_packages: gcc-aarch64-linux-gnu
+#         cross: 'true'
+#       - arch: riscv64
+#         processor: riscv64
+#         triplet: riscv64-linux-gnu
+#         c_compiler: riscv64-linux-gnu-gcc
+#         apt_packages: gcc-riscv64-linux-gnu
+#         cross: 'true'
+
+- name: Install glibc cross build dependencies
+  shell: bash
+  run: |
+    set -euo pipefail
+    sudo apt-get update
+    sudo apt-get install -y build-essential cmake ninja-build file qemu-user-static ${{ matrix.apt_packages }}
+
+- name: Configure CMake for glibc cross build
+  shell: bash
+  run: |
+    set -euo pipefail
+    build_dir='<build-dir-prefix>-${{ matrix.arch }}'
+    qemu_emulator=''
+    case '${{ matrix.arch }}' in
+      x64|x86_64)
+        ;;
+      x86|i386|i686)
+        qemu_emulator='qemu-i386-static;-L;/usr/${{ matrix.triplet }}'
+        ;;
+      arm|armhf|armv7)
+        qemu_emulator='qemu-arm-static;-L;/usr/${{ matrix.triplet }}'
+        ;;
+      aarch64|arm64)
+        qemu_emulator='qemu-aarch64-static;-L;/usr/${{ matrix.triplet }}'
+        ;;
+      riscv64)
+        qemu_emulator='qemu-riscv64-static;-L;/usr/${{ matrix.triplet }}'
+        ;;
+    esac
+
+    cmake_args=(
+      -S .
+      -B "$build_dir"
+      -G Ninja
+      -DCMAKE_BUILD_TYPE=Release
+      -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+      # Add project-specific CMake options here.
+    )
+
+    if [ '${{ matrix.cross }}' = 'true' ]; then
+      cmake_args+=(
+        -DCMAKE_SYSTEM_NAME=Linux
+        -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.processor }}
+        -DCMAKE_FIND_ROOT_PATH=/usr/${{ matrix.triplet }}
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+        -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
+      )
+      if [ -n "$qemu_emulator" ]; then
+        cmake_args+=("-DCMAKE_CROSSCOMPILING_EMULATOR=$qemu_emulator")
+      fi
+    fi
+
+    cmake "${cmake_args[@]}"
+
+- name: Build CMake target
+  shell: bash
+  run: cmake --build '<build-dir-prefix>-${{ matrix.arch }}' --target <target-name> --parallel
+
+- name: Set up QEMU test runner
+  shell: bash
+  run: |
+    set -euo pipefail
+    runner=''
+    qemu_ld_prefix=''
+    case '${{ matrix.arch }}' in
+      x64|x86_64)
+        ;;
+      x86|i386|i686)
+        runner=qemu-i386-static
+        qemu_ld_prefix=/usr/${{ matrix.triplet }}
+        ;;
+      arm|armhf|armv7)
+        runner=qemu-arm-static
+        qemu_ld_prefix=/usr/${{ matrix.triplet }}
+        ;;
+      aarch64|arm64)
+        runner=qemu-aarch64-static
+        qemu_ld_prefix=/usr/${{ matrix.triplet }}
+        ;;
+      riscv64)
+        runner=qemu-riscv64-static
+        qemu_ld_prefix=/usr/${{ matrix.triplet }}
+        ;;
+      *)
+        echo "unsupported qemu test arch: ${{ matrix.arch }}" >&2
+        exit 1
+        ;;
+    esac
+
+    if [ -n "$runner" ]; then
+      command -v "$runner"
+      echo "QEMU_RUNNER=$runner" >> "$GITHUB_ENV"
+      echo "QEMU_LD_PREFIX=$qemu_ld_prefix" >> "$GITHUB_ENV"
+    else
+      echo 'QEMU_RUNNER=' >> "$GITHUB_ENV"
+      echo 'QEMU_LD_PREFIX=' >> "$GITHUB_ENV"
+    fi
+
+- name: Run QEMU smoke test
+  shell: bash
+  run: |
+    set -euo pipefail
+    binary='<binary-path>'
+    if [ -n "${QEMU_RUNNER:-}" ]; then
+      $QEMU_RUNNER -L "$QEMU_LD_PREFIX" "$binary" <test-args>
+    else
+      "$binary" <test-args>
+    fi
+
+- name: Run CTest through QEMU
+  shell: bash
+  run: ctest --test-dir '<build-dir-prefix>-${{ matrix.arch }}' --output-on-failure

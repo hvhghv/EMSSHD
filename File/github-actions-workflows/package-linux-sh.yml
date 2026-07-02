@@ -1,0 +1,36 @@
+# Reusable Linux/macOS package snippet.
+# Paste this under a job's `steps:` list and replace placeholders.
+
+- name: Package Linux bundle
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    package_name='<package-name>'
+    dist_dir='<dist-dir>'
+    package_root="$dist_dir/$package_name"
+
+    rm -rf "$package_root"
+    mkdir -p "$package_root"
+
+    # Copy project files into $package_root.
+    # Examples:
+    # cp <binary-path> "$package_root/"
+    # cp <config-example> "$package_root/"
+    cp '<install-script.sh>' "$package_root/install.sh"
+    chmod +x "$package_root/install.sh"
+
+    cp File/github-updater/sh/github-update.sh "$dist_dir/github-update.sh"
+    chmod +x "$dist_dir/github-update.sh"
+    tar -czf "$dist_dir/$package_name.tar.gz" -C "$dist_dir" "$package_name" github-update.sh
+    sha256sum "$dist_dir/$package_name.tar.gz" > "$dist_dir/$package_name.tar.gz.sha256"
+
+- name: Upload Linux package artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: <artifact-name>
+    path: |
+      <dist-dir>/<package-name>.tar.gz
+      <dist-dir>/<package-name>.tar.gz.sha256
+      <dist-dir>/github-update.sh
+    if-no-files-found: error

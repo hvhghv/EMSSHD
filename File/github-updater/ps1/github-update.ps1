@@ -18,6 +18,9 @@ param(
     [switch]$IncludePrerelease,
     [switch]$Force,
 
+    [Alias('h', '?')]
+    [switch]$Help,
+
     [Alias('-uninstall')]
     [switch]$Uninstall
 )
@@ -25,9 +28,58 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-if ($Uninstall) { $Mode = 'uninstall' }
 $ScriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+$ScriptName = Split-Path -Leaf $ScriptPath
 $ScriptDir = Split-Path -Parent $ScriptPath
+
+function Show-Usage {
+    Write-Output @"
+Usage:
+  .\$ScriptName -Repo owner/repo [options]
+  .\$ScriptName -Mode uninstall [-InstallDir DIR] [-PackageName NAME]
+  .\$ScriptName -Uninstall [-InstallDir DIR] [-PackageName NAME]
+
+Options:
+  -Repo VALUE                  GitHub repository: owner/repo, https://github.com/owner/repo, or git@github.com:owner/repo.git
+  -Channel release|action      Update channel, default: release
+  -Mode list|download|install|uninstall
+                               Mode, default: list
+  -Uninstall, --uninstall      Alias for -Mode uninstall
+  -Version VALUE               Release tag/name or Actions run id/run number/SHA prefix/title
+  -NamePattern PATTERN         Asset/artifact wildcard, default: *
+  -Workflow VALUE              Workflow file/name/id for Actions
+  -Branch VALUE                Branch filter for Actions
+  -OutputDir DIR               Download directory, default: .
+  -InstallDir DIR              Install root, default for install/uninstall: current directory
+  -PackageName NAME            Installed xxx directory name, inferred during install
+  -Token TOKEN                 GitHub token, default: GITHUB_TOKEN; Actions can also use gh auth
+  -IncludePrerelease           Include prerelease releases
+  -Force                       Reserved for compatibility; install always supports overwrite
+  -Help, -h, -?, --help, --h   Show this help
+"@
+}
+
+if ($Repo -and (@('--help', '--h') -contains $Repo)) {
+    Show-Usage
+    return
+}
+
+if ($Repo -and (@('--uninstall') -contains $Repo)) {
+    $Uninstall = $true
+    $Repo = $null
+}
+
+if ($PSBoundParameters.Count -eq 0) {
+    Show-Usage
+    return
+}
+
+if ($Help) {
+    Show-Usage
+    return
+}
+
+if ($Uninstall) { $Mode = 'uninstall' }
 
 function Resolve-GitHubToken {
     if ($Token -or $Channel -ne 'action') { return }

@@ -12,6 +12,11 @@ The repository is always passed as a parameter and can be `owner/repo`, `https:/
 ## List versions
 
 ```powershell
+./github-update.ps1 -h
+./github-update.ps1 --help
+```
+
+```powershell
 # List release versions
 ./github-update.ps1 -Repo owner/repo -Channel release -Mode list
 
@@ -67,3 +72,4 @@ Expected package layout:
 - `-InstallDir`: install root for `install` / `uninstall`; defaults to the current directory.
 - `-PackageName`: installed `xxx/` directory name; required for uninstall when it cannot be inferred.
 - `-Token`: GitHub token. Defaults to `GITHUB_TOKEN`; for `action` channel, falls back to `gh auth token` when available.
+- `-Help` / `-h` / `-?` / `--help` / `--h`: show usage.
