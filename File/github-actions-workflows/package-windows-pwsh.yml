@@ -17,6 +17,21 @@
     # Copy-Item <config-example> $packageRoot/
     Copy-Item '<install-script.ps1>' (Join-Path $packageRoot 'install.ps1')
 
+    $info = [ordered]@{
+      schema = 'github-updater-info/v1'
+      repo = '${{ github.repository }}'
+      package_type = 'archive'
+      artifact = '<artifact-name>'
+      package = $packageName
+      app = '<app-name>'
+      platform = 'windows'
+      toolchain = '<toolchain>'
+      arch = '<arch>'
+      updater = 'ps1'
+      install_script = 'install.ps1'
+    }
+    $info | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $packageRoot 'info.Dat')
+    Copy-Item (Join-Path $packageRoot 'info.Dat') (Join-Path $distDir 'info.Dat') -Force
     Copy-Item File/github-updater/ps1/github-update.ps1 (Join-Path $distDir 'github-update.ps1')
     Compress-Archive `
       -Path $packageRoot `
@@ -34,4 +49,5 @@
       <dist-dir>/<package-name>.zip
       <dist-dir>/<package-name>.zip.sha256
       <dist-dir>/github-update.ps1
+      <dist-dir>/info.Dat
     if-no-files-found: error

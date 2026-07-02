@@ -22,11 +22,13 @@
 
 脚本实现支持 `list`、`download`、`install`、`uninstall`。`install` 会把包安装到 `--install-dir` / `-InstallDir` 指定位置；未传入时安装到当前目录。更新覆盖时会删除旧的 `xxx/` 目录并安装新的 `xxx/`，最后执行 `xxx/install.*`。`github-update.*` 与 `xxx/` 同目录。`uninstall` 会先执行 `xxx/install.* --uninstall` / `-Uninstall`，再删除 `xxx/`。
 
+`install` 模式未显式传 `NamePattern` / `--name-pattern` 时，会优先按已安装目录的 `info.Dat` 选择同一包；否则只接受当前平台上唯一可安装的普通包。匹配到多个 Windows/Linux 包时会要求显式指定包名，不会按 GitHub API 返回顺序盲装。未显式传 `OutputDir` / `--output-dir` 时，安装下载文件会放在临时目录，成功或失败都会清理。
+
 规范包结构：
 
-- action 普通 artifact：外层 `xxx.zip` 内含内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*`。
-- release 普通 asset：直接发布 `xxx.zip` / `xxx.tar.gz`，包内含 `xxx/` 与同级 `github-update.*`，`xxx/` 内含 `install.*`。
-- action APK artifact：外层 `xxx.zip` 内含 `xxx.apk`。
+- action 普通 artifact：外层 `xxx.zip` 内含 `info.Dat`、内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*` 和 `info.Dat`。
+- release 普通 asset：直接发布 `xxx.zip` / `xxx.tar.gz`，包内含 `xxx/` 与同级 `github-update.*`，`xxx/` 内含 `install.*` 和 `info.Dat`。
+- action APK artifact：外层 `xxx.zip` 内含 `info.Dat` 与 `xxx.apk`。
 - release APK asset：直接发布 `xxx.apk`。
 
 ## 快速入口

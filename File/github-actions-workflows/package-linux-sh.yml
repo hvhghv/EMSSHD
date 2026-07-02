@@ -20,6 +20,22 @@
     cp '<install-script.sh>' "$package_root/install.sh"
     chmod +x "$package_root/install.sh"
 
+    cat > "$package_root/info.Dat" <<EOF
+    {
+      "schema": "github-updater-info/v1",
+      "repo": "${{ github.repository }}",
+      "package_type": "archive",
+      "artifact": "<artifact-name>",
+      "package": "$package_name",
+      "app": "<app-name>",
+      "platform": "linux",
+      "toolchain": "<toolchain>",
+      "arch": "<arch>",
+      "updater": "sh",
+      "install_script": "install.sh"
+    }
+    EOF
+    cp "$package_root/info.Dat" "$dist_dir/info.Dat"
     cp File/github-updater/sh/github-update.sh "$dist_dir/github-update.sh"
     chmod +x "$dist_dir/github-update.sh"
     tar -czf "$dist_dir/$package_name.tar.gz" -C "$dist_dir" "$package_name"
@@ -33,4 +49,5 @@
       <dist-dir>/<package-name>.tar.gz
       <dist-dir>/<package-name>.tar.gz.sha256
       <dist-dir>/github-update.sh
+      <dist-dir>/info.Dat
     if-no-files-found: error

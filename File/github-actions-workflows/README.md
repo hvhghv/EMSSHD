@@ -133,7 +133,8 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <artifact>.zip
 ├── <package>.zip
 ├── <package>.zip.sha256
-└── github-update.ps1
+├── github-update.ps1
+└── info.Dat
 ```
 
 其中内层 `<package>.zip` 只包含安装目录：
@@ -142,7 +143,8 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <package>.zip
 └── <package>/
     ├── ...项目文件
-    └── install.ps1
+    ├── install.ps1
+    └── info.Dat
 ```
 
 普通 Linux/macOS Action artifact 下载后的外层 zip 中包含：
@@ -151,7 +153,8 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <artifact>.zip
 ├── <package>.tar.gz
 ├── <package>.tar.gz.sha256
-└── github-update.sh
+├── github-update.sh
+└── info.Dat
 ```
 
 其中内层 `<package>.tar.gz` 只包含安装目录：
@@ -160,7 +163,8 @@ musl 静态二进制可直接通过 QEMU 运行；动态二进制通常需要确
 <package>.tar.gz
 └── <package>/
     ├── ...项目文件
-    └── install.sh
+    ├── install.sh
+    └── info.Dat
 ```
 
 Release job 下载 Action artifacts 后，会在发布前重新把对应 `github-update.ps1` / `github-update.sh` 注入 Release asset。因此 Release asset 仍是可独立安装的包：
@@ -170,7 +174,8 @@ Release job 下载 Action artifacts 后，会在发布前重新把对应 `github
 ├── github-update.ps1 / github-update.sh
 └── <package>/
     ├── ...项目文件
-    └── install.ps1 / install.sh
+    ├── install.ps1 / install.sh
+    └── info.Dat
 ```
 
 APK：
@@ -178,11 +183,14 @@ APK：
 ```text
 # Action artifact 外层 zip
 <artifact>.zip
-└── <app>.apk
+├── <app>.apk
+└── info.Dat
 
 # Release asset
 <app>.apk
 ```
+
+`info.Dat` 使用 JSON 内容，最少应包含 `schema`、`repo`、`package_type`、`artifact`、`package`、`app`、`platform`、`toolchain`、`arch`、`updater`、`install_script`。Action 外层的 `info.Dat` 用于 updater 在下载后判断包类型；内层安装目录的 `info.Dat` 用于后续默认更新时识别当前安装的包。
 
 ## 迁移步骤
 

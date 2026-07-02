@@ -7,10 +7,27 @@
     set -euo pipefail
     mkdir -p '<dist-dir>'
     cp '<built-apk-path>' '<dist-dir>/<apk-name>.apk'
+    cat > '<dist-dir>/info.Dat' <<EOF
+    {
+      "schema": "github-updater-info/v1",
+      "repo": "${{ github.repository }}",
+      "package_type": "apk",
+      "artifact": "<artifact-name>",
+      "package": "<apk-name>.apk",
+      "app": "<app-name>",
+      "platform": "android",
+      "toolchain": "android",
+      "arch": "<arch>",
+      "updater": "android",
+      "install_script": ""
+    }
+    EOF
 
 - name: Upload APK artifact
   uses: actions/upload-artifact@v4
   with:
     name: <artifact-name>
-    path: <dist-dir>/<apk-name>.apk
+    path: |
+      <dist-dir>/<apk-name>.apk
+      <dist-dir>/info.Dat
     if-no-files-found: error

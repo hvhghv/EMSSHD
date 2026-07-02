@@ -14,6 +14,8 @@ package_name=""
 token="${GITHUB_TOKEN:-}"
 include_prerelease="false"
 force="false"
+name_pattern_explicit="false"
+output_dir_explicit="false"
 script_path=${BASH_SOURCE[0]:-$0}
 script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 
@@ -48,10 +50,10 @@ while [ $# -gt 0 ]; do
     --mode) mode=${2:?}; shift 2 ;;
     --uninstall) mode="uninstall"; shift ;;
     --version) version=${2:?}; shift 2 ;;
-    --name-pattern) name_pattern=${2:?}; shift 2 ;;
+    --name-pattern) name_pattern=${2:?}; name_pattern_explicit="true"; shift 2 ;;
     --workflow) workflow=${2:?}; shift 2 ;;
     --branch) branch=${2:?}; shift 2 ;;
-    --output-dir) output_dir=${2:?}; shift 2 ;;
+    --output-dir) output_dir=${2:?}; output_dir_explicit="true"; shift 2 ;;
     --install-dir) install_dir=${2:?}; shift 2 ;;
     --package-name) package_name=${2:?}; shift 2 ;;
     --token) token=${2:?}; shift 2 ;;
@@ -114,6 +116,169 @@ gh_api() {
 match_name() {
   local name=$1
   [[ "$name" == $name_pattern ]]
+}
+
+current_platform() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    CYGWIN*|MINGW*|MSYS*|Windows_NT) printf 'windows\n' ;;
+    Darwin*) printf 'macos\n' ;;
+    Linux*) printf 'linux\n' ;;
+    *) printf 'linux\n' ;;
+  esac
+}
+
+json_value() {
+  local file=$1
+  local key=$2
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg key "$key" '.[$key] // empty' "$file"
+  else
+    sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$file" | head -n 1
+  fi
+}
+
+assert_info_compatible() {
+  local info_file=$1
+  local source_name=$2
+  if [ ! -f "$info_file" ]; then
+    return 0
+  fi
+
+  local package_type platform updater host_platform
+  package_type=$(json_value "$info_file" package_type | tr '[:upper:]' '[:lower:]')
+  platform=$(json_value "$info_file" platform | tr '[:upper:]' '[:lower:]')
+  updater=$(json_value "$info_file" updater | tr '[:upper:]' '[:lower:]')
+  host_platform=$(current_platform)
+
+  if [ "$package_type" = "apk" ]; then
+    echo "Package '$source_name' is an Android APK artifact; github-update.sh cannot install APK packages. Use an Android installer or choose a Linux/macOS package with --name-pattern." >&2
+    exit 2
+  fi
+  if [ -n "$package_type" ] && [ "$package_type" != "archive" ]; then
+    echo "Package '$source_name' has unsupported package_type '$package_type'." >&2
+    exit 2
+  fi
+  if [ -n "$platform" ] && [ "$platform" != "any" ] && [ "$platform" != "$host_platform" ]; then
+    echo "Package '$source_name' is for platform '$platform', but this host is '$host_platform'. Choose a matching package with --name-pattern." >&2
+    exit 2
+  fi
+  if [ -n "$updater" ] && [ "$updater" != "sh" ]; then
+    echo "Package '$source_name' expects updater '$updater', but this is github-update.sh. Choose a shell package with --name-pattern." >&2
+    exit 2
+  fi
+}
+
+is_install_candidate_name() {
+  local name=$1
+  local kind=$2
+  local platform
+  case "$name" in
+    *.sha256|*android*|*Android*|*apk*|*APK*) return 1 ;;
+  esac
+  if [ "$kind" = "release" ]; then
+    case "$name" in
+      *.zip|*.tar.gz|*.tgz) ;;
+      *) return 1 ;;
+    esac
+  fi
+  platform=$(current_platform)
+  case "$platform" in
+    windows) [[ "$name" =~ [Ww]indows|[Ww]in ]] ;;
+    linux) [[ "$name" =~ [Ll]inux ]] ;;
+    macos) [[ "$name" =~ [Mm]acos|[Dd]arwin|[Oo][Ss][Xx] ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+installed_identity_names() {
+  local root
+  root=$(install_root)
+  if [ -n "$package_name" ]; then
+    if [ -d "$root/$package_name" ]; then
+      printf '%s\n' "$package_name"
+      if [ -f "$root/$package_name/info.Dat" ]; then
+        json_value "$root/$package_name/info.Dat" artifact
+        json_value "$root/$package_name/info.Dat" package
+        json_value "$root/$package_name/info.Dat" name
+      fi
+    fi
+    return 0
+  fi
+
+  local count=0 selected=""
+  while IFS= read -r dir; do
+    if [ -f "$dir/install.sh" ] || [ -f "$dir/info.Dat" ]; then
+      count=$((count + 1))
+      selected=$dir
+    fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name .git | sort)
+
+  if [ "$count" -ne 1 ]; then
+    return 0
+  fi
+
+  printf '%s\n' "$(basename "$selected")"
+  if [ -f "$selected/info.Dat" ]; then
+    json_value "$selected/info.Dat" artifact
+    json_value "$selected/info.Dat" package
+    json_value "$selected/info.Dat" name
+  fi
+}
+
+select_install_records() {
+  local kind=$1
+  local records=$2
+  if [ "$mode" != "install" ] || [ "$name_pattern_explicit" = "true" ]; then
+    printf '%s\n' "$records"
+    return 0
+  fi
+
+  local identities identity_matches compatible_matches
+  identities=$(installed_identity_names | awk 'NF && !seen[$0]++')
+  identity_matches=""
+  if [ -n "$identities" ]; then
+    while IFS= read -r record; do
+      [ -z "$record" ] && continue
+      local name
+      name=$(printf '%s\n' "$record" | cut -f2)
+      while IFS= read -r identity; do
+        [ -z "$identity" ] && continue
+        if [ "$name" = "$identity" ] || [[ "$name" == "$identity"* ]] || [[ "$identity" == "$name"* ]]; then
+          identity_matches="${identity_matches}${record}"$'\n'
+          break
+        fi
+      done <<<"$identities"
+    done <<<"$records"
+    if [ "$(printf '%s' "$identity_matches" | sed '/^$/d' | wc -l)" -eq 1 ]; then
+      printf '%s' "$identity_matches" | sed '/^$/d'
+      return 0
+    fi
+  fi
+
+  compatible_matches=""
+  while IFS= read -r record; do
+    [ -z "$record" ] && continue
+    local name
+    name=$(printf '%s\n' "$record" | cut -f2)
+    if is_install_candidate_name "$name" "$kind"; then
+      compatible_matches="${compatible_matches}${record}"$'\n'
+    fi
+  done <<<"$records"
+
+  local count names
+  count=$(printf '%s' "$compatible_matches" | sed '/^$/d' | wc -l)
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "$compatible_matches" | sed '/^$/d'
+    return 0
+  fi
+  if [ "$count" -eq 0 ]; then
+    names=$(printf '%s\n' "$records" | sed '/^$/d' | cut -f2 | paste -sd ', ' -)
+    echo "Default --name-pattern '*' did not find an installable $kind package for $(current_platform). Available: $names. Use --name-pattern to select the exact package." >&2
+    exit 1
+  fi
+  names=$(printf '%s' "$compatible_matches" | sed '/^$/d' | cut -f2 | paste -sd ', ' -)
+  echo "Default --name-pattern '*' matched multiple installable $kind packages: $names. Use --name-pattern to select one package." >&2
+  exit 1
 }
 
 extract_to_dir() {
@@ -219,6 +384,8 @@ install_archive_package() {
   local tmp package_dir name
   tmp=$(mktemp -d)
   extract_to_dir "$archive" "$tmp"
+  package_dir=$(find_package_dir "$tmp")
+  assert_info_compatible "$package_dir/info.Dat" "$(basename "$archive")"
   if [ -f "$tmp/github-update.sh" ]; then
     cp -f "$tmp/github-update.sh" "$root/github-update.sh"
     chmod +x "$root/github-update.sh"
@@ -226,7 +393,6 @@ install_archive_package() {
     cp -f "$updater_root/github-update.sh" "$root/github-update.sh"
     chmod +x "$root/github-update.sh"
   fi
-  package_dir=$(find_package_dir "$tmp")
   name=$(basename "$package_dir")
   rm -rf "$root/$name"
   cp -a "$package_dir" "$root/"
@@ -241,8 +407,14 @@ prepare_action_package() {
   local outer inner sha_file
   outer=$(mktemp -d)
   extract_to_dir "$artifact_zip" "$outer"
+  assert_info_compatible "$outer/info.Dat" "$(basename "$artifact_zip")"
   inner=$(find "$outer" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.tgz' \) ! -name '*.artifact.zip' | sort | head -n 1 || true)
   if [ -z "$inner" ]; then
+    apk=$(find "$outer" -maxdepth 1 -type f -name '*.apk' | sort | head -n 1 || true)
+    if [ -n "$apk" ]; then
+      echo "Action artifact '$artifact_zip' contains Android APK '$(basename "$apk")'; github-update.sh cannot install APK packages. Use an Android installer or choose a Linux/macOS package with --name-pattern." >&2
+      exit 2
+    fi
     echo "No inner package archive found in action artifact: $artifact_zip" >&2
     exit 2
   fi
@@ -368,7 +540,18 @@ if [ "$channel" = "action" ] && [ -z "$token" ]; then
 fi
 
 repo_path=$(resolve_repo "$repo")
+download_tmp=""
+if [ "$mode" = "install" ] && [ "$output_dir_explicit" != "true" ]; then
+  download_tmp=$(mktemp -d)
+  output_dir=$download_tmp
+fi
 mkdir -p "$output_dir"
+cleanup_download_tmp() {
+  if [ -n "$download_tmp" ] && [ -d "$download_tmp" ]; then
+    rm -rf "$download_tmp"
+  fi
+}
+trap cleanup_download_tmp EXIT
 
 if [ "$channel" = "release" ]; then
   if [ "$mode" = "list" ]; then
@@ -383,11 +566,20 @@ if [ "$channel" = "release" ]; then
   fi
   IFS=$'\t' read -r release_id release_tag <<<"$release_info"
 
-  matched="false"
+  records=""
   while IFS= read -r asset_name; do
     if match_name "$asset_name"; then
-      matched="true"
-      target="$output_dir/$asset_name"
+      records="${records}${release_id}"$'\t'"${asset_name}"$'\t'"${release_tag}"$'\n'
+    fi
+  done < <(list_release_assets "$release_id")
+  if [ -z "$(printf '%s' "$records" | sed '/^$/d')" ]; then
+    echo "No release asset matched pattern: $name_pattern" >&2
+    exit 1
+  fi
+  records=$(select_install_records release "$records")
+  while IFS=$'\t' read -r _release_id asset_name _release_tag; do
+    [ -z "$asset_name" ] && continue
+    target="$output_dir/$asset_name"
       echo "Downloading release asset: $asset_name"
       rm -f "$target"
       if [ -n "$token" ]; then
@@ -397,12 +589,7 @@ if [ "$channel" = "release" ]; then
       fi
       echo "Saved: $target"
       [ "$mode" = "install" ] && install_archive_package "$target" "$output_dir" "$(install_root)"
-    fi
-  done < <(list_release_assets "$release_id")
-  if [ "$matched" != "true" ]; then
-    echo "No release asset matched pattern: $name_pattern" >&2
-    exit 1
-  fi
+  done <<<"$records"
   exit 0
 fi
 
@@ -421,18 +608,22 @@ if [ -z "$run_id" ]; then
   exit 1
 fi
 
-matched="false"
+records=""
 while IFS=$'\t' read -r artifact_id artifact_name artifact_size; do
   if match_name "$artifact_name"; then
-    matched="true"
-    target="$output_dir/$artifact_name.zip"
+    records="${records}${artifact_id}"$'\t'"${artifact_name}"$'\t'"${artifact_size}"$'\n'
+  fi
+done < <(list_action_artifacts "$run_id")
+if [ -z "$(printf '%s' "$records" | sed '/^$/d')" ]; then
+  echo "No action artifact matched pattern: $name_pattern" >&2
+  exit 1
+fi
+records=$(select_install_records "action artifact" "$records")
+while IFS=$'\t' read -r artifact_id artifact_name artifact_size; do
+  [ -z "$artifact_name" ] && continue
+  target="$output_dir/$artifact_name.zip"
     echo "Downloading action artifact: $artifact_name ($artifact_size bytes)"
     gh_api "/repos/$repo_path/actions/artifacts/$artifact_id/zip" > "$target"
     echo "Saved: $target"
     [ "$mode" = "install" ] && prepare_action_package "$target" "$(install_root)"
-  fi
-done < <(list_action_artifacts "$run_id")
-if [ "$matched" != "true" ]; then
-  echo "No action artifact matched pattern: $name_pattern" >&2
-  exit 1
-fi
+done <<<"$records"

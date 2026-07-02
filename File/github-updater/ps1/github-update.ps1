@@ -80,6 +80,8 @@ if ($Help) {
 }
 
 if ($Uninstall) { $Mode = 'uninstall' }
+$NamePatternWasExplicit = $PSBoundParameters.ContainsKey('NamePattern')
+$OutputDirWasExplicit = $PSBoundParameters.ContainsKey('OutputDir')
 
 function Resolve-GitHubToken {
     if ($Token -or $Channel -ne 'action') { return }
@@ -145,6 +147,76 @@ function Format-Size {
     if ($Bytes -ge 1MB) { return ('{0:n2} MiB' -f ($Bytes / 1MB)) }
     if ($Bytes -ge 1KB) { return ('{0:n2} KiB' -f ($Bytes / 1KB)) }
     return "$Bytes B"
+}
+
+function Get-CurrentPlatform {
+    $isWindowsVar = Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue
+    if ($isWindowsVar -and $isWindowsVar.Value) { return 'windows' }
+    $isLinuxVar = Get-Variable -Name IsLinux -Scope Global -ErrorAction SilentlyContinue
+    if ($isLinuxVar -and $isLinuxVar.Value) { return 'linux' }
+    $isMacOSVar = Get-Variable -Name IsMacOS -Scope Global -ErrorAction SilentlyContinue
+    if ($isMacOSVar -and $isMacOSVar.Value) { return 'macos' }
+    if ($env:OS -eq 'Windows_NT') { return 'windows' }
+    if ($PSVersionTable.ContainsKey('Platform') -and [string]$PSVersionTable.Platform -eq 'Unix') { return 'linux' }
+    return 'windows'
+}
+
+function Read-UpdaterInfo {
+    param([string]$Root)
+
+    $path = $Root
+    if (Test-Path -LiteralPath $Root -PathType Container) {
+        $path = Join-Path $Root 'info.Dat'
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+    } catch {
+        throw "Invalid updater info file: $path"
+    }
+}
+
+function Get-InfoValue {
+    param(
+        [object]$Info,
+        [string]$Name
+    )
+
+    if ($null -eq $Info) { return $null }
+    $prop = $Info.PSObject.Properties[$Name]
+    if ($prop) { return [string]$prop.Value }
+    return $null
+}
+
+function Assert-PackageInfoCompatible {
+    param(
+        [object]$Info,
+        [string]$Source
+    )
+
+    if ($null -eq $Info) { return }
+
+    $type = (Get-InfoValue -Info $Info -Name 'package_type')
+    if ($type) { $type = $type.ToLowerInvariant() }
+    if ($type -eq 'apk') {
+        throw "Package '$Source' is an Android APK artifact; github-update.ps1 cannot install APK packages. Use an Android installer or choose a Windows package with -NamePattern."
+    }
+    if ($type -and $type -ne 'archive') {
+        throw "Package '$Source' has unsupported package_type '$type'."
+    }
+
+    $platform = (Get-InfoValue -Info $Info -Name 'platform')
+    if ($platform) { $platform = $platform.ToLowerInvariant() }
+    $hostPlatform = Get-CurrentPlatform
+    if ($platform -and $platform -ne 'any' -and $platform -ne $hostPlatform) {
+        throw "Package '$Source' is for platform '$platform', but this host is '$hostPlatform'. Choose a matching package with -NamePattern."
+    }
+
+    $updater = (Get-InfoValue -Info $Info -Name 'updater')
+    if ($updater) { $updater = $updater.ToLowerInvariant() }
+    if ($updater -and $updater -ne 'ps1') {
+        throw "Package '$Source' expects updater '$updater', but this is github-update.ps1. Choose a PowerShell package with -NamePattern."
+    }
 }
 
 function Resolve-InstallRoot {
@@ -245,6 +317,9 @@ function Install-ArchivePackage {
     New-Item -ItemType Directory -Force -Path $temp | Out-Null
     try {
         Expand-PackageArchive -ArchivePath $ArchivePath -Destination $temp
+        $packageDir = Get-PackageDirectory -Root $temp
+        $packageInfo = Read-UpdaterInfo -Root $packageDir
+        Assert-PackageInfoCompatible -Info $packageInfo -Source (Split-Path -Leaf $ArchivePath)
         $archiveUpdater = Join-Path $temp 'github-update.ps1'
         $outerUpdater = Join-Path $UpdaterRoot 'github-update.ps1'
         if (Test-Path -LiteralPath $archiveUpdater -PathType Leaf) {
@@ -252,7 +327,6 @@ function Install-ArchivePackage {
         } elseif (Test-Path -LiteralPath $outerUpdater -PathType Leaf) {
             Copy-Item -LiteralPath $outerUpdater -Destination (Join-Path $InstallRoot 'github-update.ps1') -Force
         }
-        $packageDir = Get-PackageDirectory -Root $temp
         $name = Split-Path -Leaf $packageDir
         $target = Join-Path $InstallRoot $name
         Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
@@ -274,10 +348,18 @@ function Install-ActionArtifactPackage {
     New-Item -ItemType Directory -Force -Path $outer | Out-Null
     try {
         Expand-Archive -LiteralPath $ArtifactZip -DestinationPath $outer -Force
+        $outerInfo = Read-UpdaterInfo -Root $outer
+        Assert-PackageInfoCompatible -Info $outerInfo -Source (Split-Path -Leaf $ArtifactZip)
         $inner = @(Get-ChildItem -LiteralPath $outer -File | Where-Object {
             $_.Name -match '\.zip$|\.tar\.gz$|\.tgz$'
         } | Sort-Object Name | Select-Object -First 1)
-        if ($inner.Count -eq 0) { throw "No inner package archive found in action artifact: $ArtifactZip" }
+        if ($inner.Count -eq 0) {
+            $apk = @(Get-ChildItem -LiteralPath $outer -File -Filter '*.apk' | Select-Object -First 1)
+            if ($apk.Count -gt 0) {
+                throw "Action artifact '$ArtifactZip' contains Android APK '$($apk[0].Name)'; github-update.ps1 cannot install APK packages. Use an Android installer or choose a Windows package with -NamePattern."
+            }
+            throw "No inner package archive found in action artifact: $ArtifactZip"
+        }
         $shaPath = Join-Path $outer ($inner[0].Name + '.sha256')
         if (-not (Test-Path -LiteralPath $shaPath -PathType Leaf)) {
             $sha = @(Get-ChildItem -LiteralPath $outer -File -Filter '*.sha256' | Select-Object -First 1)
@@ -405,6 +487,93 @@ function Select-ItemsByPattern {
     return $selected
 }
 
+function Format-ItemNames {
+    param(
+        [object[]]$Items,
+        [string]$Property
+    )
+
+    return (($Items | ForEach-Object { $_.$Property }) -join ', ')
+}
+
+function Test-InstallCandidateName {
+    param(
+        [string]$Name,
+        [string]$Kind
+    )
+
+    if ($Name -match '(?i)\.sha256$') { return $false }
+    if ($Name -match '(?i)android|apk') { return $false }
+    if ($Kind -eq 'release' -and $Name -notmatch '(?i)(\.zip|\.tar\.gz|\.tgz)$') { return $false }
+
+    $platform = Get-CurrentPlatform
+    if ($platform -eq 'windows') { return ($Name -match '(?i)windows|win') }
+    if ($platform -eq 'linux') { return ($Name -match '(?i)linux') }
+    if ($platform -eq 'macos') { return ($Name -match '(?i)macos|darwin|osx') }
+    return $false
+}
+
+function Get-InstalledPackageIdentity {
+    $root = Resolve-InstallRoot
+    $candidateDirs = @()
+
+    if ($PackageName) {
+        $candidate = Join-Path $root $PackageName
+        if (Test-Path -LiteralPath $candidate -PathType Container) { $candidateDirs = @((Get-Item -LiteralPath $candidate)) }
+    } else {
+        $candidateDirs = @(Get-ChildItem -LiteralPath $root -Directory | Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'info.Dat') -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'install.ps1') -PathType Leaf)
+        })
+    }
+
+    if ($candidateDirs.Count -ne 1) { return $null }
+
+    $names = @()
+    $names += $candidateDirs[0].Name
+    $info = Read-UpdaterInfo -Root $candidateDirs[0].FullName
+    foreach ($field in @('artifact', 'package', 'name')) {
+        $value = Get-InfoValue -Info $info -Name $field
+        if ($value) { $names += $value }
+    }
+
+    return [pscustomobject]@{ Names = @($names | Select-Object -Unique) }
+}
+
+function Select-InstallItems {
+    param(
+        [object[]]$Items,
+        [string]$Property,
+        [string]$Kind
+    )
+
+    if ($Mode -ne 'install' -or $NamePatternWasExplicit) { return $Items }
+
+    $identity = Get-InstalledPackageIdentity
+    if ($identity) {
+        $byIdentity = @($Items | Where-Object {
+            $itemName = [string]$_.$Property
+            $matched = $false
+            foreach ($candidate in $identity.Names) {
+                if ($candidate -and ($itemName -eq $candidate -or $itemName -like "$candidate*" -or $candidate -like "$itemName*")) {
+                    $matched = $true
+                }
+            }
+            $matched
+        })
+        if ($byIdentity.Count -eq 1) { return $byIdentity }
+    }
+
+    $compatible = @($Items | Where-Object { Test-InstallCandidateName -Name ([string]$_.$Property) -Kind $Kind })
+    if ($compatible.Count -eq 1) { return $compatible }
+
+    if ($compatible.Count -eq 0) {
+        throw "Default -NamePattern '*' did not find an installable $Kind package for $(Get-CurrentPlatform). Available: $(Format-ItemNames -Items $Items -Property $Property). Use -NamePattern to select the exact package."
+    }
+
+    throw "Default -NamePattern '*' matched multiple installable $Kind packages: $(Format-ItemNames -Items $compatible -Property $Property). Use -NamePattern to select one package."
+}
+
 if ($Mode -eq 'uninstall') {
     Uninstall-Package
     return
@@ -415,50 +584,63 @@ Resolve-GitHubToken
 
 $repoInfo = Resolve-GitHubRepo $Repo
 $apiRoot = "https://api.github.com/repos/$($repoInfo.Owner)/$($repoInfo.Name)"
+$downloadTemp = $null
+if ($Mode -eq 'install' -and -not $OutputDirWasExplicit) {
+    $downloadTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('github-update-download-' + [guid]::NewGuid().ToString('N'))
+    $OutputDir = $downloadTemp
+}
 $outputFull = (Resolve-Path -LiteralPath (New-Item -ItemType Directory -Force -Path $OutputDir).FullName).Path
 
-if ($Channel -eq 'release') {
-    if ($Mode -eq 'list') {
-        Get-ReleaseVersions $apiRoot |
-            Sort-Object published_at -Descending |
-            Select-Object @{n='version';e={$_.tag_name}}, name, prerelease, published_at, @{n='assets';e={$_.assets.Count}} |
-            Format-Table -AutoSize
+try {
+    if ($Channel -eq 'release') {
+        if ($Mode -eq 'list') {
+            Get-ReleaseVersions $apiRoot |
+                Sort-Object published_at -Descending |
+                Select-Object @{n='version';e={$_.tag_name}}, name, prerelease, published_at, @{n='assets';e={$_.assets.Count}} |
+                Format-Table -AutoSize
+            return
+        }
+
+        $release = Select-ReleaseVersion $apiRoot $Version
+        $assets = Select-ItemsByPattern -Items @($release.assets) -Property 'name' -Pattern $NamePattern
+        $assets = Select-InstallItems -Items $assets -Property 'name' -Kind 'release'
+        foreach ($asset in $assets) {
+            $target = Join-Path $outputFull $asset.name
+            Write-Host "Downloading release $($release.tag_name): $($asset.name) ($(Format-Size $asset.size))"
+            Save-GitHubFile -Uri $asset.browser_download_url -Path $target
+            Write-Host "Saved: $target"
+            if ($Mode -eq 'install') { Install-ArchivePackage -ArchivePath $target -UpdaterRoot $outputFull -InstallRoot (Resolve-InstallRoot) }
+        }
         return
     }
 
-    $release = Select-ReleaseVersion $apiRoot $Version
-    $assets = Select-ItemsByPattern -Items @($release.assets) -Property 'name' -Pattern $NamePattern
-    foreach ($asset in $assets) {
-        $target = Join-Path $outputFull $asset.name
-        Write-Host "Downloading release $($release.tag_name): $($asset.name) ($(Format-Size $asset.size))"
-        Save-GitHubFile -Uri $asset.browser_download_url -Path $target
-        Write-Host "Saved: $target"
-        if ($Mode -eq 'install') { Install-ArchivePackage -ArchivePath $target -UpdaterRoot $outputFull -InstallRoot (Resolve-InstallRoot) }
-    }
-    return
-}
+    if ($Channel -eq 'action') {
+        if ($Mode -eq 'list') {
+            Get-ActionRuns $apiRoot |
+                Sort-Object created_at -Descending |
+                Select-Object @{n='version';e={$_.id}}, run_number, name, display_title, head_branch, @{n='sha';e={$_.head_sha.Substring(0, 12)}}, created_at |
+                Format-Table -AutoSize
+            return
+        }
 
-if ($Channel -eq 'action') {
-    if ($Mode -eq 'list') {
-        Get-ActionRuns $apiRoot |
-            Sort-Object created_at -Descending |
-            Select-Object @{n='version';e={$_.id}}, run_number, name, display_title, head_branch, @{n='sha';e={$_.head_sha.Substring(0, 12)}}, created_at |
-            Format-Table -AutoSize
+        if (-not $Token) {
+            Write-Warning 'GitHub Actions artifact downloads usually require a token. Set GITHUB_TOKEN, pass -Token, or run gh auth login.'
+        }
+        $run = Select-ActionRun $apiRoot $Version
+        $artifactResult = Invoke-GitHubJson "$apiRoot/actions/runs/$($run.id)/artifacts?per_page=100"
+        $artifacts = Select-ItemsByPattern -Items @($artifactResult.artifacts | Where-Object { -not $_.expired }) -Property 'name' -Pattern $NamePattern
+        $artifacts = Select-InstallItems -Items $artifacts -Property 'name' -Kind 'action artifact'
+        foreach ($artifact in $artifacts) {
+            $artifactZip = Join-Path $outputFull ($artifact.name + '.zip')
+            Write-Host "Downloading action run $($run.id) artifact: $($artifact.name) ($(Format-Size $artifact.size_in_bytes))"
+            Save-GitHubFile -Uri $artifact.archive_download_url -Path $artifactZip
+            Write-Host "Saved: $artifactZip"
+            if ($Mode -eq 'install') { Install-ActionArtifactPackage -ArtifactZip $artifactZip -InstallRoot (Resolve-InstallRoot) }
+        }
         return
     }
-
-    if (-not $Token) {
-        Write-Warning 'GitHub Actions artifact downloads usually require a token. Set GITHUB_TOKEN, pass -Token, or run gh auth login.'
+} finally {
+    if ($downloadTemp -and (Test-Path -LiteralPath $downloadTemp)) {
+        Remove-Item -LiteralPath $downloadTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    $run = Select-ActionRun $apiRoot $Version
-    $artifactResult = Invoke-GitHubJson "$apiRoot/actions/runs/$($run.id)/artifacts?per_page=100"
-    $artifacts = Select-ItemsByPattern -Items @($artifactResult.artifacts | Where-Object { -not $_.expired }) -Property 'name' -Pattern $NamePattern
-    foreach ($artifact in $artifacts) {
-        $artifactZip = Join-Path $outputFull ($artifact.name + '.zip')
-        Write-Host "Downloading action run $($run.id) artifact: $($artifact.name) ($(Format-Size $artifact.size_in_bytes))"
-        Save-GitHubFile -Uri $artifact.archive_download_url -Path $artifactZip
-        Write-Host "Saved: $artifactZip"
-        if ($Mode -eq 'install') { Install-ActionArtifactPackage -ArtifactZip $artifactZip -InstallRoot (Resolve-InstallRoot) }
-    }
-    return
 }

@@ -52,11 +52,14 @@ C:\my-app\github-update.ps1 -Uninstall
 
 For `install`, `.zip`, `.tar.gz`, and `.tgz` archives are extracted. If `-InstallDir` is omitted, the current directory is used. Updates remove the old `xxx/` directory, install the new `xxx/`, copy `github-update.ps1` to the install root, then run `xxx/install.ps1`.
 
+When `-Mode install` uses the default `-NamePattern '*'`, the updater does not install the first matching artifact blindly. It first tries to match the already installed package identity from `xxx/info.Dat`; otherwise it requires exactly one installable Windows package. If several Windows packages match, pass a specific `-NamePattern`, for example `emtask-server-windows-cygwin-x64`. If `-OutputDir` is omitted for install, downloads use a temporary directory and are removed after success or failure.
+
 Expected package layout:
 
 - `release`: the downloaded `xxx.zip` / `xxx.tar.gz` contains top-level `xxx/` and same-level `github-update.ps1`.
-- `action`: the outer artifact `xxx.zip` contains inner `xxx.zip` / `xxx.tar.gz`, matching `.sha256`, and `github-update.ps1`.
-- The top-level `xxx/` contains the project-specific `install.ps1`.
+- `action`: the outer artifact `xxx.zip` contains `info.Dat`, inner `xxx.zip` / `xxx.tar.gz`, matching `.sha256`, and `github-update.ps1`.
+- The top-level `xxx/` contains the project-specific `install.ps1` and `info.Dat`.
+- APK artifacts contain `package_type: apk` in `info.Dat`; this script reports that clearly instead of treating them as archive packages.
 
 ## Common parameters
 
