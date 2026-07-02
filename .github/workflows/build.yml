@@ -1746,6 +1746,19 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
+          for path in release-artifacts/*; do
+            name=$(basename "$path")
+            lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+            if [ "$name" != "$lower" ]; then
+              target="release-artifacts/$lower"
+              if [ -e "$target" ]; then
+                echo "Cannot normalize release asset name; target already exists: $target" >&2
+                exit 1
+              fi
+              mv "$path" "$target"
+            fi
+          done
+
           for package in release-artifacts/*.zip; do
             case "$(basename "$package")" in
               *android*.zip)

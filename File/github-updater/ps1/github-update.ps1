@@ -80,6 +80,8 @@ if ($Help) {
 }
 
 if ($Uninstall) { $Mode = 'uninstall' }
+$RepoWasExplicit = $PSBoundParameters.ContainsKey('Repo')
+$ChannelWasExplicit = $PSBoundParameters.ContainsKey('Channel')
 $NamePatternWasExplicit = $PSBoundParameters.ContainsKey('NamePattern')
 $OutputDirWasExplicit = $PSBoundParameters.ContainsKey('OutputDir')
 
@@ -222,7 +224,7 @@ function Assert-PackageInfoCompatible {
 function Resolve-InstallRoot {
     $root = $InstallDir
     if (-not $root) {
-        if (($Mode -eq 'install' -or $Mode -eq 'uninstall') -and (Split-Path -Leaf $ScriptDir) -ne 'ps1') {
+        if ((Split-Path -Leaf $ScriptDir) -ne 'ps1') {
             $root = $ScriptDir
         } else {
             $root = '.'
@@ -292,6 +294,29 @@ function Invoke-UninstallScript {
     Write-Warning "No install.ps1 found in $(Split-Path -Leaf $PackageDir); skipping project-specific uninstall."
 }
 
+function Write-UpdaterInfo {
+    param(
+        [string]$PackageDir,
+        [object]$Info,
+        [string]$SourceChannel,
+        [string]$SourceNamePattern,
+        [string]$RepoValue
+    )
+
+    $map = [ordered]@{}
+    if ($Info) {
+        foreach ($property in $Info.PSObject.Properties) {
+            $map[$property.Name] = $property.Value
+        }
+    }
+    if ($RepoValue) { $map['repo'] = $RepoValue }
+    if ($SourceChannel) { $map['channel'] = $SourceChannel }
+    if ($SourceNamePattern) { $map['name_pattern'] = $SourceNamePattern }
+    if ($map.Count -eq 0) { return }
+
+    $map | ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $PackageDir 'info.Dat')
+}
+
 function Test-Sha256File {
     param(
         [string]$ShaFile,
@@ -310,7 +335,10 @@ function Install-ArchivePackage {
     param(
         [string]$ArchivePath,
         [string]$UpdaterRoot,
-        [string]$InstallRoot
+        [string]$InstallRoot,
+        [string]$SourceChannel,
+        [string]$SourceNamePattern,
+        [string]$RepoValue
     )
 
     $temp = Join-Path ([System.IO.Path]::GetTempPath()) ('github-package-' + [guid]::NewGuid().ToString('N'))
@@ -331,6 +359,7 @@ function Install-ArchivePackage {
         $target = Join-Path $InstallRoot $name
         Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath $packageDir -Destination $InstallRoot -Recurse -Force
+        Write-UpdaterInfo -PackageDir $target -Info $packageInfo -SourceChannel $SourceChannel -SourceNamePattern $SourceNamePattern -RepoValue $RepoValue
         Invoke-InstallScript -PackageDir $target
         Write-Host "Installed: $target"
     } finally {
@@ -341,7 +370,10 @@ function Install-ArchivePackage {
 function Install-ActionArtifactPackage {
     param(
         [string]$ArtifactZip,
-        [string]$InstallRoot
+        [string]$InstallRoot,
+        [string]$SourceChannel,
+        [string]$SourceNamePattern,
+        [string]$RepoValue
     )
 
     $outer = Join-Path ([System.IO.Path]::GetTempPath()) ('github-artifact-' + [guid]::NewGuid().ToString('N'))
@@ -366,7 +398,7 @@ function Install-ActionArtifactPackage {
             if ($sha.Count -gt 0) { $shaPath = $sha[0].FullName }
         }
         if (Test-Path -LiteralPath $shaPath -PathType Leaf) { Test-Sha256File -ShaFile $shaPath -ArchivePath $inner[0].FullName }
-        Install-ArchivePackage -ArchivePath $inner[0].FullName -UpdaterRoot $outer -InstallRoot $InstallRoot
+        Install-ArchivePackage -ArchivePath $inner[0].FullName -UpdaterRoot $outer -InstallRoot $InstallRoot -SourceChannel $SourceChannel -SourceNamePattern $SourceNamePattern -RepoValue $RepoValue
     } finally {
         Remove-Item -LiteralPath $outer -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -537,7 +569,42 @@ function Get-InstalledPackageIdentity {
         if ($value) { $names += $value }
     }
 
-    return [pscustomobject]@{ Names = @($names | Select-Object -Unique) }
+    return [pscustomobject]@{
+        Names = @($names | Select-Object -Unique)
+        Info = $info
+        PackageDir = $candidateDirs[0].FullName
+    }
+}
+
+function Use-InstalledUpdaterDefaults {
+    $identity = Get-InstalledPackageIdentity
+    if (-not $identity -or -not $identity.Info) { return }
+
+    if (-not $RepoWasExplicit -and -not $Repo) {
+        $repoValue = Get-InfoValue -Info $identity.Info -Name 'repo'
+        if ($repoValue) { Set-Variable -Name Repo -Scope Script -Value $repoValue }
+    }
+
+    if (-not $ChannelWasExplicit) {
+        $channelValue = Get-InfoValue -Info $identity.Info -Name 'channel'
+        if (-not $channelValue) { $channelValue = Get-InfoValue -Info $identity.Info -Name 'default_channel' }
+        if ($channelValue) { $channelValue = $channelValue.ToLowerInvariant() }
+        if ($channelValue -in @('release', 'action')) {
+            Set-Variable -Name Channel -Scope Script -Value $channelValue
+        } elseif ((Get-InfoValue -Info $identity.Info -Name 'artifact')) {
+            Set-Variable -Name Channel -Scope Script -Value 'action'
+        }
+    }
+
+    if (-not $NamePatternWasExplicit) {
+        $pattern = Get-InfoValue -Info $identity.Info -Name 'name_pattern'
+        if (-not $pattern) { $pattern = Get-InfoValue -Info $identity.Info -Name 'artifact' }
+        if (-not $pattern) { $pattern = Get-InfoValue -Info $identity.Info -Name 'package' }
+        if ($pattern) {
+            Set-Variable -Name NamePattern -Scope Script -Value $pattern
+            Set-Variable -Name NamePatternWasExplicit -Scope Script -Value $true
+        }
+    }
 }
 
 function Select-InstallItems {
@@ -579,11 +646,14 @@ if ($Mode -eq 'uninstall') {
     return
 }
 
+Use-InstalledUpdaterDefaults
+
 if (-not $Repo) { throw '-Repo is required unless -Mode uninstall is used.' }
 Resolve-GitHubToken
 
 $repoInfo = Resolve-GitHubRepo $Repo
 $apiRoot = "https://api.github.com/repos/$($repoInfo.Owner)/$($repoInfo.Name)"
+$repoFullName = "$($repoInfo.Owner)/$($repoInfo.Name)"
 $downloadTemp = $null
 if ($Mode -eq 'install' -and -not $OutputDirWasExplicit) {
     $downloadTemp = Join-Path ([System.IO.Path]::GetTempPath()) ('github-update-download-' + [guid]::NewGuid().ToString('N'))
@@ -609,7 +679,7 @@ try {
             Write-Host "Downloading release $($release.tag_name): $($asset.name) ($(Format-Size $asset.size))"
             Save-GitHubFile -Uri $asset.browser_download_url -Path $target
             Write-Host "Saved: $target"
-            if ($Mode -eq 'install') { Install-ArchivePackage -ArchivePath $target -UpdaterRoot $outputFull -InstallRoot (Resolve-InstallRoot) }
+            if ($Mode -eq 'install') { Install-ArchivePackage -ArchivePath $target -UpdaterRoot $outputFull -InstallRoot (Resolve-InstallRoot) -SourceChannel 'release' -SourceNamePattern $asset.name -RepoValue $repoFullName }
         }
         return
     }
@@ -635,7 +705,7 @@ try {
             Write-Host "Downloading action run $($run.id) artifact: $($artifact.name) ($(Format-Size $artifact.size_in_bytes))"
             Save-GitHubFile -Uri $artifact.archive_download_url -Path $artifactZip
             Write-Host "Saved: $artifactZip"
-            if ($Mode -eq 'install') { Install-ActionArtifactPackage -ArtifactZip $artifactZip -InstallRoot (Resolve-InstallRoot) }
+            if ($Mode -eq 'install') { Install-ActionArtifactPackage -ArtifactZip $artifactZip -InstallRoot (Resolve-InstallRoot) -SourceChannel 'action' -SourceNamePattern $artifact.name -RepoValue $repoFullName }
         }
         return
     }

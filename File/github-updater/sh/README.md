@@ -57,6 +57,8 @@
 
 普通包只在内层安装目录 `xxx/` 中包含 `info.Dat`。APK artifact 没有内层安装目录，因此在外层包含 `info.Dat`，并使用 `package_type: apk`；shell updater 会明确提示 APK 不能由该脚本安装。
 
+从安装根目录运行 updater 且未显式传 `--repo`、`--channel` 或 `--name-pattern` 时，脚本会读取唯一已安装包的 `xxx/info.Dat`。`repo` 用作仓库，`channel` 用作渠道，`name_pattern` / `artifact` / `package` 用作包匹配规则。旧安装包没有 `channel` 时，如果存在 `artifact`，默认按 `action` 渠道处理。
+
 ## 参数
 
 - `--repo`：GitHub 项目地址，支持 `owner/repo`、`https://github.com/owner/repo`、`git@github.com:owner/repo.git`。

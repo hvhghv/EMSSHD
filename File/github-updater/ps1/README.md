@@ -54,6 +54,8 @@ For `install`, `.zip`, `.tar.gz`, and `.tgz` archives are extracted. If `-Instal
 
 When `-Mode install` uses the default `-NamePattern '*'`, the updater does not install the first matching artifact blindly. It first tries to match the already installed package identity from `xxx/info.Dat`; otherwise it requires exactly one installable Windows package. If several Windows packages match, pass a specific `-NamePattern`, for example `emtask-server-windows-cygwin-x64`. If `-OutputDir` is omitted for install, downloads use a temporary directory and are removed after success or failure.
 
+When the updater is run from an install root and `-Repo`, `-Channel`, or `-NamePattern` is omitted, it reads the single installed package's `xxx/info.Dat`. `repo` supplies `-Repo`, `channel` supplies `-Channel`, and `name_pattern` / `artifact` / `package` supplies `-NamePattern`. Older installs without `channel` default to the `action` channel when `artifact` exists.
+
 Expected package layout:
 
 - `release`: the downloaded `xxx.zip` / `xxx.tar.gz` contains top-level `xxx/` and same-level `github-update.ps1`.

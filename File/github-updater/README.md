@@ -24,6 +24,8 @@
 
 `install` 模式未显式传 `NamePattern` / `--name-pattern` 时，会优先按已安装目录的 `info.Dat` 选择同一包；否则只接受当前平台上唯一可安装的普通包。匹配到多个 Windows/Linux 包时会要求显式指定包名，不会按 GitHub API 返回顺序盲装。未显式传 `OutputDir` / `--output-dir` 时，安装下载文件会放在临时目录，成功或失败都会清理。
 
+从安装根目录运行脚本时，如果用户未传 `Repo` / `Channel` / `NamePattern`，脚本会自动读取唯一已安装包的 `xxx/info.Dat`。旧包中没有 `channel` 字段但有 `artifact` 字段时，默认使用 `action` 渠道；后续安装会把实际 `channel` 和 `name_pattern` 回写到 `info.Dat`。
+
 规范包结构：
 
 - action 普通 artifact：外层 `xxx.zip` 内含内层 `xxx.zip` / `xxx.tar.gz`、同名 `.sha256` 与 `github-update.*`；内层包的 `xxx/` 内含 `install.*` 和 `info.Dat`。

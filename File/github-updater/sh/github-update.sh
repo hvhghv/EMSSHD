@@ -14,6 +14,8 @@ package_name=""
 token="${GITHUB_TOKEN:-}"
 include_prerelease="false"
 force="false"
+repo_explicit="false"
+channel_explicit="false"
 name_pattern_explicit="false"
 output_dir_explicit="false"
 script_path=${BASH_SOURCE[0]:-$0}
@@ -45,8 +47,8 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo|-r) repo=${2:?}; shift 2 ;;
-    --channel) channel=${2:?}; shift 2 ;;
+    --repo|-r) repo=${2:?}; repo_explicit="true"; shift 2 ;;
+    --channel) channel=${2:?}; channel_explicit="true"; shift 2 ;;
     --mode) mode=${2:?}; shift 2 ;;
     --uninstall) mode="uninstall"; shift ;;
     --version) version=${2:?}; shift 2 ;;
@@ -95,7 +97,7 @@ resolve_repo() {
 install_root() {
   local root=$install_dir
   if [ -z "$root" ]; then
-    if { [ "$mode" = "install" ] || [ "$mode" = "uninstall" ]; } && [ "$(basename "$script_dir")" != "sh" ]; then
+    if [ "$(basename "$script_dir")" != "sh" ]; then
       root=$script_dir
     else
       root="."
@@ -222,6 +224,69 @@ installed_identity_names() {
     json_value "$selected/info.Dat" artifact
     json_value "$selected/info.Dat" package
     json_value "$selected/info.Dat" name
+  fi
+}
+
+installed_info_file() {
+  local root
+  root=$(install_root)
+  if [ -n "$package_name" ]; then
+    if [ -f "$root/$package_name/info.Dat" ]; then
+      printf '%s\n' "$root/$package_name/info.Dat"
+    fi
+    return 0
+  fi
+
+  local count=0 selected=""
+  while IFS= read -r dir; do
+    if [ -f "$dir/info.Dat" ]; then
+      count=$((count + 1))
+      selected="$dir/info.Dat"
+    fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name .git | sort)
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' "$selected"
+  fi
+}
+
+use_installed_updater_defaults() {
+  local info_file repo_value channel_value pattern
+  info_file=$(installed_info_file)
+  if [ -z "$info_file" ]; then
+    return 0
+  fi
+
+  if [ "$repo_explicit" != "true" ] && [ -z "$repo" ]; then
+    repo_value=$(json_value "$info_file" repo)
+    if [ -n "$repo_value" ]; then
+      repo=$repo_value
+    fi
+  fi
+
+  if [ "$channel_explicit" != "true" ]; then
+    channel_value=$(json_value "$info_file" channel | tr '[:upper:]' '[:lower:]')
+    if [ -z "$channel_value" ]; then
+      channel_value=$(json_value "$info_file" default_channel | tr '[:upper:]' '[:lower:]')
+    fi
+    if [ "$channel_value" = "release" ] || [ "$channel_value" = "action" ]; then
+      channel=$channel_value
+    elif [ -n "$(json_value "$info_file" artifact)" ]; then
+      channel="action"
+    fi
+  fi
+
+  if [ "$name_pattern_explicit" != "true" ]; then
+    pattern=$(json_value "$info_file" name_pattern)
+    if [ -z "$pattern" ]; then
+      pattern=$(json_value "$info_file" artifact)
+    fi
+    if [ -z "$pattern" ]; then
+      pattern=$(json_value "$info_file" package)
+    fi
+    if [ -n "$pattern" ]; then
+      name_pattern=$pattern
+      name_pattern_explicit="true"
+    fi
   fi
 }
 
@@ -377,10 +442,38 @@ verify_sha256() {
   fi
 }
 
+write_updater_info() {
+  local package_dir=$1
+  local source_channel=$2
+  local source_name_pattern=$3
+  local repo_value=$4
+  local info_file="$package_dir/info.Dat"
+  local tmp_info
+  if [ ! -f "$info_file" ]; then
+    return 0
+  fi
+
+  tmp_info=$(mktemp)
+  if command -v jq >/dev/null 2>&1; then
+    jq \
+      --arg repo "$repo_value" \
+      --arg channel "$source_channel" \
+      --arg name_pattern "$source_name_pattern" \
+      '. + {repo: $repo, channel: $channel, name_pattern: $name_pattern}' \
+      "$info_file" > "$tmp_info"
+  else
+    cp "$info_file" "$tmp_info"
+  fi
+  mv "$tmp_info" "$info_file"
+}
+
 install_archive_package() {
   local archive=$1
   local updater_root=$2
   local root=$3
+  local source_channel=${4:-}
+  local source_name_pattern=${5:-}
+  local repo_value=${6:-}
   local tmp package_dir name
   tmp=$(mktemp -d)
   extract_to_dir "$archive" "$tmp"
@@ -396,6 +489,7 @@ install_archive_package() {
   name=$(basename "$package_dir")
   rm -rf "$root/$name"
   cp -a "$package_dir" "$root/"
+  write_updater_info "$root/$name" "$source_channel" "$source_name_pattern" "$repo_value"
   rm -rf "$tmp"
   run_install_script "$root/$name"
   echo "Installed: $root/$name"
@@ -404,6 +498,9 @@ install_archive_package() {
 prepare_action_package() {
   local artifact_zip=$1
   local root=$2
+  local source_channel=${3:-}
+  local source_name_pattern=${4:-}
+  local repo_value=${5:-}
   local outer inner sha_file
   outer=$(mktemp -d)
   extract_to_dir "$artifact_zip" "$outer"
@@ -425,7 +522,7 @@ prepare_action_package() {
   if [ -n "$sha_file" ]; then
     verify_sha256 "$sha_file" "$inner"
   fi
-  install_archive_package "$inner" "$outer" "$root"
+  install_archive_package "$inner" "$outer" "$root" "$source_channel" "$source_name_pattern" "$repo_value"
   rm -rf "$outer"
 }
 
@@ -526,6 +623,8 @@ if [ "$mode" = "uninstall" ]; then
   exit 0
 fi
 
+use_installed_updater_defaults
+
 if [ -z "$repo" ]; then
   echo "--repo is required unless --mode uninstall is used" >&2
   usage >&2
@@ -588,7 +687,7 @@ if [ "$channel" = "release" ]; then
         gh release download "$release_tag" --repo "$repo_path" --pattern "$asset_name" --dir "$output_dir"
       fi
       echo "Saved: $target"
-      [ "$mode" = "install" ] && install_archive_package "$target" "$output_dir" "$(install_root)"
+      [ "$mode" = "install" ] && install_archive_package "$target" "$output_dir" "$(install_root)" "release" "$asset_name" "$repo_path"
   done <<<"$records"
   exit 0
 fi
@@ -625,5 +724,5 @@ while IFS=$'\t' read -r artifact_id artifact_name artifact_size; do
     echo "Downloading action artifact: $artifact_name ($artifact_size bytes)"
     gh_api "/repos/$repo_path/actions/artifacts/$artifact_id/zip" > "$target"
     echo "Saved: $target"
-    [ "$mode" = "install" ] && prepare_action_package "$target" "$(install_root)"
+    [ "$mode" = "install" ] && prepare_action_package "$target" "$(install_root)" "action" "$artifact_name" "$repo_path"
 done <<<"$records"
