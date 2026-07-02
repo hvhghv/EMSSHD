@@ -17,7 +17,15 @@ if ($extraArgs.Count -gt 0) {
 }
 
 $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$installRoot = Split-Path -Parent $packageDir
 $manifestPath = Join-Path $packageDir 'install-manifest.psd1'
+$configPath = Join-Path $installRoot 'emtask.conf'
+
+function Convert-ToEmtaskConfigPath {
+    param([string]$Path)
+
+    return $Path -replace '\\', '/'
+}
 
 function Write-Manifest {
     param([object[]]$Items)
@@ -35,6 +43,61 @@ function Write-Manifest {
     $lines += '    )'
     $lines += '}'
     Set-Content -LiteralPath $manifestPath -Encoding UTF8 -Value $lines
+}
+
+function Set-ConfigValue {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [string]$Key,
+        [string]$Value
+    )
+
+    $found = $false
+    for ($i = 0; $i -lt $Lines.Count; ++$i) {
+        if ($Lines[$i] -match "^\s*$([regex]::Escape($Key))\s*=") {
+            $Lines[$i] = "$Key = $Value"
+            $found = $true
+        }
+    }
+    if (-not $found) {
+        $Lines.Add("$Key = $Value")
+    }
+}
+
+function Update-ExternalConfig {
+    $created = $false
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        $example = Join-Path $packageDir 'emtask.conf.example'
+        if (Test-Path -LiteralPath $example -PathType Leaf) {
+            Copy-Item -LiteralPath $example -Destination $configPath -Force
+            $created = $true
+        } else {
+            Set-Content -LiteralPath $configPath -Encoding UTF8 -Value @(
+                'username = emtask',
+                'password = emtask',
+                'panel_enabled = true'
+            )
+            $created = $true
+        }
+    }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content -LiteralPath $configPath) {
+        $lines.Add($line)
+    }
+
+    Set-ConfigValue -Lines $lines -Key 'hostkey_file' -Value (Convert-ToEmtaskConfigPath (Join-Path $installRoot 'emtask_hostkey_p256.raw'))
+    Set-ConfigValue -Lines $lines -Key 'authorized_keys_file' -Value (Convert-ToEmtaskConfigPath (Join-Path $installRoot 'authorized_keys'))
+    Set-ConfigValue -Lines $lines -Key 'panel_auth_file' -Value (Convert-ToEmtaskConfigPath (Join-Path $installRoot 'emtask_panel_auth.keys'))
+    Set-ConfigValue -Lines $lines -Key 'panel_tasks_db_file' -Value (Convert-ToEmtaskConfigPath (Join-Path $installRoot 'emtask_tasks.sqlite3'))
+    Set-ConfigValue -Lines $lines -Key 'panel_qr_file' -Value (Convert-ToEmtaskConfigPath (Join-Path $installRoot 'emtask_panel_connect.svg'))
+
+    Set-Content -LiteralPath $configPath -Encoding UTF8 -Value $lines
+    if ($created) {
+        Write-Host "Created external config: $configPath"
+    } else {
+        Write-Host "Updated external config paths: $configPath"
+    }
 }
 
 function Read-YesNo {
@@ -74,7 +137,9 @@ if ($Uninstall) {
 }
 
 $items = @()
+Update-ExternalConfig
 Write-Host "emtask package is ready at: $packageDir"
+Write-Host "Run from the install root: .\$(Split-Path -Leaf $packageDir)\emtask.exe"
 Write-Host 'No Windows service is registered by default. Use emtask-windows-service.ps1 if you want to install it as a service.'
 Write-Manifest -Items $items
 Write-Host "Install manifest written: $manifestPath"

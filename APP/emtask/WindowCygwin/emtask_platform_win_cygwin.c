@@ -78,6 +78,9 @@ int emtask_platform_path_is_absolute(const char *path)
     if (path == NULL || path[0] == '\0') {
         return 0;
     }
+    if (path[0] == '/') {
+        return 1;
+    }
     if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
         path[1] == ':') {
         return 1;
@@ -92,7 +95,7 @@ int emtask_platform_join_path(const char *base_dir, const char *value, char out[
     if (base_dir == NULL || value == NULL || out == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    written = snprintf(out, EMTASK_MAX_PATH, "%s\\%s", base_dir, value);
+    written = snprintf(out, EMTASK_MAX_PATH, "%s/%s", base_dir, value);
     if (written < 0 || (size_t)written >= EMTASK_MAX_PATH) {
         return SSH_ERR_BUFFER_TOO_SMALL;
     }
