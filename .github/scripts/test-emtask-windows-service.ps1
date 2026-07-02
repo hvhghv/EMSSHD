@@ -506,8 +506,8 @@ try {
     Wait-TcpPort -Port $taskPort
     Invoke-PanelAuthorizedKeySyncProbe -PanelPort $panelPort -TaskPort $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
 
-    if ($safeLabel -match 'cygwin|msys2|msvc-x86') {
-        Write-Host 'Using SFTP session probe for MSYS2/Cygwin/MSVC x86 package because Win32 cmd.exe terminal echo is not stable under these service builds on GitHub-hosted runners.'
+    if ($safeLabel -match 'cygwin|msys2|msvc-x86|msvc-x64') {
+        Write-Host 'Using SFTP session probe for MSYS2/Cygwin/MSVC x86/x64 package because Win32 cmd.exe terminal echo is not stable under these service builds on GitHub-hosted runners.'
         Invoke-SftpSessionProbe -Port $taskPort -WorkRoot $workRoot -RuntimeRoot $runtimeRoot
     } else {
         Invoke-SshSessionProbe -Port $taskPort -WorkRoot $workRoot
