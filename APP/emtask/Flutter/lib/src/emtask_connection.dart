@@ -792,12 +792,7 @@ class EmTaskConnection extends ChangeNotifier {
   }
 
   Uint8List _encodeTerminalInput(String text) {
-    final encoding = switch (profile.shellKind) {
-      EmTaskShellKind.auto => utf8,
-      EmTaskShellKind.posix => utf8,
-      EmTaskShellKind.cmd || EmTaskShellKind.powershell => systemEncoding,
-    };
-    return Uint8List.fromList(encoding.encode(text));
+    return encodeEmTaskTerminalInput(text, profile.shellKind);
   }
 
   void _notifyIfAlive() {
@@ -911,4 +906,20 @@ class EmTaskConnection extends ChangeNotifier {
     unawaited(_terminalOutputController.close());
     super.dispose();
   }
+}
+
+@visibleForTesting
+Encoding emTaskTerminalInputEncoding(EmTaskShellKind shellKind) {
+  return switch (shellKind) {
+    EmTaskShellKind.cmd => systemEncoding,
+    EmTaskShellKind.auto ||
+    EmTaskShellKind.powershell ||
+    EmTaskShellKind.posix =>
+      utf8,
+  };
+}
+
+@visibleForTesting
+Uint8List encodeEmTaskTerminalInput(String text, EmTaskShellKind shellKind) {
+  return Uint8List.fromList(emTaskTerminalInputEncoding(shellKind).encode(text));
 }

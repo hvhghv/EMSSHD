@@ -5,6 +5,7 @@
 #endif
 
 #define EMTASK_CONPTY_VT_TAIL_SIZE 16u
+#define EMTASK_CONPTY_UTF8_PENDING_SIZE 4u
 
 struct emtask_term_platform {
     emtask_thread_handle_t monitor_thread;
@@ -17,6 +18,8 @@ struct emtask_term_platform {
     int conpty_win32_input_mode;
     char conpty_vt_tail[EMTASK_CONPTY_VT_TAIL_SIZE];
     size_t conpty_vt_tail_len;
+    uint8_t conpty_utf8_pending[EMTASK_CONPTY_UTF8_PENDING_SIZE];
+    size_t conpty_utf8_pending_len;
 };
 
 #ifndef EMTASK_CONPTY_SYNTHESIZE_WIN32_INPUT
@@ -425,6 +428,136 @@ static int emtask_try_decode_utf8_wide_char(
     return SSH_OK;
 }
 
+static int emtask_utf8_sequence_need(uint8_t ch, size_t *need)
+{
+    if (need == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *need = 0u;
+    if (ch < 0x80u) {
+        *need = 1u;
+        return SSH_OK;
+    }
+    if (ch >= 0xc2u && ch <= 0xdfu) {
+        *need = 2u;
+        return SSH_OK;
+    }
+    if (ch >= 0xe0u && ch <= 0xefu) {
+        *need = 3u;
+        return SSH_OK;
+    }
+    if (ch >= 0xf0u && ch <= 0xf4u) {
+        *need = 4u;
+        return SSH_OK;
+    }
+    return SSH_ERR_NOT_FOUND;
+}
+
+static int emtask_utf8_pending_still_valid(const uint8_t *buf, size_t len)
+{
+    size_t need;
+    size_t i;
+
+    if (buf == NULL || len == 0u) {
+        return 0;
+    }
+    if (emtask_utf8_sequence_need(buf[0], &need) != SSH_OK || need <= 1u || len >= need) {
+        return 0;
+    }
+    for (i = 1u; i < len; ++i) {
+        if ((buf[i] & 0xc0u) != 0x80u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int emtask_write_conpty_utf8_or_byte(
+    HANDLE handle,
+    const uint8_t *buf,
+    size_t len,
+    size_t *consumed_len,
+    int allow_pending,
+    emtask_term_platform_t *platform)
+{
+    WCHAR wide[2] = {0u, 0u};
+    size_t wide_len = 0u;
+    size_t utf8_consumed_len = 0u;
+    size_t j;
+    size_t need = 0u;
+    int status;
+
+    if (handle == NULL || buf == NULL || consumed_len == NULL || len == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    *consumed_len = 0u;
+
+    status = emtask_try_decode_utf8_wide_char(
+        buf,
+        len,
+        wide,
+        &wide_len,
+        &utf8_consumed_len);
+    if (status == SSH_OK && wide_len != 0u && utf8_consumed_len != 0u) {
+        for (j = 0u; j < wide_len; ++j) {
+            status = emtask_write_conpty_codepoint(handle, wide[j]);
+            if (status != SSH_OK) {
+                return status;
+            }
+        }
+        *consumed_len = utf8_consumed_len;
+        return SSH_OK;
+    }
+
+    if (allow_pending &&
+        platform != NULL &&
+        emtask_utf8_sequence_need(buf[0], &need) == SSH_OK &&
+        need > 1u &&
+        len < need &&
+        len <= sizeof(platform->conpty_utf8_pending) &&
+        emtask_utf8_pending_still_valid(buf, len)) {
+        memcpy(platform->conpty_utf8_pending, buf, len);
+        platform->conpty_utf8_pending_len = len;
+        *consumed_len = len;
+        return SSH_OK;
+    }
+
+    status = emtask_write_conpty_codepoint(handle, (WCHAR)buf[0]);
+    if (status != SSH_OK) {
+        return status;
+    }
+    *consumed_len = 1u;
+    return SSH_OK;
+}
+
+static int emtask_flush_conpty_utf8_pending(emtask_term_platform_t *platform)
+{
+    size_t offset = 0u;
+
+    if (platform == NULL || platform->input_write == NULL || platform->conpty_utf8_pending_len == 0u) {
+        return SSH_OK;
+    }
+
+    while (offset < platform->conpty_utf8_pending_len) {
+        size_t consumed_len = 0u;
+        int status = emtask_write_conpty_utf8_or_byte(
+            platform->input_write,
+            platform->conpty_utf8_pending + offset,
+            platform->conpty_utf8_pending_len - offset,
+            &consumed_len,
+            0,
+            platform);
+        if (status != SSH_OK) {
+            return status;
+        }
+        if (consumed_len == 0u) {
+            return SSH_ERR_PLATFORM;
+        }
+        offset += consumed_len;
+    }
+    return SSH_OK;
+}
+
 static int emtask_write_conpty_virtual_key(HANDLE handle, WORD virtual_key, DWORD control_state)
 {
     WORD scan_code;
@@ -714,6 +847,7 @@ void emtask_platform_term_close_handles_locked(emtask_term_t *term, int terminat
     }
     if (platform != NULL) {
         platform->using_conpty = 0;
+        platform->conpty_utf8_pending_len = 0u;
     }
     term->running = 0;
 }
@@ -951,9 +1085,72 @@ int emtask_platform_term_write_locked(emtask_term_t *term, const uint8_t *buf, s
         if (platform->using_conpty && platform->conpty_win32_input_mode) {
             size_t i;
 
-            for (i = 0u; i < len; ++i) {
+            for (i = 0u; i < len; ) {
                 int status;
                 size_t consumed_len = 0u;
+
+                if (platform->conpty_utf8_pending_len != 0u) {
+                    uint8_t pending[EMTASK_CONPTY_UTF8_PENDING_SIZE];
+                    size_t pending_len = platform->conpty_utf8_pending_len;
+                    size_t need = 0u;
+                    size_t copy_len = 0u;
+
+                    memcpy(pending, platform->conpty_utf8_pending, pending_len);
+                    platform->conpty_utf8_pending_len = 0u;
+                    if (emtask_utf8_sequence_need(pending[0], &need) == SSH_OK &&
+                        need > pending_len &&
+                        need <= sizeof(pending)) {
+                        copy_len = need - pending_len;
+                    }
+                    if (copy_len > len - i) {
+                        copy_len = len - i;
+                    }
+                    memcpy(pending + pending_len, buf + i, copy_len);
+                    if (need > pending_len + copy_len &&
+                        emtask_utf8_pending_still_valid(pending, pending_len + copy_len)) {
+                        memcpy(platform->conpty_utf8_pending, pending, pending_len + copy_len);
+                        platform->conpty_utf8_pending_len = pending_len + copy_len;
+                        i += copy_len;
+                        continue;
+                    }
+                    if (need == pending_len + copy_len) {
+                        WCHAR wide[2] = {0u, 0u};
+                        size_t wide_len = 0u;
+                        size_t pending_consumed_len = 0u;
+                        size_t j;
+
+                        status = emtask_try_decode_utf8_wide_char(
+                            pending,
+                            pending_len + copy_len,
+                            wide,
+                            &wide_len,
+                            &pending_consumed_len);
+                        if (status != SSH_OK) {
+                            pending_consumed_len = 0u;
+                        }
+                        if (pending_consumed_len == pending_len + copy_len) {
+                            for (j = 0u; j < wide_len; ++j) {
+                                status = emtask_write_conpty_codepoint(platform->input_write, wide[j]);
+                                if (status != SSH_OK) {
+                                    return status;
+                                }
+                            }
+                            i += copy_len;
+                            continue;
+                        }
+                    }
+                    memcpy(platform->conpty_utf8_pending, pending, pending_len);
+                    platform->conpty_utf8_pending_len = pending_len;
+                    status = emtask_flush_conpty_utf8_pending(platform);
+                    platform->conpty_utf8_pending_len = 0u;
+                    if (status != SSH_OK) {
+                        return status;
+                    }
+                    if (copy_len == 0u) {
+                        continue;
+                    }
+                    continue;
+                }
 
                 status = emtask_try_write_conpty_vt_key_sequence(
                     platform->input_write,
@@ -961,45 +1158,40 @@ int emtask_platform_term_write_locked(emtask_term_t *term, const uint8_t *buf, s
                     len - i,
                     &consumed_len);
                 if (status == SSH_OK && consumed_len != 0u) {
-                    i += consumed_len - 1u;
+                    i += consumed_len;
                     continue;
                 }
                 if (status != SSH_OK && status != SSH_ERR_NOT_FOUND) {
                     return status;
                 }
                 if (buf[i] == '\n' && i != 0u && buf[i - 1u] == '\r') {
+                    ++i;
                     continue;
                 }
-                {
-                    WCHAR wide[2] = {0u, 0u};
-                    size_t wide_len = 0u;
-                    size_t utf8_consumed_len = 0u;
-                    size_t j;
-
-                    status = emtask_try_decode_utf8_wide_char(
-                        buf + i,
-                        len - i,
-                        wide,
-                        &wide_len,
-                        &utf8_consumed_len);
-                    if (status == SSH_OK && wide_len != 0u && utf8_consumed_len != 0u) {
-                        for (j = 0u; j < wide_len; ++j) {
-                            status = emtask_write_conpty_codepoint(platform->input_write, wide[j]);
-                            if (status != SSH_OK) {
-                                return status;
-                            }
-                        }
-                        i += utf8_consumed_len - 1u;
-                        continue;
-                    }
-                    status = emtask_write_conpty_codepoint(platform->input_write, (WCHAR)buf[i]);
-                    if (status != SSH_OK) {
-                        return status;
-                    }
+                status = emtask_write_conpty_utf8_or_byte(
+                    platform->input_write,
+                    buf + i,
+                    len - i,
+                    &consumed_len,
+                    1,
+                    platform);
+                if (status != SSH_OK) {
+                    return status;
                 }
+                if (consumed_len == 0u) {
+                    return SSH_ERR_PLATFORM;
+                }
+                i += consumed_len;
             }
             *written_len = len;
             return SSH_OK;
+        }
+        if (platform->conpty_utf8_pending_len != 0u) {
+            int status = emtask_flush_conpty_utf8_pending(platform);
+            platform->conpty_utf8_pending_len = 0u;
+            if (status != SSH_OK) {
+                return status;
+            }
         }
 #endif
 

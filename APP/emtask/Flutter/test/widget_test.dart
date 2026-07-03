@@ -332,6 +332,30 @@ void main() {
     );
   });
 
+  test('powershell terminal input is encoded as utf8', () {
+    final expected = Uint8List.fromList(<int>[
+      0xe4,
+      0xb8,
+      0xad,
+      0xe6,
+      0x96,
+      0x87,
+    ]);
+
+    expect(
+      encodeEmTaskTerminalInput('中文', EmTaskShellKind.auto),
+      expected,
+    );
+    expect(
+      encodeEmTaskTerminalInput('中文', EmTaskShellKind.powershell),
+      expected,
+    );
+    expect(
+      encodeEmTaskTerminalInput('中文', EmTaskShellKind.posix),
+      expected,
+    );
+  });
+
   test('terminal shortcuts leave Ctrl+C for remote interrupt', () {
     final shortcuts =
         terminalShortcutsForPlatformForTest(TargetPlatform.windows);
