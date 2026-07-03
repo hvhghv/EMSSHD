@@ -457,18 +457,36 @@ Write-Host "Panel port: $panelPort"
 Write-Host "Task port: $taskPort"
 
 try {
-    & $serviceScript install `
-        -ServiceName $serviceName `
-        -DisplayName "emtask CI $Label" `
-        -Description "GitHub Actions emtask service smoke test for $Label" `
-        -EmtaskExe $emtaskExe `
-        -Config $configPath `
-        -ServiceDir $serviceDir `
-        -LogDir $logDir `
-        -WrapperExe $wrapperExe `
-        -StartupType Automatic `
-        -LocalSystem `
-        -Force
+    Push-Location $runtimeRoot
+    try {
+        & $serviceScript install `
+            -ServiceName $serviceName `
+            -DisplayName "emtask CI $Label" `
+            -Description "GitHub Actions emtask service smoke test for $Label" `
+            -EmtaskExe $emtaskExe `
+            -Config $configPath `
+            -ServiceDir $serviceDir `
+            -LogDir $logDir `
+            -WrapperExe $wrapperExe `
+            -StartupType Automatic `
+            -LocalSystem `
+            -Force
+    } finally {
+        Pop-Location
+    }
+
+    $wrapperConfigPath = Join-Path $serviceDir 'emtask-service-wrapper.ini'
+    $workingDirectoryLine = Get-Content -LiteralPath $wrapperConfigPath |
+        Where-Object { $_ -like 'workingDirectory=*' } |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($workingDirectoryLine)) {
+        throw "Wrapper config did not contain workingDirectory: $wrapperConfigPath"
+    }
+    $actualWorkingDirectory = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String(($workingDirectoryLine -split '=', 2)[1]))
+    if (-not [string]::Equals($actualWorkingDirectory, $runtimeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Service working directory mismatch. Expected '$runtimeRoot', got '$actualWorkingDirectory'."
+    }
 
     $service = Get-Service -Name $serviceName -ErrorAction Stop
     if ($null -eq $service) {

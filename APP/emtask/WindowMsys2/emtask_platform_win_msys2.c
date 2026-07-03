@@ -232,6 +232,43 @@ void *emtask_platform_library_symbol(void *handle, const char *name)
     return (void *)GetProcAddress((HMODULE)handle, name);
 }
 
+static int emtask_platform_sqlite_library_open_from_exe_dir(void **handle_out)
+{
+    char module_path[EMTASK_MAX_PATH];
+    char sqlite_path[EMTASK_MAX_PATH];
+    char *last_slash;
+    char *last_backslash;
+    char *cut;
+    DWORD written;
+    int formatted;
+
+    if (handle_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    written = GetModuleFileNameA(NULL, module_path, (DWORD)sizeof(module_path));
+    if (written == 0u || written >= (DWORD)sizeof(module_path)) {
+        return SSH_ERR_NOT_FOUND;
+    }
+
+    last_slash = strrchr(module_path, '/');
+    last_backslash = strrchr(module_path, '\\');
+    cut = last_slash;
+    if (last_backslash != NULL && (cut == NULL || last_backslash > cut)) {
+        cut = last_backslash;
+    }
+    if (cut == NULL) {
+        return SSH_ERR_NOT_FOUND;
+    }
+    *cut = '\0';
+
+    formatted = snprintf(sqlite_path, sizeof(sqlite_path), "%s\\sqlite3.dll", module_path);
+    if (formatted < 0 || (size_t)formatted >= sizeof(sqlite_path)) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    return emtask_platform_library_open(sqlite_path, handle_out);
+}
+
 int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out)
 {
     int status;
@@ -242,6 +279,10 @@ int emtask_platform_sqlite_library_open(void **handle_out, int *using_system_out
     *handle_out = NULL;
     *using_system_out = 0;
     status = emtask_platform_library_open(".\\sqlite3.dll", handle_out);
+    if (status == SSH_OK) {
+        return SSH_OK;
+    }
+    status = emtask_platform_sqlite_library_open_from_exe_dir(handle_out);
     if (status == SSH_OK) {
         return SSH_OK;
     }

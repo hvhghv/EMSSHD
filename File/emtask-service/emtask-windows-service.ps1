@@ -30,7 +30,8 @@
         -Force
 
 .EXAMPLE
-    # If .\emtask.exe and .\emtask.conf exist in the current directory, both paths can be omitted.
+    # If .\emtask.conf exists in the current directory and emtask.exe is next to this script,
+    # both paths can be omitted. The service process uses the current directory as its working directory.
     # By default, install prompts for the current user's password and runs as that user.
     .\tools\emtask-windows-service.ps1 install `
         -Force
@@ -70,6 +71,8 @@ param(
     [string]$EmtaskExe,
 
     [string]$Config,
+
+    [string]$WorkingDirectory,
 
     [string]$ServiceDir = "$env:ProgramData\emtask",
 
@@ -128,8 +131,11 @@ Common options:
     -ServiceName <name>       Service name. Default: emtask
     -DisplayName <text>       Service display name.
     -Description <text>       Service description.
-    -EmtaskExe <path>         Path to emtask.exe. If omitted, install tries .\emtask.exe in the current directory.
+    -EmtaskExe <path>         Path to emtask.exe. If omitted, install tries .\emtask.exe in the current directory,
+                              then emtask.exe next to this script.
     -Config <path>            Path to emtask.conf. If omitted, install tries .\emtask.conf in the current directory.
+    -WorkingDirectory <path>  Working directory for the emtask service process.
+                              Default: current PowerShell directory at install time.
     -ServiceDir <path>        Service files directory. Default: %ProgramData%\emtask
     -LogDir <path>            Log directory. Default: <ServiceDir>\logs
     -WrapperExe <path>        Prebuilt wrapper exe. Default: script directory\emtask-service-wrapper.exe
@@ -233,7 +239,12 @@ function Get-EmtaskExePath {
         return $currentDirectoryExe
     }
 
-    throw "Missing -EmtaskExe and emtask.exe was not found in the current directory: $(Get-Location)"
+    $scriptDirectoryExe = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'emtask.exe'))
+    if (Test-Path -LiteralPath $scriptDirectoryExe -PathType Leaf) {
+        return $scriptDirectoryExe
+    }
+
+    throw "Missing -EmtaskExe and emtask.exe was not found in the current directory or script directory: $(Get-Location), $PSScriptRoot"
 }
 
 function Get-EmtaskConfigPath {
@@ -247,6 +258,14 @@ function Get-EmtaskConfigPath {
     }
 
     throw "Missing -Config and emtask.conf was not found in the current directory: $(Get-Location)"
+}
+
+function Get-ServiceWorkingDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        return Resolve-FullPath $WorkingDirectory
+    }
+
+    return [System.IO.Path]::GetFullPath((Get-Location).ProviderPath)
 }
 
 function Get-CurrentUserCredential {
@@ -500,6 +519,10 @@ function Install-EmtaskService {
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         throw "emtask config not found: $configPath"
     }
+    $workingDirectory = Get-ServiceWorkingDirectory
+    if (-not (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
+        throw "service working directory not found: $workingDirectory"
+    }
 
     $existing = Get-ServiceOrNull -Name $ServiceName
     $serviceExists = $null -ne $existing
@@ -520,7 +543,6 @@ function Install-EmtaskService {
 
     $wrapperExe = Join-Path $serviceRoot $WrapperExeName
     $wrapperConfig = Join-Path $serviceRoot $WrapperConfigName
-    $workingDirectory = Split-Path -Parent $configPath
 
     if (Test-Path -LiteralPath $sourceWrapperExe -PathType Leaf) {
         if (-not [string]::Equals($sourceWrapperExe, $wrapperExe, [StringComparison]::OrdinalIgnoreCase)) {
@@ -571,6 +593,7 @@ function Install-EmtaskService {
     }
     Write-Host "Wrapper: $wrapperExe"
     Write-Host "Wrapper config: $wrapperConfig"
+    Write-Host "Working directory: $workingDirectory"
     Write-Host "Logs: $runtimeLogDir"
 }
 
