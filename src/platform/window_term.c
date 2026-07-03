@@ -4,6 +4,8 @@
 #define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
 #endif
 
+#define EMTASK_CONPTY_VT_TAIL_SIZE 16u
+
 struct emtask_term_platform {
     emtask_thread_handle_t monitor_thread;
     HANDLE process_handle;
@@ -13,9 +15,13 @@ struct emtask_term_platform {
     int using_conpty;
     int allow_conpty;
     int conpty_win32_input_mode;
-    char conpty_vt_tail[16];
+    char conpty_vt_tail[EMTASK_CONPTY_VT_TAIL_SIZE];
     size_t conpty_vt_tail_len;
 };
+
+#ifndef EMTASK_CONPTY_SYNTHESIZE_WIN32_INPUT
+#define EMTASK_CONPTY_SYNTHESIZE_WIN32_INPUT 1
+#endif
 
 int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t *olen)
 {
@@ -282,6 +288,7 @@ static void emtask_conpty_track_output_mode(emtask_term_t *term, const uint8_t *
     }
 }
 
+#if EMTASK_CONPTY_SYNTHESIZE_WIN32_INPUT
 static DWORD emtask_vk_state_to_control_state(SHORT vk_state)
 {
     DWORD control_state = 0u;
@@ -364,7 +371,7 @@ static int emtask_write_conpty_codepoint(HANDLE handle, WCHAR ch)
     if (status != SSH_OK) {
         return status;
     }
-    return emtask_write_conpty_key_event(handle, virtual_key, scan_code, 0u, 0, control_state);
+    return emtask_write_conpty_key_event(handle, virtual_key, scan_code, (WORD)ch, 0, control_state);
 }
 
 static int emtask_try_decode_utf8_wide_char(
@@ -462,7 +469,7 @@ static int emtask_write_conpty_ctrl_letter(HANDLE handle, uint8_t control_ch)
         handle,
         virtual_key,
         scan_code,
-        0u,
+        (WORD)char_code,
         0,
         LEFT_CTRL_PRESSED);
 }
@@ -624,6 +631,7 @@ static int emtask_try_write_conpty_vt_key_sequence(
 
     return SSH_ERR_NOT_FOUND;
 }
+#endif
 
 #ifdef __CYGWIN__
 static void *emtask_term_monitor_thread_entry(void *arg)
@@ -804,6 +812,10 @@ int emtask_platform_term_spawn_locked(emtask_term_t *term)
                     NULL,
                     NULL)) {
                 si.StartupInfo.cb = sizeof(si);
+                si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                si.StartupInfo.hStdInput = NULL;
+                si.StartupInfo.hStdOutput = NULL;
+                si.StartupInfo.hStdError = NULL;
                 if (CreateProcessW(
                         NULL,
                         command_line,
@@ -935,6 +947,7 @@ int emtask_platform_term_write_locked(emtask_term_t *term, const uint8_t *buf, s
     emtask_term_platform_t *platform = term != NULL ? term->platform : NULL;
 
     if (platform != NULL && platform->input_write != NULL) {
+#if EMTASK_CONPTY_SYNTHESIZE_WIN32_INPUT
         if (platform->using_conpty && platform->conpty_win32_input_mode) {
             size_t i;
 
@@ -988,6 +1001,7 @@ int emtask_platform_term_write_locked(emtask_term_t *term, const uint8_t *buf, s
             *written_len = len;
             return SSH_OK;
         }
+#endif
 
         DWORD written = 0u;
         if (!WriteFile(platform->input_write, buf, (DWORD)len, &written, NULL)) {

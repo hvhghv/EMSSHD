@@ -16,6 +16,10 @@ class EmTaskPanelTask {
     required this.command,
     required this.workingDir,
     required this.useSftp,
+    required this.useConpty,
+    required this.replayOnAttach,
+    required this.repaintOnAttach,
+    required this.screenSnapshot,
     required this.listenerOpen,
     required this.status,
     required this.statusMessage,
@@ -40,6 +44,10 @@ class EmTaskPanelTask {
       command: json['command'] as String? ?? '',
       workingDir: json['working_dir'] as String? ?? '.',
       useSftp: json['use_sftp'] as bool? ?? false,
+      useConpty: json['use_conpty'] as bool? ?? false,
+      replayOnAttach: json['replay_on_attach'] as bool? ?? false,
+      repaintOnAttach: json['repaint_on_attach'] as bool? ?? false,
+      screenSnapshot: json['screen_snapshot'] as bool? ?? false,
       listenerOpen: listenerOpen,
       status: json['status'] as String? ??
           _inferStatus(
@@ -62,6 +70,10 @@ class EmTaskPanelTask {
   final String command;
   final String workingDir;
   final bool useSftp;
+  final bool useConpty;
+  final bool replayOnAttach;
+  final bool repaintOnAttach;
+  final bool screenSnapshot;
   final bool listenerOpen;
   final String status;
   final String statusMessage;
@@ -98,6 +110,9 @@ class EmTaskPanelCreateTaskRequest {
     this.workingDir = '.',
     this.useSftp = true,
     this.useConpty = true,
+    this.replayOnAttach = false,
+    this.repaintOnAttach = false,
+    this.screenSnapshot = false,
   });
 
   final String name;
@@ -107,6 +122,9 @@ class EmTaskPanelCreateTaskRequest {
   final String workingDir;
   final bool useSftp;
   final bool useConpty;
+  final bool replayOnAttach;
+  final bool repaintOnAttach;
+  final bool screenSnapshot;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'name': name,
@@ -116,6 +134,9 @@ class EmTaskPanelCreateTaskRequest {
         'working_dir': workingDir,
         'use_sftp': useSftp,
         'use_conpty': useConpty,
+        'replay_on_attach': replayOnAttach,
+        'repaint_on_attach': repaintOnAttach,
+        'screen_snapshot': screenSnapshot,
       };
 }
 
@@ -126,6 +147,10 @@ class EmTaskPanelUpdateTaskRequest {
     this.command,
     this.workingDir,
     this.useSftp,
+    this.useConpty,
+    this.replayOnAttach,
+    this.repaintOnAttach,
+    this.screenSnapshot,
   });
 
   final String? listenAddress;
@@ -133,13 +158,21 @@ class EmTaskPanelUpdateTaskRequest {
   final String? command;
   final String? workingDir;
   final bool? useSftp;
+  final bool? useConpty;
+  final bool? replayOnAttach;
+  final bool? repaintOnAttach;
+  final bool? screenSnapshot;
 
   bool get isEmpty =>
       listenAddress == null &&
       port == null &&
       command == null &&
       workingDir == null &&
-      useSftp == null;
+      useSftp == null &&
+      useConpty == null &&
+      replayOnAttach == null &&
+      repaintOnAttach == null &&
+      screenSnapshot == null;
 
   Map<String, Object?> toJson() {
     final json = <String, Object?>{};
@@ -157,6 +190,18 @@ class EmTaskPanelUpdateTaskRequest {
     }
     if (useSftp != null) {
       json['use_sftp'] = useSftp;
+    }
+    if (useConpty != null) {
+      json['use_conpty'] = useConpty;
+    }
+    if (replayOnAttach != null) {
+      json['replay_on_attach'] = replayOnAttach;
+    }
+    if (repaintOnAttach != null) {
+      json['repaint_on_attach'] = repaintOnAttach;
+    }
+    if (screenSnapshot != null) {
+      json['screen_snapshot'] = screenSnapshot;
     }
     return json;
   }

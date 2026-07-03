@@ -179,7 +179,10 @@ void main() {
       listenAddress: '127.0.0.1',
       workingDir: '/tmp',
       useSftp: false,
-      useConpty: false,
+      useConpty: true,
+      replayOnAttach: false,
+      repaintOnAttach: false,
+      screenSnapshot: false,
     );
 
     expect(request.toJson(), <String, Object?>{
@@ -189,7 +192,10 @@ void main() {
       'listen_address': '127.0.0.1',
       'working_dir': '/tmp',
       'use_sftp': false,
-      'use_conpty': false,
+      'use_conpty': true,
+      'replay_on_attach': false,
+      'repaint_on_attach': false,
+      'screen_snapshot': false,
     });
   });
 

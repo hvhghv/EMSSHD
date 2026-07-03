@@ -4142,7 +4142,7 @@ class _PanelTaskDialogState extends State<_PanelTaskDialog> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('使用 ConPTY（Windows 推荐）'),
+                  title: const Text('使用 ConPTY（Windows 可选）'),
                   value: _useConpty,
                   onChanged: (value) => setState(() => _useConpty = value),
                 ),

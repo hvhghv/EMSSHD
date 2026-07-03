@@ -243,8 +243,8 @@ static void emtask_task_config_defaults(emtask_task_config_t *task)
     task->restart_window_sec = EMTASK_DEFAULT_RESTART_WINDOW_SEC;
     task->replay_buffer_bytes = EMTASK_DEFAULT_REPLAY_BUFFER_BYTES;
     task->use_conpty = emtask_platform_default_use_conpty();
-    task->replay_on_attach = 1;
-    task->repaint_on_attach = 1;
+    task->replay_on_attach = EMTASK_DEFAULT_REPLAY_ON_ATTACH;
+    task->repaint_on_attach = EMTASK_DEFAULT_REPAINT_ON_ATTACH;
     task->screen_snapshot = EMTASK_DEFAULT_SCREEN_SNAPSHOT;
     task->use_sftp = 1;
 }
@@ -1250,13 +1250,13 @@ static int emtask_panel_tasks_db_init(emtask_sqlite_api_t *api, emtask_sqlite3_t
         "command TEXT NOT NULL,"
         "working_dir TEXT NOT NULL DEFAULT '.',"
         "use_sftp INTEGER NOT NULL DEFAULT 1,"
-        "use_conpty INTEGER NOT NULL DEFAULT 1,"
+        "use_conpty INTEGER NOT NULL DEFAULT " EMTASK_DEFAULT_USE_CONPTY_SQL ","
         "restart_limit INTEGER NOT NULL DEFAULT 8,"
         "restart_window_sec INTEGER NOT NULL DEFAULT 60,"
         "replay_buffer_bytes INTEGER NOT NULL DEFAULT 1048576,"
-        "replay_on_attach INTEGER NOT NULL DEFAULT 1,"
-        "repaint_on_attach INTEGER NOT NULL DEFAULT 1,"
-        "screen_snapshot INTEGER NOT NULL DEFAULT 1,"
+        "replay_on_attach INTEGER NOT NULL DEFAULT " EMTASK_DEFAULT_REPLAY_ON_ATTACH_SQL ","
+        "repaint_on_attach INTEGER NOT NULL DEFAULT " EMTASK_DEFAULT_REPAINT_ON_ATTACH_SQL ","
+        "screen_snapshot INTEGER NOT NULL DEFAULT " EMTASK_DEFAULT_SCREEN_SNAPSHOT_SQL ","
         "created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
         "updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
         ");";
@@ -4216,6 +4216,9 @@ static void emtask_panel_append_task_json(emtask_panel_buffer_t *json, emtask_ta
     emtask_panel_append_json_string(json, task->config.working_dir);
     emtask_panel_appendf(json, ",\"use_sftp\":%s", task->config.use_sftp ? "true" : "false");
     emtask_panel_appendf(json, ",\"use_conpty\":%s", task->config.use_conpty ? "true" : "false");
+    emtask_panel_appendf(json, ",\"replay_on_attach\":%s", task->config.replay_on_attach ? "true" : "false");
+    emtask_panel_appendf(json, ",\"repaint_on_attach\":%s", task->config.repaint_on_attach ? "true" : "false");
+    emtask_panel_appendf(json, ",\"screen_snapshot\":%s", task->config.screen_snapshot ? "true" : "false");
     emtask_panel_appendf(json, ",\"restart_limit\":%u", task->config.restart_limit);
     emtask_panel_appendf(json, ",\"restart_window_sec\":%u", task->config.restart_window_sec);
     emtask_panel_appendf(json, ",\"listener_open\":%s", task->listener_open ? "true" : "false");
@@ -4579,6 +4582,33 @@ static int emtask_json_patch_task(const emtask_app_t *app, const char *json, con
             return status;
         }
         task->use_conpty = flag;
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "replay_on_attach")) {
+        flag = task->replay_on_attach;
+        status = emtask_json_get_bool(json, "replay_on_attach", &flag, 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        task->replay_on_attach = flag;
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "repaint_on_attach")) {
+        flag = task->repaint_on_attach;
+        status = emtask_json_get_bool(json, "repaint_on_attach", &flag, 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        task->repaint_on_attach = flag;
+        changed = 1;
+    }
+    if (emtask_json_has_member(json, "screen_snapshot")) {
+        flag = task->screen_snapshot;
+        status = emtask_json_get_bool(json, "screen_snapshot", &flag, 0);
+        if (status != SSH_OK) {
+            return status;
+        }
+        task->screen_snapshot = flag;
         changed = 1;
     }
     return changed ? SSH_OK : SSH_ERR_INVALID_ARGUMENT;
