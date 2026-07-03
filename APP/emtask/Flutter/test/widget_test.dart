@@ -302,6 +302,50 @@ void main() {
     expect(asset.sizeBytes, 42);
   });
 
+  test('github updater defaults parse info.dat', () {
+    final defaults = GitHubUpdateInfoDefaults.fromJson(<String, Object?>{
+      'repo': 'hvhghv/EMSSHD',
+      'channel': 'action',
+      'artifact': 'emtask-client-windows-x64',
+      'workflow': 'build.yml',
+      'branch': 'main',
+    });
+
+    expect(defaults.repository, 'hvhghv/EMSSHD');
+    expect(defaults.channel, GitHubUpdateChannel.action);
+    expect(defaults.namePattern, 'emtask-client-windows-x64*');
+    expect(defaults.workflow, 'build.yml');
+    expect(defaults.branch, 'main');
+  });
+
+  test('github updater saved input persists last values', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    const key = 'github_updater.test.last_input';
+    const input = GitHubUpdateSavedInput(
+      repository: 'owner/repo',
+      namePattern: 'app-windows*',
+      workflow: 'ci.yml',
+      branch: 'main',
+      token: 'secret',
+      channel: GitHubUpdateChannel.action,
+    );
+
+    await input.save(key: key);
+    final restored = await GitHubUpdateSavedInput.load(key: key);
+    final restoredWithoutToken = await GitHubUpdateSavedInput.load(
+      key: key,
+      persistToken: false,
+    );
+
+    expect(restored.repository, 'owner/repo');
+    expect(restored.namePattern, 'app-windows*');
+    expect(restored.workflow, 'ci.yml');
+    expect(restored.branch, 'main');
+    expect(restored.token, 'secret');
+    expect(restored.channel, GitHubUpdateChannel.action);
+    expect(restoredWithoutToken.token, isEmpty);
+  });
+
   test('terminal modifiers convert soft keyboard input', () {
     expect(
       terminalInputWithModifiersForTest(

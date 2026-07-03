@@ -10,14 +10,15 @@
 
 ## 依赖
 
-只依赖 Flutter SDK / Dart SDK 内置库：
+依赖：
 
 - `dart:io`
 - `dart:convert`
 - `package:flutter/material.dart`
 - `package:flutter/services.dart`
+- `package:shared_preferences/shared_preferences.dart`
 
-无需额外 pub package。
+宿主项目需要在 `pubspec.yaml` 中加入 `shared_preferences`，用于保存上次填写的更新源、渠道、资源匹配、Workflow、分支和 Token。
 
 ## 接入示例
 
@@ -43,6 +44,8 @@ Navigator.of(context).push(
 - `owner/repo`
 - `https://github.com/owner/repo`
 - `git@github.com:owner/repo.git`
+
+`initialRepository` 与 `defaultNamePattern` 可以留空。页面会自动查找运行目录附近的 `info.Dat`，读取其中的 `repo`、`channel`、`name_pattern`、`artifact`、`package`、`workflow`、`branch` 字段作为默认值。用户点击“列出版本”、选择版本或复制/安装资源时，会把当前输入保存到 `SharedPreferences`，下次打开页面优先恢复上次内容。
 
 ## 功能
 

@@ -83,6 +83,161 @@ extension GitHubUpdateChannelX on GitHubUpdateChannel {
   }
 }
 
+GitHubUpdateChannel? parseGitHubUpdateChannel(String? value) {
+  switch (value?.trim().toLowerCase()) {
+    case 'release':
+      return GitHubUpdateChannel.release;
+    case 'action':
+    case 'actions':
+      return GitHubUpdateChannel.action;
+    default:
+      return null;
+  }
+}
+
+class GitHubUpdateInfoDefaults {
+  const GitHubUpdateInfoDefaults({
+    this.repository = '',
+    this.namePattern = '',
+    this.workflow = '',
+    this.branch = '',
+    this.channel,
+  });
+
+  final String repository;
+  final String namePattern;
+  final String workflow;
+  final String branch;
+  final GitHubUpdateChannel? channel;
+
+  bool get isEmpty =>
+      repository.isEmpty &&
+      namePattern.isEmpty &&
+      workflow.isEmpty &&
+      branch.isEmpty &&
+      channel == null;
+
+  GitHubUpdateInfoDefaults merge(GitHubUpdateInfoDefaults other) {
+    return GitHubUpdateInfoDefaults(
+      repository: other.repository.isNotEmpty ? other.repository : repository,
+      namePattern:
+          other.namePattern.isNotEmpty ? other.namePattern : namePattern,
+      workflow: other.workflow.isNotEmpty ? other.workflow : workflow,
+      branch: other.branch.isNotEmpty ? other.branch : branch,
+      channel: other.channel ?? channel,
+    );
+  }
+
+  static GitHubUpdateInfoDefaults fromJson(Map<String, Object?> json) {
+    return GitHubUpdateInfoDefaults(
+      repository: _jsonString(json['repo']),
+      namePattern: _namePatternFromInfo(json),
+      workflow: _jsonString(json['workflow']),
+      branch: _jsonString(json['branch']),
+      channel: parseGitHubUpdateChannel(_jsonString(json['channel'])),
+    );
+  }
+
+  static Future<GitHubUpdateInfoDefaults> load({String? infoFilePath}) async {
+    final file = await _findInfoFile(infoFilePath: infoFilePath);
+    if (file == null) {
+      return const GitHubUpdateInfoDefaults();
+    }
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is Map) {
+        return GitHubUpdateInfoDefaults.fromJson(
+          decoded.cast<String, Object?>(),
+        );
+      }
+    } catch (_) {
+      // Ignore broken or unrelated info.Dat files and use caller defaults.
+    }
+    return const GitHubUpdateInfoDefaults();
+  }
+
+  static Future<File?> _findInfoFile({String? infoFilePath}) async {
+    final candidates = <String>{};
+    void addFile(String path) {
+      if (path.trim().isNotEmpty) {
+        candidates.add(path);
+      }
+    }
+
+    void addDirectory(String path) {
+      if (path.trim().isNotEmpty) {
+        candidates.add(
+            '${path.replaceAll(RegExp(r'[\\/]+$'), '')}${Platform.pathSeparator}info.Dat');
+      }
+    }
+
+    if (infoFilePath != null && infoFilePath.trim().isNotEmpty) {
+      final file = File(infoFilePath);
+      addFile(file.path);
+      addDirectory(file.path);
+    }
+
+    addDirectory(Directory.current.path);
+
+    final executable = Platform.resolvedExecutable;
+    if (executable.isNotEmpty) {
+      var directory = File(executable).parent;
+      for (var i = 0; i < 4; i++) {
+        addDirectory(directory.path);
+        final parent = directory.parent;
+        if (parent.path == directory.path) {
+          break;
+        }
+        directory = parent;
+      }
+    }
+
+    try {
+      if (Platform.script.isScheme('file')) {
+        addDirectory(File(Platform.script.toFilePath()).parent.path);
+      }
+    } catch (_) {
+      // Platform.script may be non-file on some runtimes.
+    }
+
+    for (final path in candidates) {
+      final file = File(path);
+      if (await file.exists()) {
+        return file;
+      }
+    }
+    return null;
+  }
+
+  static String _namePatternFromInfo(Map<String, Object?> json) {
+    final explicit = _jsonString(json['name_pattern']);
+    if (explicit.isNotEmpty) {
+      return explicit;
+    }
+    for (final key in const <String>['artifact', 'package', 'name']) {
+      final value = _jsonString(json[key]);
+      if (value.isNotEmpty) {
+        return _identityToNamePattern(value);
+      }
+    }
+    return '';
+  }
+
+  static String _identityToNamePattern(String value) {
+    if (value.contains('*') || value.contains('?')) {
+      return value;
+    }
+    final lower = value.toLowerCase();
+    if (lower.endsWith('.zip') ||
+        lower.endsWith('.tar.gz') ||
+        lower.endsWith('.tgz') ||
+        lower.endsWith('.apk')) {
+      return value;
+    }
+    return '$value*';
+  }
+}
+
 class GitHubUpdateVersion {
   const GitHubUpdateVersion({
     required this.id,

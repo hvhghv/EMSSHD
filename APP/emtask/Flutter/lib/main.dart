@@ -234,7 +234,6 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       MaterialPageRoute<void>(
         builder: (context) => GitHubUpdatePage(
           config: GitHubUpdatePageConfig(
-            initialRepository: 'owner/repo',
             defaultNamePattern: _defaultClientUpdatePattern(),
             appVersion: _appVersion,
           ),

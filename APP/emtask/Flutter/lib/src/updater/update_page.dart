@@ -1,15 +1,23 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'github_update.dart';
 
 class GitHubUpdatePageConfig {
   const GitHubUpdatePageConfig({
-    required this.initialRepository,
-    required this.defaultNamePattern,
+    this.initialRepository = '',
+    this.defaultNamePattern = '',
     this.appVersion,
     this.initialWorkflow = 'build.yml',
     this.initialChannel = GitHubUpdateChannel.release,
+    this.initialBranch = '',
+    this.infoFilePath,
+    this.preferencesKey = 'github_updater.last_input.v1',
+    this.persistToken = true,
     this.title = '检查更新',
     this.description = '以项目 GitHub 地址作为参数，支持 Release 与 Actions 构建产物两个渠道。',
   });
@@ -19,6 +27,10 @@ class GitHubUpdatePageConfig {
   final String? appVersion;
   final String initialWorkflow;
   final GitHubUpdateChannel initialChannel;
+  final String initialBranch;
+  final String? infoFilePath;
+  final String preferencesKey;
+  final bool persistToken;
   final String title;
   final String description;
 }
@@ -50,6 +62,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   GitHubUpdateVersion? _selectedVersion;
   bool _loadingVersions = false;
   bool _loadingAssets = false;
+  bool _loadingDefaults = true;
 
   @override
   void initState() {
@@ -64,6 +77,8 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     _namePatternController =
         TextEditingController(text: widget.config.defaultNamePattern);
     _channel = widget.config.initialChannel;
+    _branchController.text = widget.config.initialBranch;
+    unawaited(_loadInitialDefaults());
   }
 
   @override
@@ -77,6 +92,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   }
 
   Future<void> _loadVersions() async {
+    await _saveLastInput();
     setState(() {
       _loadingVersions = true;
       _versions = const <GitHubUpdateVersion>[];
@@ -110,6 +126,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   }
 
   Future<void> _loadAssets(GitHubUpdateVersion version) async {
+    await _saveLastInput();
     setState(() {
       _selectedVersion = version;
       _loadingAssets = true;
@@ -142,10 +159,53 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   }
 
   Future<void> _copyAssetUrl(GitHubUpdateAsset asset) async {
+    await _saveLastInput();
     await Clipboard.setData(ClipboardData(text: asset.downloadUrl.toString()));
     if (mounted) {
       _showSnackBar('已复制下载链接：${asset.name}');
     }
+  }
+
+  Future<void> _loadInitialDefaults() async {
+    final configDefaults = GitHubUpdateInfoDefaults(
+      repository: widget.config.initialRepository,
+      namePattern: widget.config.defaultNamePattern,
+      workflow: widget.config.initialWorkflow,
+      branch: widget.config.initialBranch,
+      channel: widget.config.initialChannel,
+    );
+    final infoDefaults = await GitHubUpdateInfoDefaults.load(
+        infoFilePath: widget.config.infoFilePath);
+    final savedDefaults = await GitHubUpdateSavedInput.load(
+      key: widget.config.preferencesKey,
+      persistToken: widget.config.persistToken,
+    );
+    final defaults = configDefaults.merge(infoDefaults).merge(savedDefaults);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _repoController.text = defaults.repository;
+      _namePatternController.text = defaults.namePattern;
+      _workflowController.text = defaults.workflow;
+      _branchController.text = defaults.branch;
+      if (widget.config.persistToken) {
+        _tokenController.text = savedDefaults.token;
+      }
+      _channel = defaults.channel ?? widget.config.initialChannel;
+      _loadingDefaults = false;
+    });
+  }
+
+  Future<void> _saveLastInput() async {
+    await GitHubUpdateSavedInput(
+      repository: _repoController.text,
+      namePattern: _namePatternController.text,
+      workflow: _workflowController.text,
+      branch: _branchController.text,
+      token: widget.config.persistToken ? _tokenController.text : '',
+      channel: _channel,
+    ).save(key: widget.config.preferencesKey);
   }
 
   void _showSnackBar(String message) {
@@ -201,6 +261,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
                       if (value == null) {
                         return;
                       }
+                      unawaited(_saveLastInput());
                       setState(() {
                         _channel = value;
                         _versions = const <GitHubUpdateVersion>[];
@@ -219,6 +280,10 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
                       isDense: true,
                     ),
                   ),
+                  if (_loadingDefaults) ...<Widget>[
+                    const SizedBox(height: 12),
+                    const LinearProgressIndicator(minHeight: 2),
+                  ],
                   const SizedBox(height: 12),
                   TextField(
                     controller: _tokenController,
@@ -442,6 +507,64 @@ String formatGitHubUpdateBytes(int bytes) {
   }
   return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[unit]}';
 }
+
+@visibleForTesting
+class GitHubUpdateSavedInput extends GitHubUpdateInfoDefaults {
+  const GitHubUpdateSavedInput({
+    super.repository,
+    super.namePattern,
+    super.workflow,
+    super.branch,
+    super.channel,
+    this.token = '',
+  });
+
+  final String token;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'repo': repository,
+        'name_pattern': namePattern,
+        'workflow': workflow,
+        'branch': branch,
+        'channel': channel?.apiName,
+        'token': token,
+      };
+
+  Future<void> save({required String key}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, jsonEncode(toJson()));
+  }
+
+  static Future<GitHubUpdateSavedInput> load({
+    required String key,
+    bool persistToken = true,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(key);
+    if (saved == null || saved.isEmpty) {
+      return const GitHubUpdateSavedInput();
+    }
+    try {
+      final decoded = jsonDecode(saved);
+      if (decoded is Map) {
+        final json = decoded.cast<String, Object?>();
+        return GitHubUpdateSavedInput(
+          repository: _savedJsonString(json['repo']),
+          namePattern: _savedJsonString(json['name_pattern']),
+          workflow: _savedJsonString(json['workflow']),
+          branch: _savedJsonString(json['branch']),
+          channel: parseGitHubUpdateChannel(_savedJsonString(json['channel'])),
+          token: persistToken ? _savedJsonString(json['token']) : '',
+        );
+      }
+    } catch (_) {
+      // Ignore broken saved input and use defaults.
+    }
+    return const GitHubUpdateSavedInput();
+  }
+}
+
+String _savedJsonString(Object? value) => value == null ? '' : '$value';
 
 String _formatError(Object error) {
   final text = error.toString();
