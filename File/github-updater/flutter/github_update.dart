@@ -329,6 +329,237 @@ class GitHubUpdateInstallException implements Exception {
   String toString() => message;
 }
 
+class GitHubUpdateDownloadCanceledException implements Exception {
+  const GitHubUpdateDownloadCanceledException();
+
+  @override
+  String toString() => '下载已取消。';
+}
+
+class GitHubUpdateDesktopDownloadTask {
+  GitHubUpdateDesktopDownloadTask({
+    required this.repo,
+    required this.channel,
+    required this.version,
+    required this.asset,
+    this.token = '',
+    this.workflow = '',
+    this.branch = '',
+    this.infoFilePath,
+    this.onOutput,
+  });
+
+  final String repo;
+  final GitHubUpdateChannel channel;
+  final String version;
+  final GitHubUpdateAsset asset;
+  final String token;
+  final String workflow;
+  final String branch;
+  final String? infoFilePath;
+  final void Function(String line)? onOutput;
+
+  bool _canceled = false;
+  Process? _process;
+  Directory? _outputDir;
+
+  void cancel() {
+    _canceled = true;
+    _process?.kill();
+  }
+
+  Future<File> start() async {
+    if (!GitHubUpdateLocalPackage.isDesktopSupported) {
+      throw const GitHubUpdateInstallException('当前平台不支持脚本式内置更新。');
+    }
+    if (repo.trim().isEmpty) {
+      throw const GitHubUpdateInstallException('GitHub 仓库地址不能为空。');
+    }
+    if (version.trim().isEmpty) {
+      throw const GitHubUpdateInstallException('更新版本不能为空。');
+    }
+    if (_canceled) {
+      throw const GitHubUpdateDownloadCanceledException();
+    }
+
+    final local =
+        await GitHubUpdateLocalPackage.locate(infoFilePath: infoFilePath);
+    final outputDir =
+        await Directory.systemTemp.createTemp('github-update-download-');
+    _outputDir = outputDir;
+    final outputLines = <String>[];
+
+    void rememberOutput(String line) {
+      final text = line.trim();
+      if (text.isEmpty) {
+        return;
+      }
+      outputLines.add(text);
+      if (outputLines.length > 30) {
+        outputLines.removeAt(0);
+      }
+      onOutput?.call(text);
+    }
+
+    try {
+      if (_canceled) {
+        throw const GitHubUpdateDownloadCanceledException();
+      }
+      final command = Platform.isWindows ? 'powershell.exe' : '/usr/bin/env';
+      final args = Platform.isWindows
+          ? _windowsDownloadArgs(local, outputDir)
+          : _posixDownloadArgs(local, outputDir);
+      final process = await Process.start(command, args);
+      _process = process;
+      if (_canceled) {
+        process.kill();
+      }
+
+      final stdoutDone = process.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(rememberOutput)
+          .asFuture<void>();
+      final stderrDone = process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(rememberOutput)
+          .asFuture<void>();
+      final exitCode = await process.exitCode;
+      await Future.wait(<Future<void>>[
+        stdoutDone.catchError((Object _) {}),
+        stderrDone.catchError((Object _) {}),
+      ]);
+
+      if (_canceled) {
+        throw const GitHubUpdateDownloadCanceledException();
+      }
+      if (exitCode != 0) {
+        final detail = outputLines.isEmpty ? '无输出' : outputLines.join('\n');
+        throw GitHubUpdateInstallException(
+          'github-update 下载失败，退出码 $exitCode：\n$detail',
+        );
+      }
+      return await _locateDownloadedPackage(outputDir, outputLines);
+    } catch (error) {
+      await _deleteOutputDir();
+      rethrow;
+    } finally {
+      _process = null;
+    }
+  }
+
+  List<String> _windowsDownloadArgs(
+    GitHubUpdateLocalPackage local,
+    Directory outputDir,
+  ) {
+    final args = <String>[
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      local.updaterScript.path,
+      '-Repo',
+      repo,
+      '-Channel',
+      channel.apiName,
+      '-Mode',
+      'download',
+      '-Version',
+      version,
+      '-NamePattern',
+      asset.name,
+      '-OutputDir',
+      outputDir.path,
+    ];
+    if (token.trim().isNotEmpty) {
+      args.addAll(<String>['-Token', token.trim()]);
+    }
+    if (workflow.trim().isNotEmpty) {
+      args.addAll(<String>['-Workflow', workflow.trim()]);
+    }
+    if (branch.trim().isNotEmpty) {
+      args.addAll(<String>['-Branch', branch.trim()]);
+    }
+    return args;
+  }
+
+  List<String> _posixDownloadArgs(
+    GitHubUpdateLocalPackage local,
+    Directory outputDir,
+  ) {
+    final args = <String>[
+      'bash',
+      local.updaterScript.path,
+      '--repo',
+      repo,
+      '--channel',
+      channel.apiName,
+      '--mode',
+      'download',
+      '--version',
+      version,
+      '--name-pattern',
+      asset.name,
+      '--output-dir',
+      outputDir.path,
+    ];
+    if (token.trim().isNotEmpty) {
+      args.addAll(<String>['--token', token.trim()]);
+    }
+    if (workflow.trim().isNotEmpty) {
+      args.addAll(<String>['--workflow', workflow.trim()]);
+    }
+    if (branch.trim().isNotEmpty) {
+      args.addAll(<String>['--branch', branch.trim()]);
+    }
+    return args;
+  }
+
+  Future<File> _locateDownloadedPackage(
+    Directory outputDir,
+    List<String> outputLines,
+  ) async {
+    final expected = File(
+      '${outputDir.path}${Platform.pathSeparator}${asset.downloadFileName}',
+    );
+    if (await expected.exists()) {
+      return expected;
+    }
+
+    for (final line in outputLines.reversed) {
+      final match = RegExp(r'^Saved:\s*(.+)$').firstMatch(line);
+      if (match == null) {
+        continue;
+      }
+      final file = File(match.group(1)!.trim());
+      if (await file.exists()) {
+        return file;
+      }
+    }
+
+    final files = await outputDir
+        .list(followLinks: false)
+        .where((entity) => entity is File)
+        .cast<File>()
+        .toList();
+    if (files.length == 1) {
+      return files.single;
+    }
+
+    throw GitHubUpdateInstallException(
+      'github-update 下载完成，但没有找到安装包：${asset.downloadFileName}',
+    );
+  }
+
+  Future<void> _deleteOutputDir() async {
+    final dir = _outputDir;
+    if (dir != null && await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+}
+
 class GitHubUpdateDesktopInstaller {
   const GitHubUpdateDesktopInstaller();
 

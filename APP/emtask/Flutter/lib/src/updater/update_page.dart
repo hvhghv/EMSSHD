@@ -268,7 +268,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     await _saveLastInput();
     setState(() => _installingAssetName = asset.name);
     try {
-      final packageFile = await _downloadAssetWithDialog(asset);
+      final packageFile = await _downloadAssetWithDialog(version, asset);
       await const GitHubUpdateDesktopInstaller().startInstall(
         repo: _repoController.text,
         channel: _channel,
@@ -286,6 +286,11 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       _showSnackBar('已启动更新：${asset.name}');
       await Future<void>.delayed(const Duration(milliseconds: 300));
       exit(0);
+    } on GitHubUpdateDownloadCanceledException {
+      if (mounted) {
+        _showSnackBar('已取消下载。');
+        setState(() => _installingAssetName = null);
+      }
     } catch (error) {
       if (mounted) {
         _showSnackBar('启动更新失败：${_formatError(error)}');
@@ -294,11 +299,30 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     }
   }
 
-  Future<File> _downloadAssetWithDialog(GitHubUpdateAsset asset) async {
-    var receivedBytes = 0;
-    int? totalBytes = asset.sizeBytes > 0 ? asset.sizeBytes : null;
+  Future<File> _downloadAssetWithDialog(
+    GitHubUpdateVersion version,
+    GitHubUpdateAsset asset,
+  ) async {
+    var status = '准备下载...';
+    var canceling = false;
     StateSetter? updateDialog;
     var dialogClosed = false;
+    final task = GitHubUpdateDesktopDownloadTask(
+      repo: _repoController.text,
+      channel: _channel,
+      version: version.id,
+      asset: asset,
+      token: _tokenController.text,
+      workflow: _workflowController.text,
+      branch: _branchController.text,
+      infoFilePath: widget.config.infoFilePath,
+      onOutput: (line) {
+        status = line;
+        if (!dialogClosed && mounted) {
+          updateDialog?.call(() {});
+        }
+      },
+    );
 
     void closeDialog() {
       if (!dialogClosed && mounted) {
@@ -313,10 +337,6 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
           updateDialog = setDialogState;
-          final total = totalBytes;
-          final value = total != null && total > 0
-              ? (receivedBytes / total).clamp(0.0, 1.0)
-              : null;
           return AlertDialog(
             title: const Text('下载更新包'),
             content: Column(
@@ -325,11 +345,28 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
               children: <Widget>[
                 Text(asset.name),
                 const SizedBox(height: 16),
-                LinearProgressIndicator(value: value),
+                const LinearProgressIndicator(),
                 const SizedBox(height: 12),
-                Text(_downloadProgressText(receivedBytes, total)),
+                Text(
+                  status,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ],
             ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: canceling
+                    ? null
+                    : () {
+                        canceling = true;
+                        status = '正在取消下载...';
+                        setDialogState(() {});
+                        task.cancel();
+                      },
+                child: const Text('取消下载'),
+              ),
+            ],
           );
         },
       ),
@@ -337,15 +374,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
 
     await Future<void>.delayed(Duration.zero);
     try {
-      return await _client.downloadAsset(
-        asset: asset,
-        token: _tokenController.text,
-        onProgress: (received, total) {
-          receivedBytes = received;
-          totalBytes = total;
-          updateDialog?.call(() {});
-        },
-      );
+      return await task.start();
     } finally {
       closeDialog();
       await dialogFuture.catchError((Object _) {});
@@ -842,13 +871,6 @@ String formatGitHubUpdateBytes(int bytes) {
     unit++;
   }
   return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[unit]}';
-}
-
-String _downloadProgressText(int receivedBytes, int? totalBytes) {
-  if (totalBytes == null || totalBytes <= 0) {
-    return '已下载 ${formatGitHubUpdateBytes(receivedBytes)}';
-  }
-  return '${formatGitHubUpdateBytes(receivedBytes)} / ${formatGitHubUpdateBytes(totalBytes)}';
 }
 
 @visibleForTesting
