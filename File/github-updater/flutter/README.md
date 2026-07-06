@@ -53,7 +53,22 @@ Navigator.of(context).push(
 - `Action` 渠道：列出成功的 GitHub Actions runs，读取匹配 artifacts。
 - `NamePattern` 支持 `*` / `?` 通配符。
 - 可输入 GitHub Token，用于私有仓库或 Actions artifacts 下载链接。
+- Windows/Linux/macOS 桌面包支持点击“下载并更新”。模块会启动安装根目录中的 `github-update.ps1` 或 `github-update.sh`，当前 App 退出后由外部 helper 下载、安装并重新启动。
 - Android APK 资源支持点击“后台下载并安装 APK”。Release 渠道直接下载 `xxx.apk`；Action 渠道会把 artifact `xxx.zip` 交给宿主安装通道处理，宿主应在后台下载、解出唯一 APK 并触发系统安装器。
+
+## 桌面内置更新
+
+桌面内置更新依赖完整安装包结构：
+
+```text
+install-root/
+├── github-update.ps1 / github-update.sh
+└── package-name/
+    ├── info.Dat
+    └── app files
+```
+
+`info.Dat` 用于定位当前包目录和默认更新源；`github-update.ps1/.sh` 必须位于包目录同级或当前运行目录附近。点击“下载并更新”后，Flutter 只负责启动外部 helper 并退出，真正替换目录由脚本完成，避免覆盖正在运行的 exe/dll。
 
 ## Android APK 安装通道
 

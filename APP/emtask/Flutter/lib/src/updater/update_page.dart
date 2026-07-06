@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,7 @@ class GitHubUpdatePageConfig {
     this.persistToken = true,
     this.title = '检查更新',
     this.description = '以项目 GitHub 地址作为参数，支持 Release 与 Actions 构建产物两个渠道。',
+    this.apkInstallerChannel = 'github_updater/apk_installer',
   });
 
   final String initialRepository;
@@ -33,6 +35,7 @@ class GitHubUpdatePageConfig {
   final bool persistToken;
   final String title;
   final String description;
+  final String apkInstallerChannel;
 }
 
 class GitHubUpdatePage extends StatefulWidget {
@@ -63,6 +66,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   bool _loadingVersions = false;
   bool _loadingAssets = false;
   bool _loadingDefaults = true;
+  String? _installingAssetName;
 
   @override
   void initState() {
@@ -163,6 +167,108 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     await Clipboard.setData(ClipboardData(text: asset.downloadUrl.toString()));
     if (mounted) {
       _showSnackBar('已复制下载链接：${asset.name}');
+    }
+  }
+
+  Future<void> _installAsset(GitHubUpdateAsset asset) async {
+    if (asset.isApkPackage) {
+      await _installApkAsset(asset);
+      return;
+    }
+    await _installDesktopAsset(asset);
+  }
+
+  Future<void> _installApkAsset(GitHubUpdateAsset asset) async {
+    await _saveLastInput();
+    setState(() => _installingAssetName = asset.name);
+    final channel = MethodChannel(widget.config.apkInstallerChannel);
+    try {
+      await channel.invokeMethod<void>(
+        'downloadAndInstallApk',
+        GitHubApkInstallRequest(
+          asset: asset,
+          token: _tokenController.text.trim().isEmpty
+              ? null
+              : _tokenController.text.trim(),
+        ).toJson(),
+      );
+      if (mounted) {
+        _showSnackBar('已开始后台下载并安装：${asset.name}');
+      }
+    } on MissingPluginException {
+      if (mounted) {
+        _showSnackBar(
+            '宿主 App 尚未实现 APK 安装通道：${widget.config.apkInstallerChannel}');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showSnackBar('启动 APK 安装失败：${_formatError(error)}');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _installingAssetName = null);
+      }
+    }
+  }
+
+  Future<void> _installDesktopAsset(GitHubUpdateAsset asset) async {
+    final version = _selectedVersion;
+    if (version == null) {
+      _showSnackBar('请先选择一个版本。');
+      return;
+    }
+    if (!GitHubUpdateLocalPackage.isDesktopSupported) {
+      _showSnackBar('当前平台不支持脚本式内置更新。');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('下载并更新'),
+            content: Text(
+              '将下载并安装 ${asset.name}。应用会关闭，更新完成后会自动重新启动。',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('更新'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    await _saveLastInput();
+    setState(() => _installingAssetName = asset.name);
+    try {
+      await const GitHubUpdateDesktopInstaller().startInstall(
+        repo: _repoController.text,
+        channel: _channel,
+        version: version.id,
+        asset: asset,
+        token: _tokenController.text,
+        workflow: _workflowController.text,
+        branch: _branchController.text,
+        infoFilePath: widget.config.infoFilePath,
+      );
+      if (!mounted) {
+        return;
+      }
+      _showSnackBar('已启动更新：${asset.name}');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      exit(0);
+    } catch (error) {
+      if (mounted) {
+        _showSnackBar('启动更新失败：${_formatError(error)}');
+        setState(() => _installingAssetName = null);
+      }
     }
   }
 
@@ -347,7 +453,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
                 icon: Icons.inventory_2_outlined,
                 title: '匹配资源',
                 subtitle:
-                    '当前版本匹配 “${_namePatternController.text}” 的资源。可先复制链接，由外部浏览器或下载器处理更新。',
+                    '当前版本匹配 “${_namePatternController.text}” 的资源。桌面端可直接下载并更新，Android APK 会调用系统安装器。',
                 child: _buildAssetsList(),
               ),
             ],
@@ -413,14 +519,46 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
               subtitle: Text(
                 '${formatGitHubUpdateBytes(asset.sizeBytes)}${asset.requiresToken ? ' · 需要 Token 下载' : ''}',
               ),
-              trailing: IconButton(
-                tooltip: '复制下载链接',
-                onPressed: () => _copyAssetUrl(asset),
-                icon: const Icon(Icons.copy_outlined),
-              ),
+              trailing: _buildAssetActions(asset),
             ),
           )
           .toList(growable: false),
+    );
+  }
+
+  Widget _buildAssetActions(GitHubUpdateAsset asset) {
+    final installing = _installingAssetName == asset.name;
+    final canInstall = asset.isApkPackage ||
+        (GitHubUpdateLocalPackage.isDesktopSupported &&
+            asset.canDesktopInstall);
+    return Wrap(
+      spacing: 4,
+      children: <Widget>[
+        if (canInstall)
+          IconButton(
+            tooltip: asset.isApkPackage ? '下载并安装 APK' : '下载并更新',
+            onPressed: installing || _installingAssetName != null
+                ? null
+                : () => _installAsset(asset),
+            icon: installing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(
+                    asset.isApkPackage
+                        ? Icons.install_mobile_outlined
+                        : Icons.system_update_alt_outlined,
+                  ),
+          ),
+        IconButton(
+          tooltip: '复制下载链接',
+          onPressed:
+              _installingAssetName == null ? () => _copyAssetUrl(asset) : null,
+          icon: const Icon(Icons.copy_outlined),
+        ),
+      ],
     );
   }
 

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -345,6 +346,38 @@ void main() {
     expect(restored.channel, GitHubUpdateChannel.action);
     expect(restoredWithoutToken.token, isEmpty);
   });
+
+  test('github updater locates local package from info.dat', () async {
+    final root = await Directory.systemTemp.createTemp('github-updater-test-');
+    addTearDown(() async {
+      if (await root.exists()) {
+        await root.delete(recursive: true);
+      }
+    });
+    final packageDir =
+        Directory('${root.path}${Platform.pathSeparator}emtask-client-test');
+    await packageDir.create();
+    await File('${packageDir.path}${Platform.pathSeparator}info.Dat')
+        .writeAsString(jsonEncode(<String, Object?>{
+      'repo': 'owner/repo',
+      'channel': 'action',
+      'artifact': 'emtask-client-test',
+    }));
+    final updaterScriptName =
+        Platform.isWindows ? 'github-update.ps1' : 'github-update.sh';
+    final updaterScript =
+        File('${root.path}${Platform.pathSeparator}$updaterScriptName');
+    await updaterScript.writeAsString('');
+
+    final local = await GitHubUpdateLocalPackage.locate(
+      infoFilePath: packageDir.path,
+    );
+
+    expect(local.packageName, 'emtask-client-test');
+    expect(local.packageDir.path, packageDir.path);
+    expect(local.installRoot.path, root.path);
+    expect(local.updaterScript.path, updaterScript.path);
+  }, skip: !GitHubUpdateLocalPackage.isDesktopSupported);
 
   test('terminal modifiers convert soft keyboard input', () {
     expect(

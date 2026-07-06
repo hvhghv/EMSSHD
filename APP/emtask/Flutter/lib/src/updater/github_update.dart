@@ -139,7 +139,7 @@ class GitHubUpdateInfoDefaults {
   }
 
   static Future<GitHubUpdateInfoDefaults> load({String? infoFilePath}) async {
-    final file = await _findInfoFile(infoFilePath: infoFilePath);
+    final file = await findInfoFile(infoFilePath: infoFilePath);
     if (file == null) {
       return const GitHubUpdateInfoDefaults();
     }
@@ -156,7 +156,7 @@ class GitHubUpdateInfoDefaults {
     return const GitHubUpdateInfoDefaults();
   }
 
-  static Future<File?> _findInfoFile({String? infoFilePath}) async {
+  static Future<File?> findInfoFile({String? infoFilePath}) async {
     final candidates = <String>{};
     void addFile(String path) {
       if (path.trim().isNotEmpty) {
@@ -238,6 +238,294 @@ class GitHubUpdateInfoDefaults {
   }
 }
 
+class GitHubUpdateLocalPackage {
+  const GitHubUpdateLocalPackage({
+    required this.packageDir,
+    required this.installRoot,
+    required this.updaterScript,
+    required this.packageName,
+  });
+
+  final Directory packageDir;
+  final Directory installRoot;
+  final File updaterScript;
+  final String packageName;
+
+  static bool get isDesktopSupported =>
+      Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+
+  static String get updaterScriptName =>
+      Platform.isWindows ? 'github-update.ps1' : 'github-update.sh';
+
+  static Future<GitHubUpdateLocalPackage> locate({
+    String? infoFilePath,
+  }) async {
+    if (!isDesktopSupported) {
+      throw const GitHubUpdateInstallException('当前平台不支持脚本式内置更新。');
+    }
+
+    final infoFile =
+        await GitHubUpdateInfoDefaults.findInfoFile(infoFilePath: infoFilePath);
+    final packageDir = infoFile != null
+        ? infoFile.parent
+        : File(Platform.resolvedExecutable).parent;
+    final packageName = _basename(packageDir.path);
+    final installRoot = packageDir.parent;
+    final updaterScript = await _findUpdaterScript(packageDir, installRoot);
+    if (updaterScript == null) {
+      throw GitHubUpdateInstallException(
+        '未找到 $updaterScriptName。请确认当前客户端从完整安装包目录启动，且更新脚本位于安装根目录。',
+      );
+    }
+
+    return GitHubUpdateLocalPackage(
+      packageDir: packageDir,
+      installRoot: installRoot,
+      updaterScript: updaterScript,
+      packageName: packageName,
+    );
+  }
+
+  static Future<File?> _findUpdaterScript(
+    Directory packageDir,
+    Directory installRoot,
+  ) async {
+    final dirs = <String>{
+      installRoot.path,
+      packageDir.path,
+      Directory.current.path,
+    };
+    final executable = Platform.resolvedExecutable;
+    if (executable.isNotEmpty) {
+      var dir = File(executable).parent;
+      for (var i = 0; i < 4; i++) {
+        dirs.add(dir.path);
+        final parent = dir.parent;
+        if (parent.path == dir.path) {
+          break;
+        }
+        dir = parent;
+      }
+    }
+
+    for (final dir in dirs) {
+      final file = File(
+        '${dir.replaceAll(RegExp(r'[\\/]+$'), '')}${Platform.pathSeparator}$updaterScriptName',
+      );
+      if (await file.exists()) {
+        return file;
+      }
+    }
+    return null;
+  }
+}
+
+class GitHubUpdateInstallException implements Exception {
+  const GitHubUpdateInstallException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class GitHubUpdateDesktopInstaller {
+  const GitHubUpdateDesktopInstaller();
+
+  Future<void> startInstall({
+    required String repo,
+    required GitHubUpdateChannel channel,
+    required String version,
+    required GitHubUpdateAsset asset,
+    String token = '',
+    String workflow = '',
+    String branch = '',
+    String? infoFilePath,
+  }) async {
+    if (!GitHubUpdateLocalPackage.isDesktopSupported) {
+      throw const GitHubUpdateInstallException('当前平台不支持脚本式内置更新。');
+    }
+    if (repo.trim().isEmpty) {
+      throw const GitHubUpdateInstallException('GitHub 仓库地址不能为空。');
+    }
+    if (version.trim().isEmpty) {
+      throw const GitHubUpdateInstallException('更新版本不能为空。');
+    }
+
+    final local =
+        await GitHubUpdateLocalPackage.locate(infoFilePath: infoFilePath);
+    final helperDir = await Directory.systemTemp.createTemp('github-update-');
+    final currentPid = pid;
+    if (Platform.isWindows) {
+      final helper = File('${helperDir.path}${Platform.pathSeparator}run.ps1');
+      await helper.writeAsString(_windowsHelperScript(
+        local: local,
+        currentPid: currentPid,
+        repo: repo,
+        channel: channel,
+        version: version,
+        namePattern: asset.name,
+        token: token,
+        workflow: workflow,
+        branch: branch,
+      ));
+      await Process.start(
+        'powershell.exe',
+        <String>[
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          helper.path,
+        ],
+        mode: ProcessStartMode.detached,
+      );
+      return;
+    }
+
+    final helper = File('${helperDir.path}${Platform.pathSeparator}run.sh');
+    await helper.writeAsString(_posixHelperScript(
+      local: local,
+      currentPid: currentPid,
+      repo: repo,
+      channel: channel,
+      version: version,
+      namePattern: asset.name,
+      token: token,
+      workflow: workflow,
+      branch: branch,
+    ));
+    if (!Platform.isWindows) {
+      await Process.run('chmod', <String>['+x', helper.path]);
+    }
+    await Process.start(
+      '/usr/bin/env',
+      <String>['bash', helper.path],
+      mode: ProcessStartMode.detached,
+    );
+  }
+
+  static String _windowsHelperScript({
+    required GitHubUpdateLocalPackage local,
+    required int currentPid,
+    required String repo,
+    required GitHubUpdateChannel channel,
+    required String version,
+    required String namePattern,
+    required String token,
+    required String workflow,
+    required String branch,
+  }) {
+    final args = <String>[
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      _psQuote(local.updaterScript.path),
+      '-Repo',
+      _psQuote(repo),
+      '-Channel',
+      _psQuote(channel.apiName),
+      '-Mode',
+      "'install'",
+      '-Version',
+      _psQuote(version),
+      '-NamePattern',
+      _psQuote(namePattern),
+      '-InstallDir',
+      _psQuote(local.installRoot.path),
+      '-PackageName',
+      _psQuote(local.packageName),
+    ];
+    if (token.trim().isNotEmpty) {
+      args.addAll(<String>['-Token', _psQuote(token.trim())]);
+    }
+    if (workflow.trim().isNotEmpty) {
+      args.addAll(<String>['-Workflow', _psQuote(workflow.trim())]);
+    }
+    if (branch.trim().isNotEmpty) {
+      args.addAll(<String>['-Branch', _psQuote(branch.trim())]);
+    }
+
+    final executable = Platform.resolvedExecutable;
+    final logPath =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}github-update-flutter.log';
+    return '''
+\$ErrorActionPreference = 'Stop'
+\$log = ${_psQuote(logPath)}
+Start-Sleep -Milliseconds 500
+try { Wait-Process -Id $currentPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+try {
+  & powershell.exe ${args.join(' ')} *> \$log
+  \$code = \$LASTEXITCODE
+  if (\$null -eq \$code) { \$code = 0 }
+} catch {
+  (\$_ | Out-String) | Add-Content -LiteralPath \$log
+}
+try { Start-Process -FilePath ${_psQuote(executable)} -WorkingDirectory ${_psQuote(local.packageDir.path)} } catch {}
+try { Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
+''';
+  }
+
+  static String _posixHelperScript({
+    required GitHubUpdateLocalPackage local,
+    required int currentPid,
+    required String repo,
+    required GitHubUpdateChannel channel,
+    required String version,
+    required String namePattern,
+    required String token,
+    required String workflow,
+    required String branch,
+  }) {
+    final args = <String>[
+      'bash',
+      _shQuote(local.updaterScript.path),
+      '--repo',
+      _shQuote(repo),
+      '--channel',
+      _shQuote(channel.apiName),
+      '--mode',
+      'install',
+      '--version',
+      _shQuote(version),
+      '--name-pattern',
+      _shQuote(namePattern),
+      '--install-dir',
+      _shQuote(local.installRoot.path),
+      '--package-name',
+      _shQuote(local.packageName),
+    ];
+    if (token.trim().isNotEmpty) {
+      args.addAll(<String>['--token', _shQuote(token.trim())]);
+    }
+    if (workflow.trim().isNotEmpty) {
+      args.addAll(<String>['--workflow', _shQuote(workflow.trim())]);
+    }
+    if (branch.trim().isNotEmpty) {
+      args.addAll(<String>['--branch', _shQuote(branch.trim())]);
+    }
+
+    final executable = Platform.resolvedExecutable;
+    final logPath =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}github-update-flutter.log';
+    return '''
+#!/usr/bin/env bash
+set -euo pipefail
+log=${_shQuote(logPath)}
+while kill -0 $currentPid >/dev/null 2>&1; do sleep 0.2; done
+if ${args.join(' ')} >"\$log" 2>&1; then :; else :; fi
+(cd ${_shQuote(local.packageDir.path)} && ${_shQuote(executable)} >/dev/null 2>&1 &)
+rm -f -- "\$0"
+''';
+  }
+
+  static String _psQuote(String value) => "'${value.replaceAll("'", "''")}'";
+
+  static String _shQuote(String value) =>
+      "'${value.replaceAll("'", "'\"'\"'")}'";
+}
+
 class GitHubUpdateVersion {
   const GitHubUpdateVersion({
     required this.id,
@@ -310,6 +598,20 @@ class GitHubUpdateAsset {
   final Uri downloadUrl;
   final bool requiresToken;
 
+  bool get isApkPackage {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.apk') ||
+        lower.contains('apk') ||
+        lower.contains('android');
+  }
+
+  bool get isActionArtifactZip => requiresToken;
+
+  bool get canDesktopInstall {
+    final lower = name.toLowerCase();
+    return !isApkPackage && !lower.endsWith('.sha256');
+  }
+
   static GitHubUpdateAsset fromReleaseAssetJson(Map<String, Object?> json) {
     return GitHubUpdateAsset(
       name: _jsonString(json['name']),
@@ -327,6 +629,23 @@ class GitHubUpdateAsset {
       requiresToken: true,
     );
   }
+}
+
+class GitHubApkInstallRequest {
+  const GitHubApkInstallRequest({
+    required this.asset,
+    this.token,
+  });
+
+  final GitHubUpdateAsset asset;
+  final String? token;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'url': asset.downloadUrl.toString(),
+        'name': asset.name,
+        'token': token,
+        'isActionArtifactZip': asset.isActionArtifactZip,
+      };
 }
 
 class GitHubUpdateClient {
@@ -457,6 +776,15 @@ List<Map<String, Object?>> _jsonList(Object? value) {
 }
 
 String _jsonString(Object? value) => value == null ? '' : '$value';
+
+String _basename(String path) {
+  final trimmed = path.replaceAll(RegExp(r'[\\/]+$'), '');
+  final parts = trimmed
+      .split(RegExp(r'[\\/]'))
+      .where((part) => part.isNotEmpty)
+      .toList(growable: false);
+  return parts.isEmpty ? trimmed : parts.last;
+}
 
 int _jsonInt(Object? value) {
   if (value is int) {
