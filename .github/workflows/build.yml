@@ -775,6 +775,12 @@ jobs:
           yes | sdkmanager --licenses >/dev/null
           sdkmanager 'platforms;android-34' 'build-tools;34.0.0' platform-tools
 
+      - name: Restore Android debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: emtask-client-android-debug-keystore-v1
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:

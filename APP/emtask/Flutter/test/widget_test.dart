@@ -151,6 +151,7 @@ void main() {
     await _pumpSessionPage(tester, connection, const Size(390, 844));
 
     expect(find.text('测试会话'), findsOneWidget);
+    expect(find.byTooltip('整页文本输入'), findsOneWidget);
     expect(find.byTooltip('重启应用'), findsOneWidget);
     expect(find.byTooltip('清空终端输出'), findsOneWidget);
   });
@@ -530,6 +531,11 @@ void main() {
       )],
       CopySelectionTextIntent.copy,
     );
+  });
+
+  test('terminal text composer converts line feeds to carriage returns', () {
+    expect(terminalComposerPayloadForTest('echo 1\necho 2'), 'echo 1\recho 2');
+    expect(terminalComposerPayloadForTest('a\r\nb\rc'), 'a\rb\rc');
   });
 
   test('sftp virtual path is limited to working directory tree', () {

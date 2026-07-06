@@ -56,6 +56,24 @@ Map<ShortcutActivator, Intent> terminalShortcutsForPlatformForTest(
 ) =>
     _terminalShortcutsForPlatform(platform);
 
+const _windowControlChannel = MethodChannel('emtask_client/window');
+
+Future<void> _setAndroidSoftInputMode(String mode) async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
+  try {
+    await _windowControlChannel.invokeMethod<void>(
+      'setSoftInputMode',
+      <String, Object?>{'mode': mode},
+    );
+  } on MissingPluginException {
+    // Desktop and widget tests do not provide the Android window channel.
+  } on PlatformException catch (error) {
+    debugPrint('设置 Android 软键盘模式失败：${error.message ?? error.code}');
+  }
+}
+
 void main() {
   runZonedGuarded(
     () {
@@ -1635,6 +1653,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     widget.connection.addListener(_handleConnectionChanged);
     _sftpEditorController.addListener(_handleSftpEditorChanged);
     _terminalKeyboardUnlocked = !widget.terminalKeyboardButtonOnly;
+    unawaited(_setAndroidSoftInputMode('adjustNothing'));
   }
 
   @override
@@ -1704,6 +1723,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
 
   @override
   void dispose() {
+    unawaited(_setAndroidSoftInputMode('adjustResize'));
     widget.connection.removeListener(_handleConnectionChanged);
     widget.connection.setActive(false);
     _sftpEditorController.removeListener(_handleSftpEditorChanged);
@@ -1722,7 +1742,11 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
       _showSnackBar('此会话配置未开启 SFTP。请先在会话配置里勾选“支持 SFTP”。');
       return;
     }
-    setState(() => _showSftp = !_showSftp);
+    final nextShowSftp = !_showSftp;
+    setState(() => _showSftp = nextShowSftp);
+    unawaited(
+      _setAndroidSoftInputMode(nextShowSftp ? 'adjustResize' : 'adjustNothing'),
+    );
     if (_showSftp && widget.connection.isConnected) {
       final path = _sftpPathController.text.trim().isEmpty
           ? '.'
@@ -2718,6 +2742,38 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
     }
   }
 
+  Future<void> _openTerminalTextComposer() async {
+    if (!widget.connection.isConnected) {
+      _showSnackBar('请先连接会话，再输入文本。');
+      return;
+    }
+    _terminalFocusNode.unfocus();
+    await _setAndroidSoftInputMode('adjustResize');
+    if (!mounted) {
+      return;
+    }
+    final text = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (context) => const _TerminalTextComposerPage(),
+      ),
+    );
+    if (mounted && !_showSftp) {
+      unawaited(_setAndroidSoftInputMode('adjustNothing'));
+    }
+    if (text == null || text.isEmpty) {
+      _requestTerminalInputFocus();
+      return;
+    }
+    try {
+      widget.connection.writeText(_terminalComposerPayload(text));
+      _showSnackBar('已输入 ${text.length} 个字符。');
+    } catch (error) {
+      _showSnackBar(_formatError(error));
+    } finally {
+      _requestTerminalInputFocus();
+    }
+  }
+
   void _requestTerminalInputFocus() {
     if (!widget.connection.isConnected) {
       return;
@@ -2848,6 +2904,13 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
             actions: <Widget>[
               if (!_showSftp)
                 IconButton(
+                  tooltip: '整页文本输入',
+                  onPressed:
+                      connection.isConnected ? _openTerminalTextComposer : null,
+                  icon: const Icon(Icons.edit_note_outlined),
+                ),
+              if (!_showSftp)
+                IconButton(
                   tooltip: widget.terminalKeyboardButtonOnly
                       ? (_terminalKeyboardUnlocked ? '锁定键盘输入' : '打开键盘输入')
                       : '打开键盘输入',
@@ -2904,21 +2967,18 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   }
 
   Widget _buildTerminalView(EmTaskConnection connection) {
-    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
-    final keyboardVisible = keyboardInset > 0;
     final manualKeyboardLocked = widget.terminalKeyboardButtonOnly &&
         !_terminalKeyboardUnlocked &&
         connection.isConnected;
     const shortcutBarHeight = 48.0;
-    final shortcutBottom = keyboardVisible ? keyboardInset + 8 : 8.0;
+    const shortcutBottom = 8.0;
     final shortcutReserve =
         widget.shortcutKeysEnabled ? shortcutBarHeight + 18 : 0.0;
-    final terminalBottomPadding =
-        10.0 + shortcutReserve + (keyboardVisible ? keyboardInset : 0.0);
+    final terminalBottomPadding = 10.0 + shortcutReserve;
 
     return SafeArea(
       top: false,
-      bottom: !keyboardVisible,
+      bottom: true,
       child: Container(
         width: double.infinity,
         color: Colors.black,
@@ -3542,6 +3602,78 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
         ? ''
         : ' · ${_formatDateTime(entry.modifiedAt!)}';
     return '$type$size$modified';
+  }
+}
+
+class _TerminalTextComposerPage extends StatefulWidget {
+  const _TerminalTextComposerPage();
+
+  @override
+  State<_TerminalTextComposerPage> createState() =>
+      _TerminalTextComposerPageState();
+}
+
+class _TerminalTextComposerPageState extends State<_TerminalTextComposerPage> {
+  final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusNode.requestFocus();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _send() {
+    Navigator.of(context).pop(_controller.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      resizeToAvoidBottomInset: true,
+      appBar: AppBar(
+        title: const Text('文本输入'),
+        actions: <Widget>[
+          IconButton(
+            tooltip: '发送到终端',
+            onPressed: _send,
+            icon: const Icon(Icons.check),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: TextField(
+          key: const Key('terminal_text_composer'),
+          controller: _controller,
+          focusNode: _focusNode,
+          autofocus: true,
+          expands: true,
+          maxLines: null,
+          minLines: null,
+          keyboardType: TextInputType.multiline,
+          textInputAction: TextInputAction.newline,
+          decoration: const InputDecoration(
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.all(16),
+          ),
+          style: const TextStyle(
+            fontSize: 16,
+            height: 1.4,
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -6192,6 +6324,13 @@ String terminalInputWithModifiersForTest(
     alt: alt,
   );
 }
+
+@visibleForTesting
+String terminalComposerPayloadForTest(String text) =>
+    _terminalComposerPayload(text);
+
+String _terminalComposerPayload(String text) =>
+    text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').replaceAll('\n', '\r');
 
 String _terminalInputWithModifiers(
   String data, {

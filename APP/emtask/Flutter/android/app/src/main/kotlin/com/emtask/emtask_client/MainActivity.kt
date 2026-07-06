@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.view.WindowManager
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -19,6 +20,7 @@ import java.util.zip.ZipInputStream
 
 class MainActivity: FlutterActivity() {
     private val apkInstallerChannel = "github_updater/apk_installer"
+    private val windowChannel = "emtask_client/window"
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -71,6 +73,20 @@ class MainActivity: FlutterActivity() {
                             }
                         }
                     }.start()
+                }
+                else -> result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            windowChannel
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setSoftInputMode" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val mode = (args?.get("mode") as? String) ?: (call.arguments as? String)
+                    setSoftInputMode(mode)
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
@@ -146,6 +162,17 @@ class MainActivity: FlutterActivity() {
             throw IllegalStateException("Multiple APK files found in action artifact")
         }
         return apks.single()
+    }
+
+    private fun setSoftInputMode(mode: String?) {
+        val softInputMode = when (mode) {
+            "adjustNothing" -> WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+            "adjustResize" -> WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            else -> WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        }
+        mainHandler.post {
+            window.setSoftInputMode(softInputMode)
+        }
     }
 
     private fun launchApkInstaller(apk: File) {
