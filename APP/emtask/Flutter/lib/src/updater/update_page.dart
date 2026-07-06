@@ -59,6 +59,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   late final TextEditingController _workflowController;
   late final TextEditingController _branchController;
   late final TextEditingController _namePatternController;
+  late final TextEditingController _versionSearchController;
   late GitHubUpdateChannel _channel;
   List<GitHubUpdateVersion> _versions = const <GitHubUpdateVersion>[];
   List<GitHubUpdateAsset> _assets = const <GitHubUpdateAsset>[];
@@ -67,6 +68,9 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   bool _loadingAssets = false;
   bool _loadingDefaults = true;
   String? _installingAssetName;
+  int _versionsPage = 0;
+
+  static const int _versionsPageSize = 10;
 
   @override
   void initState() {
@@ -80,6 +84,8 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     _branchController = TextEditingController();
     _namePatternController =
         TextEditingController(text: widget.config.defaultNamePattern);
+    _versionSearchController = TextEditingController();
+    _versionSearchController.addListener(_handleVersionSearchChanged);
     _channel = widget.config.initialChannel;
     _branchController.text = widget.config.initialBranch;
     unawaited(_loadInitialDefaults());
@@ -92,7 +98,17 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     _workflowController.dispose();
     _branchController.dispose();
     _namePatternController.dispose();
+    _versionSearchController.dispose();
     super.dispose();
+  }
+
+  void _handleVersionSearchChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _versionsPage = 0;
+    });
   }
 
   Future<void> _loadVersions() async {
@@ -102,6 +118,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       _versions = const <GitHubUpdateVersion>[];
       _assets = const <GitHubUpdateAsset>[];
       _selectedVersion = null;
+      _versionsPage = 0;
     });
     try {
       final versions = await _client.listVersions(
@@ -248,11 +265,13 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     await _saveLastInput();
     setState(() => _installingAssetName = asset.name);
     try {
+      final packageFile = await _downloadAssetWithDialog(asset);
       await const GitHubUpdateDesktopInstaller().startInstall(
         repo: _repoController.text,
         channel: _channel,
         version: version.id,
         asset: asset,
+        packageFile: packageFile,
         token: _tokenController.text,
         workflow: _workflowController.text,
         branch: _branchController.text,
@@ -269,6 +288,64 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
         _showSnackBar('启动更新失败：${_formatError(error)}');
         setState(() => _installingAssetName = null);
       }
+    }
+  }
+
+  Future<File> _downloadAssetWithDialog(GitHubUpdateAsset asset) async {
+    var receivedBytes = 0;
+    int? totalBytes = asset.sizeBytes > 0 ? asset.sizeBytes : null;
+    StateSetter? updateDialog;
+    var dialogClosed = false;
+
+    void closeDialog() {
+      if (!dialogClosed && mounted) {
+        dialogClosed = true;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          updateDialog = setDialogState;
+          final total = totalBytes;
+          final value = total != null && total > 0
+              ? (receivedBytes / total).clamp(0.0, 1.0)
+              : null;
+          return AlertDialog(
+            title: const Text('下载更新包'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(asset.name),
+                const SizedBox(height: 16),
+                LinearProgressIndicator(value: value),
+                const SizedBox(height: 12),
+                Text(_downloadProgressText(receivedBytes, total)),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    await Future<void>.delayed(Duration.zero);
+    try {
+      return await _client.downloadAsset(
+        asset: asset,
+        token: _tokenController.text,
+        onProgress: (received, total) {
+          receivedBytes = received;
+          totalBytes = total;
+          updateDialog?.call(() {});
+        },
+      );
+    } finally {
+      closeDialog();
+      await dialogFuture.catchError((Object _) {});
     }
   }
 
@@ -373,6 +450,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
                         _versions = const <GitHubUpdateVersion>[];
                         _assets = const <GitHubUpdateAsset>[];
                         _selectedVersion = null;
+                        _versionsPage = 0;
                       });
                     },
                   ),
@@ -467,6 +545,9 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     if (_selectedVersion != null) {
       return '已选择：${_selectedVersion!.displayTitle}';
     }
+    if (_versions.isNotEmpty) {
+      return '共 ${_filteredVersions().length} / ${_versions.length} 个版本';
+    }
     final version = widget.config.appVersion;
     if (version == null || version.isEmpty) {
       return '点击版本可查看匹配的安装包或 artifact。';
@@ -481,24 +562,96 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     if (_versions.isEmpty) {
       return const Text('尚未加载版本。');
     }
+    final filtered = _filteredVersions();
+    final totalPages = _pageCount(filtered.length);
+    final page = _versionsPage.clamp(0, totalPages - 1);
+    final start = page * _versionsPageSize;
+    final end = (start + _versionsPageSize).clamp(0, filtered.length);
+    final pageItems = filtered.sublist(start, end);
     return Column(
-      children: _versions
-          .map(
-            (version) => ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                version.channel == GitHubUpdateChannel.release
-                    ? Icons.sell_outlined
-                    : Icons.play_circle_outline,
-              ),
-              title: Text(version.displayTitle),
-              subtitle: Text(_versionSubtitle(version)),
-              selected: version.id == _selectedVersion?.id,
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _loadingAssets ? null : () => _loadAssets(version),
-            ),
-          )
-          .toList(growable: false),
+      children: <Widget>[
+        TextField(
+          controller: _versionSearchController,
+          decoration: const InputDecoration(
+            labelText: '搜索版本',
+            prefixIcon: Icon(Icons.search_outlined),
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (filtered.isEmpty)
+          const Text('没有匹配版本。')
+        else ...<Widget>[
+          ...pageItems
+              .map(
+                (version) => ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    version.channel == GitHubUpdateChannel.release
+                        ? Icons.sell_outlined
+                        : Icons.play_circle_outline,
+                  ),
+                  title: Text(version.displayTitle),
+                  subtitle: Text(_versionSubtitle(version)),
+                  selected: version.id == _selectedVersion?.id,
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _loadingAssets ? null : () => _loadAssets(version),
+                ),
+              )
+              .toList(growable: false),
+          _buildVersionPager(page, totalPages, filtered.length),
+        ],
+      ],
+    );
+  }
+
+  List<GitHubUpdateVersion> _filteredVersions() {
+    final query = _versionSearchController.text.trim().toLowerCase();
+    if (query.isEmpty) {
+      return _versions;
+    }
+    return _versions.where((version) {
+      return version.id.toLowerCase().contains(query) ||
+          version.displayTitle.toLowerCase().contains(query) ||
+          version.subtitle.toLowerCase().contains(query) ||
+          (version.createdAt?.toLocal().toString().toLowerCase().contains(
+                    query,
+                  ) ??
+              false);
+    }).toList(growable: false);
+  }
+
+  int _pageCount(int count) {
+    if (count <= 0) {
+      return 1;
+    }
+    return ((count - 1) ~/ _versionsPageSize) + 1;
+  }
+
+  Widget _buildVersionPager(int page, int totalPages, int totalItems) {
+    return Row(
+      children: <Widget>[
+        IconButton(
+          tooltip: '上一页',
+          onPressed:
+              page <= 0 ? null : () => setState(() => _versionsPage = page - 1),
+          icon: const Icon(Icons.chevron_left),
+        ),
+        Expanded(
+          child: Text(
+            '第 ${page + 1} / $totalPages 页 · 共 $totalItems 个',
+            textAlign: TextAlign.center,
+          ),
+        ),
+        IconButton(
+          tooltip: '下一页',
+          onPressed: page >= totalPages - 1
+              ? null
+              : () => setState(() => _versionsPage = page + 1),
+          icon: const Icon(Icons.chevron_right),
+        ),
+      ],
     );
   }
 
@@ -644,6 +797,13 @@ String formatGitHubUpdateBytes(int bytes) {
     unit++;
   }
   return '${value.toStringAsFixed(value >= 10 ? 1 : 2)} ${units[unit]}';
+}
+
+String _downloadProgressText(int receivedBytes, int? totalBytes) {
+  if (totalBytes == null || totalBytes <= 0) {
+    return '已下载 ${formatGitHubUpdateBytes(receivedBytes)}';
+  }
+  return '${formatGitHubUpdateBytes(receivedBytes)} / ${formatGitHubUpdateBytes(totalBytes)}';
 }
 
 @visibleForTesting

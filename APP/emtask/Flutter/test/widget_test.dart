@@ -301,6 +301,70 @@ void main() {
     expect(run.subtitle, contains('#7'));
     expect(asset.requiresToken, isTrue);
     expect(asset.sizeBytes, 42);
+    expect(asset.downloadFileName, 'emtask-client-windows-x64.zip');
+  });
+
+  testWidgets('github updater filters and pages versions',
+      (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1000, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final versions = List<GitHubUpdateVersion>.generate(
+      25,
+      (index) => GitHubUpdateVersion(
+        id: '$index',
+        title: 'Version ${index.toString().padLeft(2, '0')}',
+        subtitle: index.isEven ? 'main branch' : 'feature branch',
+        createdAt: DateTime.utc(2026, 7, 1, 0, index),
+        assetCount: 1,
+        channel: GitHubUpdateChannel.action,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GitHubUpdatePage(
+          config: const GitHubUpdatePageConfig(
+            initialRepository: 'owner/repo',
+          ),
+          client: _FakeGitHubUpdateClient(versions),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('列出版本'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Version 00'), findsOneWidget);
+    expect(find.text('Version 09'), findsOneWidget);
+    expect(find.text('Version 10'), findsNothing);
+    expect(find.text('第 1 / 3 页 · 共 25 个'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('下一页'));
+    await tester.pump();
+
+    expect(find.text('Version 10'), findsOneWidget);
+    expect(find.text('Version 00'), findsNothing);
+    expect(find.text('第 2 / 3 页 · 共 25 个'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField).last, 'Version 23');
+    await tester.pump();
+
+    expect(
+      find.descendant(
+        of: find.byType(ListTile),
+        matching: find.text('Version 23'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Version 10'), findsNothing);
+    expect(find.text('第 1 / 1 页 · 共 1 个'), findsOneWidget);
   });
 
   test('github updater defaults parse info.dat', () {
@@ -599,4 +663,33 @@ Future<void> _tapHomeMenuItem(WidgetTester tester, String label) async {
   await tester.tap(find.byTooltip('更多操作'));
   await tester.pumpAndSettle();
   await tester.tap(find.text(label));
+}
+
+class _FakeGitHubUpdateClient extends GitHubUpdateClient {
+  _FakeGitHubUpdateClient(this.versions);
+
+  final List<GitHubUpdateVersion> versions;
+
+  @override
+  Future<List<GitHubUpdateVersion>> listVersions({
+    required String repo,
+    required GitHubUpdateChannel channel,
+    String? token,
+    String? workflow,
+    String? branch,
+    bool includePrerelease = false,
+  }) async {
+    return versions;
+  }
+
+  @override
+  Future<List<GitHubUpdateAsset>> listAssets({
+    required String repo,
+    required GitHubUpdateChannel channel,
+    required String version,
+    String? token,
+    String? namePattern,
+  }) async {
+    return const <GitHubUpdateAsset>[];
+  }
 }

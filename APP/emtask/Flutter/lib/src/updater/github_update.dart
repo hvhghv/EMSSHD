@@ -337,6 +337,7 @@ class GitHubUpdateDesktopInstaller {
     required GitHubUpdateChannel channel,
     required String version,
     required GitHubUpdateAsset asset,
+    required File packageFile,
     String token = '',
     String workflow = '',
     String branch = '',
@@ -365,6 +366,7 @@ class GitHubUpdateDesktopInstaller {
         channel: channel,
         version: version,
         namePattern: asset.name,
+        packagePath: packageFile.absolute.path,
         token: token,
         workflow: workflow,
         branch: branch,
@@ -391,6 +393,7 @@ class GitHubUpdateDesktopInstaller {
       channel: channel,
       version: version,
       namePattern: asset.name,
+      packagePath: packageFile.absolute.path,
       token: token,
       workflow: workflow,
       branch: branch,
@@ -412,6 +415,7 @@ class GitHubUpdateDesktopInstaller {
     required GitHubUpdateChannel channel,
     required String version,
     required String namePattern,
+    required String packagePath,
     required String token,
     required String workflow,
     required String branch,
@@ -436,6 +440,8 @@ class GitHubUpdateDesktopInstaller {
       _psQuote(local.installRoot.path),
       '-PackageName',
       _psQuote(local.packageName),
+      '-PackagePath',
+      _psQuote(packagePath),
     ];
     if (token.trim().isNotEmpty) {
       args.addAll(<String>['-Token', _psQuote(token.trim())]);
@@ -462,6 +468,7 @@ try {
 } catch {
   (\$_ | Out-String) | Add-Content -LiteralPath \$log
 }
+try { Remove-Item -LiteralPath ${_psQuote(packagePath)} -Force -ErrorAction SilentlyContinue } catch {}
 try { Start-Process -FilePath ${_psQuote(executable)} -WorkingDirectory ${_psQuote(local.packageDir.path)} } catch {}
 try { Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
 ''';
@@ -474,6 +481,7 @@ try { Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyConti
     required GitHubUpdateChannel channel,
     required String version,
     required String namePattern,
+    required String packagePath,
     required String token,
     required String workflow,
     required String branch,
@@ -495,6 +503,8 @@ try { Remove-Item -LiteralPath \$PSCommandPath -Force -ErrorAction SilentlyConti
       _shQuote(local.installRoot.path),
       '--package-name',
       _shQuote(local.packageName),
+      '--package-path',
+      _shQuote(packagePath),
     ];
     if (token.trim().isNotEmpty) {
       args.addAll(<String>['--token', _shQuote(token.trim())]);
@@ -515,6 +525,7 @@ set -euo pipefail
 log=${_shQuote(logPath)}
 while kill -0 $currentPid >/dev/null 2>&1; do sleep 0.2; done
 if ${args.join(' ')} >"\$log" 2>&1; then :; else :; fi
+rm -f -- ${_shQuote(packagePath)}
 (cd ${_shQuote(local.packageDir.path)} && ${_shQuote(executable)} >/dev/null 2>&1 &)
 rm -f -- "\$0"
 ''';
@@ -606,6 +617,15 @@ class GitHubUpdateAsset {
   }
 
   bool get isActionArtifactZip => requiresToken;
+
+  String get downloadFileName {
+    final safe = _safeFileName(name.isEmpty ? 'github-update-package' : name);
+    final lower = safe.toLowerCase();
+    if (isActionArtifactZip && !lower.endsWith('.zip')) {
+      return '$safe.zip';
+    }
+    return safe;
+  }
 
   bool get canDesktopInstall {
     final lower = name.toLowerCase();
@@ -732,6 +752,56 @@ class GitHubUpdateClient {
     return assets.where((asset) => pattern.hasMatch(asset.name)).toList();
   }
 
+  Future<File> downloadAsset({
+    required GitHubUpdateAsset asset,
+    String? token,
+    Directory? directory,
+    void Function(int receivedBytes, int? totalBytes)? onProgress,
+  }) async {
+    final outputDir =
+        directory ?? await Directory.systemTemp.createTemp('github-update-');
+    await outputDir.create(recursive: true);
+    final file = File(
+      '${outputDir.path}${Platform.pathSeparator}${asset.downloadFileName}',
+    );
+    final request = await _httpClient.getUrl(asset.downloadUrl);
+    request.followRedirects = true;
+    request.headers.set(HttpHeaders.acceptHeader, 'application/octet-stream');
+    request.headers.set(HttpHeaders.userAgentHeader, 'github-updater-flutter');
+    request.headers.set('X-GitHub-Api-Version', '2022-11-28');
+    if (token != null && token.trim().isNotEmpty) {
+      request.headers.set(
+        HttpHeaders.authorizationHeader,
+        'Bearer ${token.trim()}',
+      );
+    }
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await utf8.decodeStream(response);
+      throw HttpException(
+        'GitHub download ${response.statusCode}: $body',
+        uri: asset.downloadUrl,
+      );
+    }
+
+    final total = response.contentLength >= 0
+        ? response.contentLength
+        : (asset.sizeBytes > 0 ? asset.sizeBytes : null);
+    var received = 0;
+    final sink = file.openWrite();
+    try {
+      await for (final chunk in response) {
+        received += chunk.length;
+        sink.add(chunk);
+        onProgress?.call(received, total);
+      }
+    } finally {
+      await sink.close();
+    }
+    onProgress?.call(received, total);
+    return file;
+  }
+
   Future<Object?> _getJson(Uri uri, {String? token}) async {
     final request = await _httpClient.getUrl(uri);
     request.headers
@@ -785,6 +855,9 @@ String _basename(String path) {
       .toList(growable: false);
   return parts.isEmpty ? trimmed : parts.last;
 }
+
+String _safeFileName(String value) =>
+    value.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_');
 
 int _jsonInt(Object? value) {
   if (value is int) {

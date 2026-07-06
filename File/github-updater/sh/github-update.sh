@@ -11,6 +11,7 @@ branch=""
 output_dir="."
 install_dir=""
 package_name=""
+package_path=""
 token="${GITHUB_TOKEN:-}"
 include_prerelease="false"
 force="false"
@@ -39,6 +40,7 @@ Options:
   --output-dir DIR               Download directory, default: .
   --install-dir DIR              Install root, default for install/uninstall: current directory
   --package-name NAME            Installed xxx directory name, inferred during install
+  --package-path FILE            Install an already downloaded release package or action artifact zip
   --token TOKEN                  GitHub token, default: GITHUB_TOKEN; Actions can also use gh auth
   --include-prerelease           Include prerelease releases
   --force                        Reserved for compatibility; install always supports overwrite
@@ -58,6 +60,7 @@ while [ $# -gt 0 ]; do
     --output-dir) output_dir=${2:?}; output_dir_explicit="true"; shift 2 ;;
     --install-dir) install_dir=${2:?}; shift 2 ;;
     --package-name) package_name=${2:?}; shift 2 ;;
+    --package-path) package_path=${2:?}; shift 2 ;;
     --token) token=${2:?}; shift 2 ;;
     --include-prerelease) include_prerelease="true"; shift ;;
     --force) force="true"; shift ;;
@@ -624,6 +627,32 @@ if [ "$mode" = "uninstall" ]; then
 fi
 
 use_installed_updater_defaults
+
+if [ "$mode" = "install" ] && [ -n "$package_path" ]; then
+  need_archive_cmds
+  if [ ! -f "$package_path" ]; then
+    echo "Package path not found: $package_path" >&2
+    exit 1
+  fi
+  package_full=$(cd "$(dirname "$package_path")" && pwd)/$(basename "$package_path")
+  source_name_pattern=$name_pattern
+  if [ "$name_pattern_explicit" != "true" ] || [ "$source_name_pattern" = "*" ]; then
+    source_name_pattern=$(basename "$package_full")
+    if [ "$channel" = "action" ]; then
+      source_name_pattern=${source_name_pattern%.zip}
+    fi
+  fi
+  repo_value=""
+  if [ -n "$repo" ]; then
+    repo_value=$(resolve_repo "$repo")
+  fi
+  if [ "$channel" = "action" ]; then
+    prepare_action_package "$package_full" "$(install_root)" "action" "$source_name_pattern" "$repo_value"
+  else
+    install_archive_package "$package_full" "$(dirname "$package_full")" "$(install_root)" "release" "$source_name_pattern" "$repo_value"
+  fi
+  exit 0
+fi
 
 if [ -z "$repo" ]; then
   echo "--repo is required unless --mode uninstall is used" >&2

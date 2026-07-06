@@ -14,6 +14,7 @@ param(
     [string]$OutputDir = '.',
     [string]$InstallDir,
     [string]$PackageName,
+    [string]$PackagePath,
     [string]$Token = $env:GITHUB_TOKEN,
     [switch]$IncludePrerelease,
     [switch]$Force,
@@ -52,6 +53,7 @@ Options:
   -OutputDir DIR               Download directory, default: .
   -InstallDir DIR              Install root, default for install/uninstall: current directory
   -PackageName NAME            Installed xxx directory name, inferred during install
+  -PackagePath FILE            Install an already downloaded release package or action artifact zip
   -Token TOKEN                 GitHub token, default: GITHUB_TOKEN; Actions can also use gh auth
   -IncludePrerelease           Include prerelease releases
   -Force                       Reserved for compatibility; install always supports overwrite
@@ -745,6 +747,32 @@ if ($Mode -eq 'uninstall') {
 }
 
 Use-InstalledUpdaterDefaults
+
+if ($Mode -eq 'install' -and $PackagePath) {
+    $packageFull = (Resolve-Path -LiteralPath $PackagePath).Path
+    $repoValue = $Repo
+    if ($repoValue) {
+        try {
+            $repoInfoForLocal = Resolve-GitHubRepo $Repo
+            $repoValue = "$($repoInfoForLocal.Owner)/$($repoInfoForLocal.Name)"
+        } catch {
+            # Keep the caller-provided value for info.Dat.
+        }
+    }
+    $sourceNamePattern = $NamePattern
+    if (-not $NamePatternWasExplicit -or $sourceNamePattern -eq '*') {
+        $sourceNamePattern = Split-Path -Leaf $packageFull
+        if ($Channel -eq 'action' -and $sourceNamePattern -match '(?i)\.zip$') {
+            $sourceNamePattern = $sourceNamePattern.Substring(0, $sourceNamePattern.Length - 4)
+        }
+    }
+    if ($Channel -eq 'action') {
+        Install-ActionArtifactPackage -ArtifactZip $packageFull -InstallRoot (Resolve-InstallRoot) -SourceChannel 'action' -SourceNamePattern $sourceNamePattern -RepoValue $repoValue
+    } else {
+        Install-ArchivePackage -ArchivePath $packageFull -UpdaterRoot (Split-Path -Parent $packageFull) -InstallRoot (Resolve-InstallRoot) -SourceChannel 'release' -SourceNamePattern $sourceNamePattern -RepoValue $repoValue
+    }
+    return
+}
 
 if (-not $Repo) { throw '-Repo is required unless -Mode uninstall is used.' }
 Resolve-GitHubToken
