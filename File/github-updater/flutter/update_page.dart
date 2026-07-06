@@ -60,6 +60,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   late final TextEditingController _branchController;
   late final TextEditingController _namePatternController;
   late final TextEditingController _versionSearchController;
+  late final TextEditingController _versionPageController;
   late GitHubUpdateChannel _channel;
   List<GitHubUpdateVersion> _versions = const <GitHubUpdateVersion>[];
   List<GitHubUpdateAsset> _assets = const <GitHubUpdateAsset>[];
@@ -86,6 +87,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
         TextEditingController(text: widget.config.defaultNamePattern);
     _versionSearchController = TextEditingController();
     _versionSearchController.addListener(_handleVersionSearchChanged);
+    _versionPageController = TextEditingController(text: '1');
     _channel = widget.config.initialChannel;
     _branchController.text = widget.config.initialBranch;
     unawaited(_loadInitialDefaults());
@@ -99,6 +101,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     _branchController.dispose();
     _namePatternController.dispose();
     _versionSearchController.dispose();
+    _versionPageController.dispose();
     super.dispose();
   }
 
@@ -571,6 +574,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
     return Column(
       children: <Widget>[
         TextField(
+          key: const Key('github_update_version_search'),
           controller: _versionSearchController,
           decoration: const InputDecoration(
             labelText: '搜索版本',
@@ -630,7 +634,12 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   }
 
   Widget _buildVersionPager(int page, int totalPages, int totalItems) {
-    return Row(
+    _syncVersionPageText(page);
+    return Wrap(
+      alignment: WrapAlignment.center,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 8,
+      runSpacing: 8,
       children: <Widget>[
         IconButton(
           tooltip: '上一页',
@@ -638,11 +647,26 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
               page <= 0 ? null : () => setState(() => _versionsPage = page - 1),
           icon: const Icon(Icons.chevron_left),
         ),
-        Expanded(
-          child: Text(
-            '第 ${page + 1} / $totalPages 页 · 共 $totalItems 个',
-            textAlign: TextAlign.center,
+        Text('第 ${page + 1} / $totalPages 页 · 共 $totalItems 个'),
+        SizedBox(
+          width: 96,
+          child: TextField(
+            key: const Key('github_update_version_page'),
+            controller: _versionPageController,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.go,
+            decoration: const InputDecoration(
+              labelText: '页码',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            onSubmitted: (_) => _jumpToVersionPage(totalPages),
           ),
+        ),
+        IconButton(
+          tooltip: '跳转页码',
+          onPressed: () => _jumpToVersionPage(totalPages),
+          icon: const Icon(Icons.keyboard_return_outlined),
         ),
         IconButton(
           tooltip: '下一页',
@@ -653,6 +677,27 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
         ),
       ],
     );
+  }
+
+  void _syncVersionPageText(int page) {
+    final text = '${page + 1}';
+    if (_versionPageController.text == text) {
+      return;
+    }
+    _versionPageController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
+  void _jumpToVersionPage(int totalPages) {
+    final requested = int.tryParse(_versionPageController.text.trim());
+    if (requested == null) {
+      _syncVersionPageText(_versionsPage.clamp(0, totalPages - 1));
+      return;
+    }
+    final target = requested.clamp(1, totalPages) - 1;
+    setState(() => _versionsPage = target);
   }
 
   Widget _buildAssetsList() {

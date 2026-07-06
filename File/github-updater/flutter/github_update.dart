@@ -618,6 +618,10 @@ class GitHubUpdateAsset {
 
   bool get isActionArtifactZip => requiresToken;
 
+  String get downloadAcceptHeader => isActionArtifactZip
+      ? 'application/vnd.github+json'
+      : 'application/octet-stream';
+
   String get downloadFileName {
     final safe = _safeFileName(name.isEmpty ? 'github-update-package' : name);
     final lower = safe.toLowerCase();
@@ -766,7 +770,7 @@ class GitHubUpdateClient {
     );
     final request = await _httpClient.getUrl(asset.downloadUrl);
     request.followRedirects = true;
-    request.headers.set(HttpHeaders.acceptHeader, 'application/octet-stream');
+    request.headers.set(HttpHeaders.acceptHeader, asset.downloadAcceptHeader);
     request.headers.set(HttpHeaders.userAgentHeader, 'github-updater-flutter');
     request.headers.set('X-GitHub-Api-Version', '2022-11-28');
     if (token != null && token.trim().isNotEmpty) {

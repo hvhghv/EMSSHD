@@ -302,6 +302,7 @@ void main() {
     expect(asset.requiresToken, isTrue);
     expect(asset.sizeBytes, 42);
     expect(asset.downloadFileName, 'emtask-client-windows-x64.zip');
+    expect(asset.downloadAcceptHeader, 'application/vnd.github+json');
   });
 
   testWidgets('github updater filters and pages versions',
@@ -353,7 +354,21 @@ void main() {
     expect(find.text('Version 00'), findsNothing);
     expect(find.text('第 2 / 3 页 · 共 25 个'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextField).last, 'Version 23');
+    await tester.enterText(
+      find.byKey(const Key('github_update_version_page')),
+      '3',
+    );
+    await tester.tap(find.byTooltip('跳转页码'));
+    await tester.pump();
+
+    expect(find.text('Version 20'), findsOneWidget);
+    expect(find.text('Version 19'), findsNothing);
+    expect(find.text('第 3 / 3 页 · 共 25 个'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const Key('github_update_version_search')),
+      'Version 23',
+    );
     await tester.pump();
 
     expect(
