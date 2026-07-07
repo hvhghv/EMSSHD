@@ -74,6 +74,48 @@ class MainActivity: FlutterActivity() {
                         }
                     }.start()
                 }
+                "installDownloadedApk" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val localPath = args?.get("localPath") as? String
+                    val name = args?.get("name") as? String ?: "update.apk"
+                    val isActionArtifactZip =
+                        args?.get("isActionArtifactZip") as? Boolean ?: false
+                    if (localPath.isNullOrBlank()) {
+                        result.error("bad_args", "Missing APK package path", null)
+                        return@setMethodCallHandler
+                    }
+                    Thread {
+                        runCatching {
+                            prepareDownloadedPackage(
+                                localPath = localPath,
+                                name = name,
+                                isActionArtifactZip = isActionArtifactZip,
+                            )
+                        }.onSuccess {
+                            mainHandler.post {
+                                runCatching {
+                                    launchApkInstaller(it)
+                                }.onSuccess {
+                                    result.success(null)
+                                }.onFailure { error ->
+                                    result.error(
+                                        "install_failed",
+                                        error.message ?: error.javaClass.simpleName,
+                                        null,
+                                    )
+                                }
+                            }
+                        }.onFailure { error ->
+                            mainHandler.post {
+                                result.error(
+                                    "install_failed",
+                                    error.message ?: error.javaClass.simpleName,
+                                    null,
+                                )
+                            }
+                        }
+                    }.start()
+                }
                 else -> result.notImplemented()
             }
         }
@@ -113,6 +155,29 @@ class MainActivity: FlutterActivity() {
             return target
         }
         return extractSingleApk(target, updateDir)
+    }
+
+    private fun prepareDownloadedPackage(
+        localPath: String,
+        name: String,
+        isActionArtifactZip: Boolean,
+    ): File {
+        val source = File(localPath)
+        if (!source.exists()) {
+            throw IllegalStateException("Downloaded package does not exist: $localPath")
+        }
+        if (!isActionArtifactZip) {
+            if (!source.name.endsWith(".apk", ignoreCase = true)) {
+                throw IllegalStateException("Downloaded file is not an APK: ${source.name}")
+            }
+            return source
+        }
+        val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val updateDir = File(cacheDir, "github-updater/${UUID.randomUUID()}-$safeName")
+        if (!updateDir.mkdirs()) {
+            throw IllegalStateException("Cannot create update directory")
+        }
+        return extractSingleApk(source, updateDir)
     }
 
     private fun downloadFile(url: String, token: String?, target: File) {

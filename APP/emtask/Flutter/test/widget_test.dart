@@ -420,6 +420,24 @@ void main() {
     expect(defaults.workflow, 'build.yml');
   });
 
+  test('github updater apk install request carries local package path', () {
+    final asset = GitHubUpdateAsset(
+      name: 'emtask-client-android-apk',
+      sizeBytes: 1024,
+      downloadUrl: Uri.parse('https://example.com/artifacts/1/zip'),
+      requiresToken: true,
+    );
+
+    final json = GitHubApkInstallRequest(
+      asset: asset,
+      localPath: '/tmp/emtask-client-android-apk.zip',
+    ).toJson();
+
+    expect(json['url'], 'https://example.com/artifacts/1/zip');
+    expect(json['localPath'], '/tmp/emtask-client-android-apk.zip');
+    expect(json['isActionArtifactZip'], isTrue);
+  });
+
   test('github updater saved input persists last values', () async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     const key = 'github_updater.test.last_input';

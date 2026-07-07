@@ -336,6 +336,70 @@ class GitHubUpdateDownloadCanceledException implements Exception {
   String toString() => '下载已取消。';
 }
 
+class GitHubUpdateDirectDownloadTask {
+  GitHubUpdateDirectDownloadTask({
+    required this.asset,
+    this.token = '',
+    this.onProgress,
+  }) : _httpClient = HttpClient();
+
+  final GitHubUpdateAsset asset;
+  final String token;
+  final void Function(int receivedBytes, int? totalBytes)? onProgress;
+  final HttpClient _httpClient;
+  late final GitHubUpdateClient _client =
+      GitHubUpdateClient(httpClient: _httpClient);
+
+  bool _canceled = false;
+  Directory? _outputDir;
+
+  void cancel() {
+    _canceled = true;
+    _httpClient.close(force: true);
+  }
+
+  Future<File> start() async {
+    if (_canceled) {
+      throw const GitHubUpdateDownloadCanceledException();
+    }
+    final outputDir =
+        await Directory.systemTemp.createTemp('github-update-download-');
+    _outputDir = outputDir;
+    try {
+      final file = await _client.downloadAsset(
+        asset: asset,
+        token: token,
+        directory: outputDir,
+        onProgress: (receivedBytes, totalBytes) {
+          if (_canceled) {
+            throw const GitHubUpdateDownloadCanceledException();
+          }
+          onProgress?.call(receivedBytes, totalBytes);
+        },
+      );
+      if (_canceled) {
+        throw const GitHubUpdateDownloadCanceledException();
+      }
+      return file;
+    } catch (error) {
+      await _deleteOutputDir();
+      if (_canceled) {
+        throw const GitHubUpdateDownloadCanceledException();
+      }
+      rethrow;
+    } finally {
+      _httpClient.close();
+    }
+  }
+
+  Future<void> _deleteOutputDir() async {
+    final dir = _outputDir;
+    if (dir != null && await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+}
+
 class GitHubUpdateDesktopDownloadTask {
   GitHubUpdateDesktopDownloadTask({
     required this.repo,
@@ -889,15 +953,18 @@ class GitHubUpdateAsset {
 class GitHubApkInstallRequest {
   const GitHubApkInstallRequest({
     required this.asset,
+    this.localPath,
     this.token,
   });
 
   final GitHubUpdateAsset asset;
+  final String? localPath;
   final String? token;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'url': asset.downloadUrl.toString(),
         'name': asset.name,
+        'localPath': localPath,
         'token': token,
         'isActionArtifactZip': asset.isActionArtifactZip,
       };

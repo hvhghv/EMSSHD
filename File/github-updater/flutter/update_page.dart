@@ -203,19 +203,22 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
   Future<void> _installApkAsset(GitHubUpdateAsset asset) async {
     await _saveLastInput();
     setState(() => _installingAssetName = asset.name);
-    final channel = MethodChannel(widget.config.apkInstallerChannel);
     try {
+      final packageFile = await _downloadApkAssetWithDialog(asset);
+      final channel = MethodChannel(widget.config.apkInstallerChannel);
       await channel.invokeMethod<void>(
-        'downloadAndInstallApk',
+        'installDownloadedApk',
         GitHubApkInstallRequest(
           asset: asset,
-          token: _tokenController.text.trim().isEmpty
-              ? null
-              : _tokenController.text.trim(),
+          localPath: packageFile.path,
         ).toJson(),
       );
       if (mounted) {
-        _showSnackBar('已开始后台下载并安装：${asset.name}');
+        _showSnackBar('已打开系统安装器：${asset.name}');
+      }
+    } on GitHubUpdateDownloadCanceledException {
+      if (mounted) {
+        _showSnackBar('已取消下载。');
       }
     } on MissingPluginException {
       if (mounted) {
@@ -224,7 +227,7 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       }
     } catch (error) {
       if (mounted) {
-        _showSnackBar('启动 APK 安装失败：${_formatError(error)}');
+        _showSnackBar('下载或安装 APK 失败：${_formatError(error)}');
       }
     } finally {
       if (mounted) {
@@ -298,6 +301,86 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
         _showSnackBar('启动更新失败：${_formatError(error)}');
         setState(() => _installingAssetName = null);
       }
+    }
+  }
+
+  Future<File> _downloadApkAssetWithDialog(GitHubUpdateAsset asset) async {
+    var receivedBytes = 0;
+    int? totalBytes = asset.sizeBytes > 0 ? asset.sizeBytes : null;
+    var status = '准备下载...';
+    var canceling = false;
+    StateSetter? updateDialog;
+    var dialogClosed = false;
+    final task = GitHubUpdateDirectDownloadTask(
+      asset: asset,
+      token: _tokenController.text,
+      onProgress: (received, total) {
+        receivedBytes = received;
+        totalBytes = total ?? totalBytes;
+        status = _formatDownloadProgress(receivedBytes, totalBytes);
+        if (!dialogClosed && mounted) {
+          updateDialog?.call(() {});
+        }
+      },
+    );
+
+    void closeDialog() {
+      if (!dialogClosed && mounted) {
+        dialogClosed = true;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          updateDialog = setDialogState;
+          final progress = totalBytes == null || totalBytes! <= 0
+              ? null
+              : (receivedBytes / totalBytes!).clamp(0.0, 1.0).toDouble();
+          return AlertDialog(
+            title: const Text('下载 APK 更新包'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(asset.name),
+                const SizedBox(height: 16),
+                LinearProgressIndicator(value: progress),
+                const SizedBox(height: 12),
+                Text(
+                  status,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: canceling
+                    ? null
+                    : () {
+                        canceling = true;
+                        status = '正在取消下载...';
+                        setDialogState(() {});
+                        task.cancel();
+                      },
+                child: const Text('取消下载'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    await Future<void>.delayed(Duration.zero);
+    try {
+      return await task.start();
+    } finally {
+      closeDialog();
+      await dialogFuture.catchError((Object _) {});
     }
   }
 
@@ -381,6 +464,14 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       closeDialog();
       await dialogFuture.catchError((Object _) {});
     }
+  }
+
+  String _formatDownloadProgress(int receivedBytes, int? totalBytes) {
+    final received = formatGitHubUpdateBytes(receivedBytes);
+    if (totalBytes == null || totalBytes <= 0) {
+      return '已下载 $received';
+    }
+    return '已下载 $received / ${formatGitHubUpdateBytes(totalBytes)}';
   }
 
   Future<void> _loadInitialDefaults() async {
