@@ -1245,7 +1245,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         return;
       }
       if (connection.isConnected) {
-        _showHomeSnackBar('已连接 ${connection.profile.name}，现在可以点击会话进入终端。');
+        _showHomeSnackBar(
+          '已连接 ${connection.profile.name}，现在可以点击会话进入终端。',
+          duration: const Duration(seconds: 2),
+        );
       } else {
         _showHomeSnackBar(
           connection.errorMessage == null
@@ -1288,7 +1291,11 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     }
   }
 
-  void _showHomeSnackBar(String message) {
+  void _showHomeSnackBar(
+    String message, {
+    Duration duration = const Duration(seconds: 4),
+    bool showCloseAction = true,
+  }) {
     if (!mounted) {
       return;
     }
@@ -1296,14 +1303,16 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
-        duration: const Duration(seconds: 4),
+        duration: duration,
         content: Text(message),
-        action: SnackBarAction(
-          label: '关闭',
-          onPressed: () {
-            ScaffoldMessenger.of(context).hideCurrentSnackBar();
-          },
-        ),
+        action: showCloseAction
+            ? SnackBarAction(
+                label: '关闭',
+                onPressed: () {
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                },
+              )
+            : null,
       ),
     );
   }
@@ -3014,39 +3023,6 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                 alwaysShowCursor: true,
               ),
             ),
-            if (manualKeyboardLocked)
-              Positioned(
-                top: 12,
-                right: 12,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: const Color(0xdd111827),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xff334155)),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        const Icon(Icons.keyboard_hide, size: 16),
-                        const SizedBox(width: 6),
-                        TextButton(
-                          style: TextButton.styleFrom(
-                            padding: EdgeInsets.zero,
-                            minimumSize: const Size(0, 32),
-                          ),
-                          onPressed: _toggleTerminalKeyboardInput,
-                          child: const Text('点击键盘按钮后输入'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
             if (widget.shortcutKeysEnabled)
               AnimatedPositioned(
                 duration: const Duration(milliseconds: 180),
