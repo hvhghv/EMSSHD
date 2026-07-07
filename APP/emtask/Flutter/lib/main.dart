@@ -23,6 +23,7 @@ import 'src/windows_screen_capture.dart';
 
 const _appDisplayName = 'emtask Client';
 const _appVersion = '1.0.0+1';
+const _clientUpdateInfoAsset = 'assets/updater/info.Dat';
 
 Map<ShortcutActivator, Intent> _terminalShortcutsForPlatform(
   TargetPlatform platform,
@@ -253,6 +254,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         builder: (context) => GitHubUpdatePage(
           config: GitHubUpdatePageConfig(
             defaultNamePattern: _defaultClientUpdatePattern(),
+            infoAssetPath: Platform.isAndroid ? _clientUpdateInfoAsset : '',
             appVersion: _appVersion,
           ),
         ),
@@ -1596,6 +1598,12 @@ class EmTaskSessionPage extends StatefulWidget {
   State<EmTaskSessionPage> createState() => _EmTaskSessionPageState();
 }
 
+enum _TerminalAppBarAction {
+  clearTerminal,
+  restartApp,
+  toggleSftp,
+}
+
 class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
   late final Terminal _terminal;
   late final TerminalController _terminalController;
@@ -1764,6 +1772,71 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
         await _loadDirectory(path: path);
       }
     }
+  }
+
+  void _clearTerminalOutput() {
+    widget.connection.clearOutput();
+    _terminal.write('\u001b[2J\u001b[H');
+    _terminalFocusNode.requestFocus();
+  }
+
+  void _handleTerminalAppBarAction(_TerminalAppBarAction action) {
+    switch (action) {
+      case _TerminalAppBarAction.clearTerminal:
+        _clearTerminalOutput();
+        break;
+      case _TerminalAppBarAction.restartApp:
+        unawaited(_restartRemoteTask());
+        break;
+      case _TerminalAppBarAction.toggleSftp:
+        unawaited(_toggleViewMode());
+        break;
+    }
+  }
+
+  Widget _buildTerminalActionsMenu(EmTaskConnection connection) {
+    final canToggleSftp = connection.profile.supportsSftp || _showSftp;
+    return PopupMenuButton<_TerminalAppBarAction>(
+      tooltip: '终端操作',
+      icon: const Icon(Icons.more_vert),
+      onSelected: _handleTerminalAppBarAction,
+      itemBuilder: (context) => <PopupMenuEntry<_TerminalAppBarAction>>[
+        PopupMenuItem<_TerminalAppBarAction>(
+          value: _TerminalAppBarAction.clearTerminal,
+          child: _buildTerminalActionMenuItem(
+            Icons.cleaning_services_outlined,
+            '清空终端输出',
+          ),
+        ),
+        PopupMenuItem<_TerminalAppBarAction>(
+          value: _TerminalAppBarAction.restartApp,
+          enabled: connection.isConnected,
+          child: _buildTerminalActionMenuItem(
+            Icons.restart_alt,
+            '重启应用',
+          ),
+        ),
+        PopupMenuItem<_TerminalAppBarAction>(
+          value: _TerminalAppBarAction.toggleSftp,
+          enabled: canToggleSftp,
+          child: _buildTerminalActionMenuItem(
+            _showSftp ? Icons.terminal : Icons.folder_open_outlined,
+            _showSftp ? '返回终端' : 'SFTP',
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTerminalActionMenuItem(IconData icon, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Icon(icon),
+        const SizedBox(width: 12),
+        Text(label),
+      ],
+    );
   }
 
   Future<void> _loadDirectory({String? path}) async {
@@ -2933,33 +3006,7 @@ class _EmTaskSessionPageState extends State<EmTaskSessionPage> {
                         : Icons.keyboard_outlined,
                   ),
                 ),
-              if (!_showSftp)
-                IconButton(
-                  tooltip: '重启应用',
-                  onPressed: connection.isConnected ? _restartRemoteTask : null,
-                  icon: const Icon(Icons.restart_alt),
-                ),
-              if (!_showSftp)
-                IconButton(
-                  tooltip: '清空终端输出',
-                  onPressed: () {
-                    widget.connection.clearOutput();
-                    _terminal.write('\u001b[2J\u001b[H');
-                    _terminalFocusNode.requestFocus();
-                  },
-                  icon: const Icon(Icons.cleaning_services_outlined),
-                ),
-              if (connection.profile.supportsSftp || _showSftp)
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.primary,
-                  ),
-                  onPressed: _toggleViewMode,
-                  icon: Icon(
-                    _showSftp ? Icons.terminal : Icons.folder_open_outlined,
-                  ),
-                  label: Text(_showSftp ? '终端' : 'SFTP'),
-                ),
+              _buildTerminalActionsMenu(connection),
             ],
           ),
           body: _showSftp
@@ -5962,7 +6009,7 @@ class _ProfileDialogState extends State<_ProfileDialog> {
                         },
                         title: const Text('支持 SFTP'),
                         subtitle: const Text(
-                          '勾选后终端页右上角显示 SFTP 入口；服务端任务配置也需要 use_sftp = true。',
+                          '勾选后终端页右上角菜单显示 SFTP 入口；服务端任务配置也需要 use_sftp = true。',
                         ),
                       ),
                       if (widget.isPanelSession) ...<Widget>[

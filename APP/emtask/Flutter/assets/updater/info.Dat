@@ -1,0 +1,15 @@
+{
+  "schema": "github-updater-info/v1",
+  "repo": "hvhghv/EMSSHD",
+  "package_type": "apk",
+  "artifact": "emtask-client-android-apk",
+  "package": "emtask-client-android-release.apk",
+  "app": "emtask-client",
+  "platform": "android",
+  "toolchain": "flutter",
+  "arch": "universal",
+  "channel": "action",
+  "workflow": "build.yml",
+  "updater": "android",
+  "install_script": ""
+}

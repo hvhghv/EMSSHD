@@ -17,6 +17,7 @@ class GitHubUpdatePageConfig {
     this.initialChannel = GitHubUpdateChannel.release,
     this.initialBranch = '',
     this.infoFilePath,
+    this.infoAssetPath = '',
     this.preferencesKey = 'github_updater.last_input.v1',
     this.persistToken = true,
     this.title = '检查更新',
@@ -31,6 +32,7 @@ class GitHubUpdatePageConfig {
   final GitHubUpdateChannel initialChannel;
   final String initialBranch;
   final String? infoFilePath;
+  final String infoAssetPath;
   final String preferencesKey;
   final bool persistToken;
   final String title;
@@ -389,13 +391,17 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       branch: widget.config.initialBranch,
       channel: widget.config.initialChannel,
     );
+    final assetDefaults = await _loadInfoAssetDefaults();
     final infoDefaults = await GitHubUpdateInfoDefaults.load(
         infoFilePath: widget.config.infoFilePath);
     final savedDefaults = await GitHubUpdateSavedInput.load(
       key: widget.config.preferencesKey,
       persistToken: widget.config.persistToken,
     );
-    final defaults = configDefaults.merge(infoDefaults).merge(savedDefaults);
+    final defaults = configDefaults
+        .merge(assetDefaults)
+        .merge(infoDefaults)
+        .merge(savedDefaults);
     if (!mounted) {
       return;
     }
@@ -410,6 +416,24 @@ class _GitHubUpdatePageState extends State<GitHubUpdatePage> {
       _channel = defaults.channel ?? widget.config.initialChannel;
       _loadingDefaults = false;
     });
+  }
+
+  Future<GitHubUpdateInfoDefaults> _loadInfoAssetDefaults() async {
+    final assetPath = widget.config.infoAssetPath.trim();
+    if (assetPath.isEmpty) {
+      return const GitHubUpdateInfoDefaults();
+    }
+    try {
+      final decoded = jsonDecode(await rootBundle.loadString(assetPath));
+      if (decoded is Map) {
+        return GitHubUpdateInfoDefaults.fromJson(
+          decoded.cast<String, Object?>(),
+        );
+      }
+    } catch (_) {
+      // Ignore missing or malformed bundled info.Dat and use other defaults.
+    }
+    return const GitHubUpdateInfoDefaults();
   }
 
   Future<void> _saveLastInput() async {

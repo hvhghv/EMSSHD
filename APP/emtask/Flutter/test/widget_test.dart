@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, rootBundle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -141,10 +141,10 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('terminal page exposes restart button',
+  testWidgets('terminal page groups actions in overflow menu',
       (WidgetTester tester) async {
     final connection = EmTaskConnection(
-      EmTaskSessionProfile.defaults(name: '测试会话'),
+      EmTaskSessionProfile.defaults(name: '测试会话', supportsSftp: true),
     );
     addTearDown(connection.dispose);
 
@@ -152,8 +152,16 @@ void main() {
 
     expect(find.text('测试会话'), findsOneWidget);
     expect(find.byTooltip('整页文本输入'), findsOneWidget);
-    expect(find.byTooltip('重启应用'), findsOneWidget);
-    expect(find.byTooltip('清空终端输出'), findsOneWidget);
+    expect(find.byTooltip('终端操作'), findsOneWidget);
+    expect(find.byTooltip('重启应用'), findsNothing);
+    expect(find.byTooltip('清空终端输出'), findsNothing);
+
+    await tester.tap(find.byTooltip('终端操作'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('清空终端输出'), findsOneWidget);
+    expect(find.text('重启应用'), findsOneWidget);
+    expect(find.text('SFTP'), findsOneWidget);
   });
 
   test('empty panel store returns mutable list for QR import', () async {
@@ -397,6 +405,19 @@ void main() {
     expect(defaults.namePattern, 'emtask-client-windows-x64*');
     expect(defaults.workflow, 'build.yml');
     expect(defaults.branch, 'main');
+  });
+
+  test('github updater bundled info.dat provides android defaults', () async {
+    final decoded =
+        jsonDecode(await rootBundle.loadString('assets/updater/info.Dat'));
+    final defaults = GitHubUpdateInfoDefaults.fromJson(
+      (decoded as Map).cast<String, Object?>(),
+    );
+
+    expect(defaults.repository, 'hvhghv/EMSSHD');
+    expect(defaults.channel, GitHubUpdateChannel.action);
+    expect(defaults.namePattern, 'emtask-client-android-apk*');
+    expect(defaults.workflow, 'build.yml');
   });
 
   test('github updater saved input persists last values', () async {

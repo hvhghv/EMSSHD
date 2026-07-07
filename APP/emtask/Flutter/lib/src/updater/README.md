@@ -33,6 +33,7 @@ Navigator.of(context).push(
         defaultNamePattern: 'my-app-windows-x64*',
         appVersion: '1.0.0',
         initialWorkflow: 'build.yml',
+        infoAssetPath: 'assets/updater/info.Dat',
       ),
     ),
   ),
@@ -45,7 +46,7 @@ Navigator.of(context).push(
 - `https://github.com/owner/repo`
 - `git@github.com:owner/repo.git`
 
-`initialRepository` 与 `defaultNamePattern` 可以留空。页面会自动查找运行目录附近的 `info.Dat`，读取其中的 `repo`、`channel`、`name_pattern`、`artifact`、`package`、`workflow`、`branch` 字段作为默认值。用户点击“列出版本”、选择版本或复制/安装资源时，会把当前输入保存到 `SharedPreferences`，下次打开页面优先恢复上次内容。
+`initialRepository` 与 `defaultNamePattern` 可以留空。页面会自动查找运行目录附近的 `info.Dat`，也可以通过 `infoAssetPath` 读取 Flutter assets 中打包的 `info.Dat`，读取其中的 `repo`、`channel`、`name_pattern`、`artifact`、`package`、`workflow`、`branch` 字段作为默认值。用户点击“列出版本”、选择版本或复制/安装资源时，会把当前输入保存到 `SharedPreferences`，下次打开页面优先恢复上次内容。
 
 ## 功能
 

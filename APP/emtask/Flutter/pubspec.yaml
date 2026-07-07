@@ -74,6 +74,7 @@ flutter:
   assets:
     - assets/icons/emtask_icon.png
     - assets/icons/emtask_icon.svg
+    - assets/updater/info.Dat
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/assets-and-images/#resolution-aware
