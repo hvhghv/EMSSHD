@@ -111,7 +111,7 @@ Linux musl 构建会同时产出动态链接和静态链接两套包，包名中
 - `use_conpty`
 - `auth_backend`：`internal` 或 `passwd`。`passwd` 仅面向 Linux/POSIX 系统密码认证。
 - `panel_enabled`：是否开启全局面板端口，默认开启。
-- `panel_listen_address`：面板监听地址，默认 `127.0.0.1`。
+- `panel_listen_address`：面板监听地址，默认 `127.0.0.1`；可用逗号分隔最多 8 个地址，例如 `127.0.0.1,192.168.1.1`，同一个 `panel_port` 会分别绑定到这些地址。
 - `panel_port`：面板监听端口，默认 `6024`；开启 `panel_enabled` 时不能与任务端口冲突。
 - `panel_auth`：面板鉴权模式，默认 `token+otp`。可选：`none`、`token`、`otp`、`both`/`token+otp`。
 - `panel_auth_file`：面板鉴权材料文件，默认 `emtask_panel_auth.keys`，相对路径按配置文件目录解析。启用 token/OTP 后，`panel_token` 和 `panel_otp_secret` 放在该独立密钥文件中；若文件不存在或缺少当前鉴权模式需要的字段，会自动随机生成并写回该文件。请求可通过 `Authorization: Bearer <token>`、`X-Panel-Token`、查询参数 `?token=` 以及 `X-Panel-OTP`/`?otp=` 提供凭据。
@@ -119,7 +119,7 @@ Linux musl 构建会同时产出动态链接和静态链接两套包，包名中
 - `panel_qr_file`：面板导入二维码 SVG 文件，默认 `emtask_panel_connect.svg`，相对路径按配置文件目录解析。启用 token/OTP 后会按 `panel_qr_mode` 创建或更新，二维码 payload 会内置面板主机、端口、鉴权模式、token 和 OTP 参数。
 - `panel_tasks_db_file`：动态子任务 SQLite 文件，默认 `emtask_tasks.sqlite3`，相对路径按配置文件目录解析。Flutter 面板添加的子任务会写入该文件，服务端重启后会自动载入。若未声明任何 `[task ...]`，只要 `panel_enabled = true` 仍可启动面板并通过 Flutter 动态添加任务。
 - `panel_qr_mode`：二维码生成策略，默认 `always`。可选：`disabled`/`none` 表示不生成；`if_missing`/`missing` 表示仅文件不存在时生成，已存在不覆盖；`always`/`overwrite` 表示每次启动都重新生成并覆盖旧文件。
-- `panel_qr_host`：写入二维码的主机名/IP，默认 `127.0.0.1`；为空时使用 `panel_listen_address`，通配地址会回退为 `127.0.0.1`。
+- `panel_qr_host`：写入二维码的主机名/IP，默认 `127.0.0.1`；为空时使用 `panel_listen_address` 的第一个非通配地址，通配地址会回退为 `127.0.0.1`。
 - `panel_qr_include_username`：是否把全局 SSH `username` 写入二维码，默认关闭。开启后 Flutter 扫码会自动填入面板默认 SSH 用户名。
 - `panel_qr_include_password`：是否把全局 SSH `password` 写入二维码，默认关闭。开启后 Flutter 扫码会自动填入面板默认 SSH 密码；二维码文件需按密码级别保护。
 - `panel_otp_digits`：TOTP 位数，默认 `6`。
@@ -130,7 +130,7 @@ Linux musl 构建会同时产出动态链接和静态链接两套包，包名中
 
 任务段使用 `[task name]` 声明。任务键：
 
-- `listen_address`
+- `listen_address`：任务监听地址；可用逗号分隔最多 8 个地址，例如 `127.0.0.1,192.168.1.1`，同一个 `port` 会分别绑定到这些地址。
 - `port`
 - `command`
 - `working_dir`：任务启动工作目录；可用绝对路径，或相对 `emtask.conf` 所在目录。兼容别名：`workdir`、`cwd`。
@@ -156,6 +156,7 @@ bind_retry = true
 bind_retry_max_sec = 300
 panel_enabled = true
 panel_listen_address = 127.0.0.1
+# panel_listen_address = 127.0.0.1,192.168.1.1
 panel_port = 6024
 panel_auth = token+otp
 # panel_token 和 panel_otp_secret 不写在 emtask.conf；首次启动会自动生成到 panel_auth_file。

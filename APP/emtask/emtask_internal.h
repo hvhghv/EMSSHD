@@ -24,6 +24,7 @@
 #define EMTASK_MAX_RESTART_HISTORY 64u
 #define EMTASK_MAX_TASKS 32u
 #define EMTASK_MAX_TASK_NAME 64u
+#define EMTASK_MAX_LISTEN_ADDRESSES 8u
 #define EMTASK_DEFAULT_PORT 2222u
 #define EMTASK_DEFAULT_TIMEOUT_MS 30000u
 #define EMTASK_DEFAULT_MAX_WORKERS 8u
@@ -229,14 +230,17 @@ typedef struct emtask_term {
 typedef struct emtask_app {
     emtask_config_t config;
     ssh_tcp_platform_t tcp;
-    ssh_tcp_listener_t panel_listener;
+    ssh_tcp_listener_t panel_listeners[EMTASK_MAX_LISTEN_ADDRESSES];
+    char panel_listener_addresses[EMTASK_MAX_LISTEN_ADDRESSES][EMTASK_MAX_TEXT];
     emtask_worker_pool_t pool;
     emtask_mutex_t task_lock;
     struct emtask_task *tasks;
     size_t task_count;
     size_t task_capacity;
+    size_t panel_listener_count;
     uint64_t started_ms;
     int panel_listener_open;
+    int panel_listener_complete;
     int task_lock_initialized;
     uint8_t hostkey_private[EMTASK_MAX_HOSTKEY_PRIVATE];
     size_t hostkey_private_len;
@@ -250,11 +254,14 @@ typedef struct emtask_app {
 typedef struct emtask_task {
     emtask_app_t *app;
     emtask_task_config_t config;
-    ssh_tcp_listener_t listener;
+    ssh_tcp_listener_t listeners[EMTASK_MAX_LISTEN_ADDRESSES];
+    char listener_addresses[EMTASK_MAX_LISTEN_ADDRESSES][EMTASK_MAX_TEXT];
     emtask_session_manager_t session_manager;
     emtask_term_t term;
+    size_t listener_count;
     int initialized;
     int listener_open;
+    int listener_complete;
     int stop_requested;
     int deleted;
     int listener_thread_running;

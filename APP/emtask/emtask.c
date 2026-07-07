@@ -150,6 +150,127 @@ static int emtask_key_equals(const char *lhs, const char *rhs)
     return emtask_platform_key_equals(lhs, rhs);
 }
 
+static int emtask_listen_address_is_wildcard(const char *address)
+{
+    return address != NULL &&
+           (emtask_key_equals(address, "0.0.0.0") ||
+            emtask_key_equals(address, "::") ||
+            emtask_key_equals(address, "[::]") ||
+            emtask_key_equals(address, "*"));
+}
+
+static int emtask_listen_address_pair_conflicts(const char *lhs, const char *rhs)
+{
+    if (lhs == NULL || rhs == NULL || lhs[0] == '\0' || rhs[0] == '\0') {
+        return 0;
+    }
+    return emtask_key_equals(lhs, rhs) ||
+           emtask_listen_address_is_wildcard(lhs) ||
+           emtask_listen_address_is_wildcard(rhs);
+}
+
+static int emtask_listen_addresses_conflict(
+    const char *lhs_addresses,
+    const char *lhs_default,
+    const char *rhs_addresses,
+    const char *rhs_default)
+{
+    char lhs_copy[EMTASK_MAX_TEXT];
+    char rhs_copy[EMTASK_MAX_TEXT];
+    char *lhs_token;
+    char *lhs_next;
+    const char *lhs_text;
+    const char *rhs_text;
+
+    lhs_text = lhs_addresses != NULL && lhs_addresses[0] != '\0' ? lhs_addresses : lhs_default;
+    rhs_text = rhs_addresses != NULL && rhs_addresses[0] != '\0' ? rhs_addresses : rhs_default;
+    if (lhs_text == NULL || rhs_text == NULL) {
+        return 0;
+    }
+    if (emtask_copy_text(lhs_copy, sizeof(lhs_copy), lhs_text) != SSH_OK) {
+        return 1;
+    }
+    lhs_token = lhs_copy;
+    while (lhs_token != NULL) {
+        char *comma;
+        char *trimmed_lhs;
+        char *rhs_token;
+
+        comma = strchr(lhs_token, ',');
+        lhs_next = comma != NULL ? comma + 1 : NULL;
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+        trimmed_lhs = emtask_trim(lhs_token);
+        if (trimmed_lhs[0] != '\0') {
+            if (emtask_copy_text(rhs_copy, sizeof(rhs_copy), rhs_text) != SSH_OK) {
+                return 1;
+            }
+            rhs_token = rhs_copy;
+            while (rhs_token != NULL) {
+                char *rhs_comma;
+                char *rhs_next;
+                char *trimmed_rhs;
+
+                rhs_comma = strchr(rhs_token, ',');
+                rhs_next = rhs_comma != NULL ? rhs_comma + 1 : NULL;
+                if (rhs_comma != NULL) {
+                    *rhs_comma = '\0';
+                }
+                trimmed_rhs = emtask_trim(rhs_token);
+                if (emtask_listen_address_pair_conflicts(trimmed_lhs, trimmed_rhs)) {
+                    return 1;
+                }
+                rhs_token = rhs_next;
+            }
+        }
+        lhs_token = lhs_next;
+    }
+    return 0;
+}
+
+static int emtask_copy_panel_qr_host(const emtask_global_config_t *global, char *out, size_t out_capacity)
+{
+    char address_copy[EMTASK_MAX_TEXT];
+    char *token;
+    const char *source;
+
+    if (out == NULL || out_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (global == NULL) {
+        return emtask_copy_text(out, out_capacity, "127.0.0.1");
+    }
+    if (global->panel_qr_host[0] != '\0') {
+        if (emtask_listen_address_is_wildcard(global->panel_qr_host)) {
+            return emtask_copy_text(out, out_capacity, "127.0.0.1");
+        }
+        return emtask_copy_text(out, out_capacity, global->panel_qr_host);
+    }
+    source = global->panel_listen_address[0] != '\0' ? global->panel_listen_address : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
+    if (emtask_copy_text(address_copy, sizeof(address_copy), source) != SSH_OK) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    token = address_copy;
+    while (token != NULL) {
+        char *comma;
+        char *next;
+        char *trimmed;
+
+        comma = strchr(token, ',');
+        next = comma != NULL ? comma + 1 : NULL;
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+        trimmed = emtask_trim(token);
+        if (trimmed[0] != '\0' && !emtask_listen_address_is_wildcard(trimmed)) {
+            return emtask_copy_text(out, out_capacity, trimmed);
+        }
+        token = next;
+    }
+    return emtask_copy_text(out, out_capacity, "127.0.0.1");
+}
+
 static int emtask_parse_port(const char *text, uint16_t *port_out)
 {
     unsigned long value;
@@ -989,16 +1110,11 @@ static int emtask_load_config(const char *path, emtask_config_t *config)
             }
         }
         if (config->global.panel_enabled && config->tasks[i].port == config->global.panel_port) {
-            const char *task_addr = config->tasks[i].listen_address[0] != '\0' ? config->tasks[i].listen_address : "0.0.0.0";
-            const char *panel_addr = config->global.panel_listen_address[0] != '\0'
-                                         ? config->global.panel_listen_address
-                                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
-
-            if (emtask_key_equals(task_addr, panel_addr) ||
-                emtask_key_equals(task_addr, "0.0.0.0") ||
-                emtask_key_equals(panel_addr, "0.0.0.0") ||
-                emtask_key_equals(task_addr, "::") ||
-                emtask_key_equals(panel_addr, "::")) {
+            if (emtask_listen_addresses_conflict(
+                    config->tasks[i].listen_address,
+                    "0.0.0.0",
+                    config->global.panel_listen_address,
+                    EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS)) {
                 return SSH_ERR_INVALID_ARGUMENT;
             }
         }
@@ -1972,27 +2088,11 @@ static int emtask_panel_payload_append_field(
     return status;
 }
 
-static const char *emtask_panel_qr_host(const emtask_global_config_t *global)
-{
-    const char *host;
-
-    if (global == NULL) {
-        return "127.0.0.1";
-    }
-    host = global->panel_qr_host[0] != '\0' ? global->panel_qr_host : global->panel_listen_address;
-    if (host[0] == '\0' ||
-        emtask_key_equals(host, "0.0.0.0") ||
-        emtask_key_equals(host, "::") ||
-        emtask_key_equals(host, "[::]")) {
-        return "127.0.0.1";
-    }
-    return host;
-}
-
 static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *out, size_t out_capacity)
 {
     const emtask_global_config_t *global;
     const emtask_task_config_t *first_task;
+    char qr_host[EMTASK_MAX_TEXT];
     char value[64];
     size_t len;
     int status;
@@ -2015,7 +2115,11 @@ static int emtask_panel_build_qr_payload(const emtask_config_t *config, char *ou
             return status;
         }
     }
-    status = emtask_panel_payload_append_field(out, out_capacity, &len, "h", emtask_panel_qr_host(global), 0u);
+    status = emtask_copy_panel_qr_host(global, qr_host, sizeof(qr_host));
+    if (status != SSH_OK) {
+        return status;
+    }
+    status = emtask_panel_payload_append_field(out, out_capacity, &len, "h", qr_host, 0u);
     if (status != SSH_OK) {
         return status;
     }
@@ -4622,13 +4726,13 @@ static int emtask_task_conflicts_with_panel(const emtask_global_config_t *global
     if (global == NULL || task == NULL || !global->panel_enabled || task->port != global->panel_port) {
         return 0;
     }
-    task_addr = task->listen_address[0] != '\0' ? task->listen_address : "0.0.0.0";
-    panel_addr = global->panel_listen_address[0] != '\0' ? global->panel_listen_address : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
-    return emtask_key_equals(task_addr, panel_addr) ||
-           emtask_key_equals(task_addr, "0.0.0.0") ||
-           emtask_key_equals(panel_addr, "0.0.0.0") ||
-           emtask_key_equals(task_addr, "::") ||
-           emtask_key_equals(panel_addr, "::");
+    task_addr = task->listen_address[0] != '\0' ? task->listen_address : NULL;
+    panel_addr = global->panel_listen_address[0] != '\0' ? global->panel_listen_address : NULL;
+    return emtask_listen_addresses_conflict(
+        task_addr,
+        "0.0.0.0",
+        panel_addr,
+        EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS);
 }
 
 static int emtask_validate_new_task_locked(const emtask_app_t *app, const emtask_task_config_t *task)
@@ -5165,8 +5269,15 @@ static int emtask_panel_build_status_json(emtask_app_t *app, int tasks_only, cha
         } else {
             emtask_panel_append_json_string(&json, "always");
         }
-        emtask_panel_appendf(&json, ",\"qr_host\":");
-        emtask_panel_append_json_string(&json, emtask_panel_qr_host(&app->config.global));
+        {
+            char qr_host[EMTASK_MAX_TEXT];
+
+            if (emtask_copy_panel_qr_host(&app->config.global, qr_host, sizeof(qr_host)) != SSH_OK) {
+                qr_host[0] = '\0';
+            }
+            emtask_panel_appendf(&json, ",\"qr_host\":");
+            emtask_panel_append_json_string(&json, qr_host[0] != '\0' ? qr_host : "127.0.0.1");
+        }
         emtask_panel_appendf(
             &json,
             ",\"otp_digits\":%u,\"otp_step_sec\":%u,\"otp_window\":%u}",
@@ -5466,36 +5577,320 @@ static int emtask_bind_retry_enabled(const emtask_app_t *app)
     return app != NULL && app->config.global.bind_retry_enabled;
 }
 
+static void emtask_close_listener_set(
+    ssh_tcp_platform_t *tcp,
+    ssh_tcp_listener_t *listeners,
+    char listener_addresses[][EMTASK_MAX_TEXT],
+    size_t *listener_count)
+{
+    size_t i;
+    size_t count;
+
+    if (listeners == NULL || listener_count == NULL) {
+        return;
+    }
+    count = *listener_count;
+    for (i = 0u; i < count; ++i) {
+        if (listeners[i].open) {
+            (void)ssh_tcp_listener_close(tcp, &listeners[i]);
+        }
+        if (listener_addresses != NULL) {
+            listener_addresses[i][0] = '\0';
+        }
+    }
+    *listener_count = 0u;
+}
+
+static int emtask_listener_set_has_address(
+    const ssh_tcp_listener_t *listeners,
+    char listener_addresses[][EMTASK_MAX_TEXT],
+    size_t listener_count,
+    const char *address)
+{
+    size_t i;
+
+    if (listeners == NULL || listener_addresses == NULL || address == NULL) {
+        return 0;
+    }
+    for (i = 0u; i < listener_count; ++i) {
+        if (listeners[i].open && strcmp(listener_addresses[i], address) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void emtask_listener_set_note_failed(
+    const char *address,
+    int status,
+    char *failed_address,
+    size_t failed_address_capacity,
+    int *last_status_out)
+{
+    if (failed_address != NULL && failed_address_capacity != 0u && failed_address[0] == '\0') {
+        (void)emtask_copy_text(failed_address, failed_address_capacity, address != NULL ? address : "");
+    }
+    if (last_status_out != NULL) {
+        *last_status_out = status;
+    }
+}
+
+static int emtask_ensure_listener_set(
+    ssh_tcp_platform_t *tcp,
+    const char *address_list,
+    const char *default_host,
+    const char *default_display,
+    uint16_t port,
+    int backlog,
+    ssh_tcp_listener_t *listeners,
+    char listener_addresses[][EMTASK_MAX_TEXT],
+    size_t listener_capacity,
+    size_t *listener_count_out,
+    int *complete_out,
+    char *failed_address,
+    size_t failed_address_capacity,
+    int *last_status_out)
+{
+    char address_copy[EMTASK_MAX_TEXT];
+    char desired_addresses[EMTASK_MAX_LISTEN_ADDRESSES][EMTASK_MAX_TEXT];
+    char *token;
+    size_t desired_count;
+    size_t missing_count;
+    size_t i;
+    int overflow;
+    int last_status;
+    int status;
+
+    if (tcp == NULL || listeners == NULL || listener_addresses == NULL || listener_count_out == NULL || listener_capacity == 0u) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (failed_address != NULL && failed_address_capacity != 0u) {
+        failed_address[0] = '\0';
+    }
+    if (complete_out != NULL) {
+        *complete_out = 0;
+    }
+    if (last_status_out != NULL) {
+        *last_status_out = SSH_OK;
+    }
+
+    desired_count = 0u;
+    missing_count = 0u;
+    overflow = 0;
+    last_status = SSH_OK;
+
+    if (address_list == NULL || address_list[0] == '\0') {
+        status = emtask_copy_text(desired_addresses[desired_count], sizeof(desired_addresses[desired_count]), default_display);
+        if (status != SSH_OK) {
+            return status;
+        }
+        ++desired_count;
+    } else {
+        status = emtask_copy_text(address_copy, sizeof(address_copy), address_list);
+        if (status != SSH_OK) {
+            return status;
+        }
+        token = address_copy;
+        while (token != NULL) {
+            char *comma;
+            char *next;
+            char *host;
+
+            comma = strchr(token, ',');
+            next = comma != NULL ? comma + 1 : NULL;
+            if (comma != NULL) {
+                *comma = '\0';
+            }
+            host = emtask_trim(token);
+            if (host[0] != '\0') {
+                if (desired_count >= listener_capacity) {
+                    overflow = 1;
+                    emtask_listener_set_note_failed(
+                        host,
+                        SSH_ERR_BUFFER_TOO_SMALL,
+                        failed_address,
+                        failed_address_capacity,
+                        &last_status);
+                } else {
+                    status = emtask_copy_text(desired_addresses[desired_count], sizeof(desired_addresses[desired_count]), host);
+                    if (status != SSH_OK) {
+                        return status;
+                    }
+                    ++desired_count;
+                }
+            }
+            token = next;
+        }
+    }
+
+    if (desired_count == 0u) {
+        emtask_listener_set_note_failed(
+            default_display,
+            SSH_ERR_INVALID_ARGUMENT,
+            failed_address,
+            failed_address_capacity,
+            &last_status);
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    for (i = 0u; i < desired_count; ++i) {
+        const char *listen_host;
+
+        if (emtask_listener_set_has_address(listeners, listener_addresses, *listener_count_out, desired_addresses[i])) {
+            continue;
+        }
+        if (*listener_count_out >= listener_capacity) {
+            ++missing_count;
+            emtask_listener_set_note_failed(
+                desired_addresses[i],
+                SSH_ERR_BUFFER_TOO_SMALL,
+                failed_address,
+                failed_address_capacity,
+                &last_status);
+            continue;
+        }
+        listen_host = (address_list == NULL || address_list[0] == '\0') ? default_host : desired_addresses[i];
+        status = ssh_tcp_listen(tcp, listen_host, port, backlog, &listeners[*listener_count_out]);
+        if (status != SSH_OK) {
+            ++missing_count;
+            emtask_listener_set_note_failed(
+                desired_addresses[i],
+                status,
+                failed_address,
+                failed_address_capacity,
+                &last_status);
+            continue;
+        }
+        status = emtask_copy_text(
+            listener_addresses[*listener_count_out],
+            sizeof(listener_addresses[*listener_count_out]),
+            desired_addresses[i]);
+        if (status != SSH_OK) {
+            (void)ssh_tcp_listener_close(tcp, &listeners[*listener_count_out]);
+            ++missing_count;
+            emtask_listener_set_note_failed(
+                desired_addresses[i],
+                status,
+                failed_address,
+                failed_address_capacity,
+                &last_status);
+            continue;
+        }
+        ++(*listener_count_out);
+    }
+
+    if (overflow) {
+        ++missing_count;
+    }
+    if (complete_out != NULL) {
+        *complete_out = missing_count == 0u;
+    }
+    if (last_status_out != NULL) {
+        *last_status_out = last_status;
+    }
+    if (*listener_count_out == 0u) {
+        return last_status != SSH_OK ? last_status : SSH_ERR_INVALID_ARGUMENT;
+    }
+    return SSH_OK;
+}
+
+static int emtask_accept_listener_set(
+    ssh_tcp_platform_t *tcp,
+    ssh_tcp_listener_t *listeners,
+    size_t listener_count,
+    uint32_t timeout_ms,
+    ssh_tcp_conn_t *accepted)
+{
+    size_t i;
+    uint32_t per_listener_timeout;
+
+    if (tcp == NULL || listeners == NULL || listener_count == 0u || accepted == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (listener_count == 1u) {
+        int wait_status;
+
+        if (timeout_ms == 0u) {
+            return ssh_tcp_accept(tcp, &listeners[0], accepted, 0u);
+        }
+        if (!listeners[0].open) {
+            return SSH_ERR_INVALID_ARGUMENT;
+        }
+        wait_status = emtask_platform_net_wait(listeners[0].socket_handle, 0, timeout_ms);
+        if (wait_status > 0) {
+            return ssh_tcp_accept(tcp, &listeners[0], accepted, 1u);
+        }
+        if (wait_status < 0) {
+            return SSH_ERR_PLATFORM;
+        }
+        return EMTASK_NET_IO_TIMEOUT;
+    }
+    per_listener_timeout = timeout_ms == 0u ? 50u : timeout_ms;
+    for (i = 0u; i < listener_count; ++i) {
+        int wait_status;
+
+        if (!listeners[i].open) {
+            continue;
+        }
+        wait_status = emtask_platform_net_wait(listeners[i].socket_handle, 0, per_listener_timeout);
+        if (wait_status > 0) {
+            return ssh_tcp_accept(tcp, &listeners[i], accepted, 1u);
+        }
+        if (wait_status < 0) {
+            return SSH_ERR_PLATFORM;
+        }
+    }
+    return EMTASK_NET_IO_TIMEOUT;
+}
+
 static int emtask_panel_open_listener(emtask_app_t *app)
 {
-    const char *listen_address;
+    char failed_address[EMTASK_MAX_TEXT];
+    int bind_status;
+    int complete;
     int status;
 
     if (app == NULL || !app->config.global.panel_enabled) {
         return SSH_OK;
     }
-    if (app->panel_listener_open) {
+    if (app->panel_listener_complete) {
         return SSH_OK;
     }
 
-    listen_address = app->config.global.panel_listen_address[0] != '\0'
-                         ? app->config.global.panel_listen_address
-                         : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS;
-    status = ssh_tcp_listen(
+    bind_status = SSH_OK;
+    complete = 0;
+    status = emtask_ensure_listener_set(
         &app->tcp,
-        listen_address,
+        app->config.global.panel_listen_address,
+        EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
+        EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
         app->config.global.panel_port,
         16,
-        &app->panel_listener);
+        app->panel_listeners,
+        app->panel_listener_addresses,
+        EMTASK_MAX_LISTEN_ADDRESSES,
+        &app->panel_listener_count,
+        &complete,
+        failed_address,
+        sizeof(failed_address),
+        &bind_status);
+    app->panel_listener_open = app->panel_listener_count != 0u;
+    app->panel_listener_complete = complete;
     if (status != SSH_OK) {
         emtask_logf(
             "panel listen failed on %s:%u: %s",
-            listen_address,
+            failed_address[0] != '\0' ? failed_address : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
             (unsigned)app->config.global.panel_port,
             ssh_status_string(status));
         return status;
     }
-    app->panel_listener_open = 1;
+    if (!app->panel_listener_complete) {
+        emtask_logf(
+            "panel listener partially open; failed on %s:%u: %s",
+            failed_address[0] != '\0' ? failed_address : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
+            (unsigned)app->config.global.panel_port,
+            ssh_status_string(bind_status));
+    }
     return SSH_OK;
 }
 
@@ -5503,16 +5898,24 @@ void emtask_panel_thread_main(emtask_app_t *app)
 {
     int status;
     unsigned bind_attempt;
+    uint64_t next_bind_retry_ms;
 
     if (app == NULL) {
         return;
     }
     bind_attempt = 0u;
+    next_bind_retry_ms = 0u;
 
     for (;;) {
         ssh_tcp_conn_t accepted;
 
-        if (!app->panel_listener_open) {
+        if (!app->panel_listener_complete) {
+            uint64_t now_ms;
+
+            now_ms = emtask_platform_monotonic_ms();
+            if (app->panel_listener_open && next_bind_retry_ms != 0u && now_ms < next_bind_retry_ms) {
+                goto panel_accept;
+            }
             status = emtask_panel_open_listener(app);
             if (status != SSH_OK) {
                 unsigned delay_sec;
@@ -5530,21 +5933,48 @@ void emtask_panel_thread_main(emtask_app_t *app)
                 emtask_bind_retry_sleep(&app->config.global, &bind_attempt);
                 continue;
             }
-            if (bind_attempt != 0u) {
-                emtask_logf(
-                    "panel listener recovered on %s:%u",
-                    app->config.global.panel_listen_address[0] != '\0'
-                        ? app->config.global.panel_listen_address
-                        : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
-                    (unsigned)app->config.global.panel_port);
+            if (app->panel_listener_complete) {
+                if (bind_attempt != 0u) {
+                    emtask_logf(
+                        "panel listener recovered on %s:%u",
+                        app->config.global.panel_listen_address[0] != '\0'
+                            ? app->config.global.panel_listen_address
+                            : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,
+                        (unsigned)app->config.global.panel_port);
+                }
                 bind_attempt = 0u;
+                next_bind_retry_ms = 0u;
+            } else if (!emtask_bind_retry_enabled(app)) {
+                emtask_logf("panel listener continuing with partial bind; bind retry disabled");
+                app->panel_listener_complete = 1;
+                bind_attempt = 0u;
+                next_bind_retry_ms = 0u;
+            } else {
+                unsigned delay_sec;
+
+                delay_sec = emtask_bind_retry_delay_sec(&app->config.global, bind_attempt);
+                emtask_logf(
+                    "panel listen retry for missing address in %u second(s), attempt=%u, max=%us",
+                    delay_sec,
+                    bind_attempt + 1u,
+                    emtask_bind_retry_max_sec(&app->config.global));
+                ++bind_attempt;
+                next_bind_retry_ms = emtask_platform_monotonic_ms() + (uint64_t)delay_sec * 1000u;
             }
         }
 
+panel_accept:
         memset(&accepted, 0, sizeof(accepted));
-        status = ssh_tcp_accept(&app->tcp, &app->panel_listener, &accepted, 0u);
+        status = emtask_accept_listener_set(
+            &app->tcp,
+            app->panel_listeners,
+            app->panel_listener_count,
+            app->panel_listener_complete ? 0u : 250u,
+            &accepted);
         if (status != SSH_OK) {
-            emtask_logf("panel accept failed: %s", ssh_status_string(status));
+            if (status != EMTASK_NET_IO_TIMEOUT) {
+                emtask_logf("panel accept failed: %s", ssh_status_string(status));
+            }
             continue;
         }
         status = emtask_panel_handle_connection(app, &accepted);
@@ -7235,34 +7665,55 @@ static int emtask_start_worker_thread(emtask_worker_t *worker)
 static int emtask_task_open_listener(emtask_task_t *task)
 {
     emtask_app_t *app;
-    const char *listen_address;
+    char failed_address[EMTASK_MAX_TEXT];
+    int bind_status;
+    int complete;
     int status;
 
     if (task == NULL || task->app == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
-    if (task->listener_open) {
+    if (task->listener_complete) {
         return SSH_OK;
     }
 
     app = task->app;
-    listen_address = task->config.listen_address[0] != '\0' ? task->config.listen_address : NULL;
-    status = ssh_tcp_listen(
+    bind_status = SSH_OK;
+    complete = 0;
+    status = emtask_ensure_listener_set(
         &app->tcp,
-        listen_address,
+        task->config.listen_address,
+        NULL,
+        "0.0.0.0",
         task->config.port,
         (int)app->config.global.max_workers,
-        &task->listener);
+        task->listeners,
+        task->listener_addresses,
+        EMTASK_MAX_LISTEN_ADDRESSES,
+        &task->listener_count,
+        &complete,
+        failed_address,
+        sizeof(failed_address),
+        &bind_status);
+    task->listener_open = task->listener_count != 0u;
+    task->listener_complete = complete;
     if (status != SSH_OK) {
         emtask_logf(
             "task %s listen failed on %s:%u: %s",
             task->config.name,
-            listen_address != NULL ? listen_address : "0.0.0.0",
+            failed_address[0] != '\0' ? failed_address : "0.0.0.0",
             (unsigned)task->config.port,
             ssh_status_string(status));
         return status;
     }
-    task->listener_open = 1;
+    if (!task->listener_complete) {
+        emtask_logf(
+            "task %s listener partially open; failed on %s:%u: %s",
+            task->config.name,
+            failed_address[0] != '\0' ? failed_address : "0.0.0.0",
+            (unsigned)task->config.port,
+            ssh_status_string(bind_status));
+    }
     return SSH_OK;
 }
 
@@ -7270,11 +7721,13 @@ void emtask_listener_thread_main(emtask_task_t *task)
 {
     int status;
     unsigned bind_attempt;
+    uint64_t next_bind_retry_ms;
 
     if (task == NULL || task->app == NULL) {
         return;
     }
     bind_attempt = 0u;
+    next_bind_retry_ms = 0u;
     task->listener_thread_running = 1;
 
     for (;;) {
@@ -7284,7 +7737,13 @@ void emtask_listener_thread_main(emtask_task_t *task)
         if (task->stop_requested || task->deleted) {
             break;
         }
-        if (!task->listener_open) {
+        if (!task->listener_complete) {
+            uint64_t now_ms;
+
+            now_ms = emtask_platform_monotonic_ms();
+            if (task->listener_open && next_bind_retry_ms != 0u && now_ms < next_bind_retry_ms) {
+                goto task_accept;
+            }
             status = emtask_task_open_listener(task);
             if (status != SSH_OK) {
                 unsigned delay_sec;
@@ -7306,25 +7765,53 @@ void emtask_listener_thread_main(emtask_task_t *task)
                 emtask_bind_retry_sleep(&task->app->config.global, &bind_attempt);
                 continue;
             }
-            if (bind_attempt != 0u) {
-                emtask_logf(
-                    "task %s listener recovered on %s:%u",
-                    task->config.name,
-                    task->config.listen_address[0] != '\0' ? task->config.listen_address : "0.0.0.0",
-                    (unsigned)task->config.port);
+            if (task->listener_complete) {
+                if (bind_attempt != 0u) {
+                    emtask_logf(
+                        "task %s listener recovered on %s:%u",
+                        task->config.name,
+                        task->config.listen_address[0] != '\0' ? task->config.listen_address : "0.0.0.0",
+                        (unsigned)task->config.port);
+                }
                 bind_attempt = 0u;
+                next_bind_retry_ms = 0u;
+            } else if (!emtask_bind_retry_enabled(task->app)) {
+                emtask_logf("task %s listener continuing with partial bind; bind retry disabled", task->config.name);
+                task->listener_complete = 1;
+                bind_attempt = 0u;
+                next_bind_retry_ms = 0u;
+            } else {
+                unsigned delay_sec;
+
+                delay_sec = emtask_bind_retry_delay_sec(&task->app->config.global, bind_attempt);
+                emtask_logf(
+                    "task %s listen retry for missing address in %u second(s), attempt=%u, max=%us",
+                    task->config.name,
+                    delay_sec,
+                    bind_attempt + 1u,
+                    emtask_bind_retry_max_sec(&task->app->config.global));
+                ++bind_attempt;
+                next_bind_retry_ms = emtask_platform_monotonic_ms() + (uint64_t)delay_sec * 1000u;
             }
         }
 
+task_accept:
         memset(&accepted, 0, sizeof(accepted));
         emtask_worker_pool_reserve(&task->app->pool);
-        status = ssh_tcp_accept(&task->app->tcp, &task->listener, &accepted, 0u);
+        status = emtask_accept_listener_set(
+            &task->app->tcp,
+            task->listeners,
+            task->listener_count,
+            task->listener_complete ? 0u : 250u,
+            &accepted);
         if (status != SSH_OK) {
             emtask_worker_pool_release(&task->app->pool);
             if (task->stop_requested || task->deleted) {
                 break;
             }
-            emtask_logf("task %s accept failed: %s", task->config.name, ssh_status_string(status));
+            if (status != EMTASK_NET_IO_TIMEOUT) {
+                emtask_logf("task %s accept failed: %s", task->config.name, ssh_status_string(status));
+            }
             continue;
         }
 
@@ -7425,8 +7912,9 @@ static void emtask_task_deinit(emtask_app_t *app, emtask_task_t *task)
     }
     task->stop_requested = 1;
     if (task->listener_open) {
-        (void)ssh_tcp_listener_close(app != NULL ? &app->tcp : NULL, &task->listener);
+        emtask_close_listener_set(app != NULL ? &app->tcp : NULL, task->listeners, task->listener_addresses, &task->listener_count);
         task->listener_open = 0;
+        task->listener_complete = 0;
     }
     emtask_term_deinit(&task->term);
     emtask_session_manager_deinit(&task->session_manager);
@@ -7458,8 +7946,9 @@ static void emtask_panel_deinit(emtask_app_t *app)
     if (app == NULL || !app->panel_listener_open) {
         return;
     }
-    (void)ssh_tcp_listener_close(&app->tcp, &app->panel_listener);
+    emtask_close_listener_set(&app->tcp, app->panel_listeners, app->panel_listener_addresses, &app->panel_listener_count);
     app->panel_listener_open = 0;
+    app->panel_listener_complete = 0;
 }
 
 static void emtask_usage(const char *program)
@@ -7582,7 +8071,9 @@ int main(int argc, char **argv)
         printf(
             "  task %s %s on %s:%u, restart_limit=%u/%us\n",
             app.tasks[i].config.name,
-            app.tasks[i].listener_open ? "listening" : "listener pending",
+            app.tasks[i].listener_open
+                ? (app.tasks[i].listener_complete ? "listening" : "partially listening")
+                : "listener pending",
             app.tasks[i].config.listen_address[0] != '\0' ? app.tasks[i].config.listen_address : "0.0.0.0",
             (unsigned)app.tasks[i].config.port,
             app.tasks[i].config.restart_limit,
@@ -7591,7 +8082,9 @@ int main(int argc, char **argv)
     if (app.config.global.panel_enabled) {
         printf(
             "  panel %s on %s:%u\n",
-            app.panel_listener_open ? "listening" : "listener pending",
+            app.panel_listener_open
+                ? (app.panel_listener_complete ? "listening" : "partially listening")
+                : "listener pending",
             app.config.global.panel_listen_address[0] != '\0'
                 ? app.config.global.panel_listen_address
                 : EMTASK_DEFAULT_PANEL_LISTEN_ADDRESS,

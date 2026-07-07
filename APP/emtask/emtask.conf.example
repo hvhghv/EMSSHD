@@ -12,8 +12,10 @@ authorized_keys_file = authorized_keys
 # bind_retry_max_sec = 300
 # auth_backend = internal
 # HTTP/JSON panel. Enabled by default; keep bound to 127.0.0.1 unless protected externally.
+# Multiple listen addresses can be separated with commas, up to 8 addresses.
 # panel_enabled = true
 # panel_listen_address = 127.0.0.1
+# panel_listen_address = 127.0.0.1,192.168.1.1
 # panel_port = 6024
 # panel_auth = none
 # panel_auth = token
@@ -46,4 +48,3 @@ authorized_keys_file = authorized_keys
 # panel_otp_window = 1
 # Linux only: use /etc/passwd + /etc/shadow password verification instead of password above.
 # auth_backend = passwd
-
