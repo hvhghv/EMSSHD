@@ -8,6 +8,7 @@ class EmTaskProfileStore {
   static const _profilesKey = 'emtask_client.sessions.v1';
   static const _panelsKey = 'emtask_client.panels.v1';
   static const _settingsKey = 'emtask_client.settings.v1';
+  static const _hiddenPanelTasksKey = 'emtask_client.hidden_panel_tasks.v1';
 
   Future<List<EmTaskSessionProfile>> loadProfiles() async {
     final prefs = await SharedPreferences.getInstance();
@@ -89,5 +90,27 @@ class EmTaskProfileStore {
   Future<void> saveSettings(EmTaskClientSettings settings) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_settingsKey, settings.encode());
+  }
+
+  Future<Set<String>> loadHiddenPanelTasks() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_hiddenPanelTasksKey);
+    if (saved == null || saved.isEmpty) {
+      return <String>{};
+    }
+    return saved
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toSet();
+  }
+
+  Future<void> saveHiddenPanelTasks(Set<String> hiddenTaskKeys) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = hiddenTaskKeys
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false)
+      ..sort();
+    await prefs.setStringList(_hiddenPanelTasksKey, saved);
   }
 }

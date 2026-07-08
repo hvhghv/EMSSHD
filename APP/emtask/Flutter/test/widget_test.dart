@@ -173,6 +173,73 @@ void main() {
     expect(panels, hasLength(1));
   });
 
+  test('hidden panel tasks persist locally', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final store = EmTaskProfileStore();
+
+    await store.saveHiddenPanelTasks(<String>{'panel-a/task-a'});
+    final restored = await store.loadHiddenPanelTasks();
+
+    expect(restored, <String>{'panel-a/task-a'});
+  });
+
+  testWidgets('panel tasks can be hidden locally and shown again',
+      (WidgetTester tester) async {
+    final panel = EmTaskPanelProfile.defaults(
+      id: 'panel-test',
+      name: '测试面板',
+      host: '127.0.0.1',
+    );
+    final session = EmTaskSessionProfile.defaults(
+      id: 'panel-test-smoke-2222',
+      name: '测试面板 / smoke',
+      host: '127.0.0.1',
+      port: 2222,
+      panelId: panel.id,
+      panelTaskName: 'smoke',
+    );
+
+    await _pumpClient(
+      tester,
+      const Size(800, 600),
+      initialValues: <String, Object>{
+        'emtask_client.panels.v1': <String>[panel.encode()],
+        'emtask_client.sessions.v1': <String>[session.encode()],
+      },
+    );
+
+    expect(find.text('测试面板 / smoke'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('会话操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('隐藏'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('测试面板 / smoke'), findsNothing);
+    expect(find.text('显示所有'), findsOneWidget);
+    expect(
+      (await SharedPreferences.getInstance())
+          .getStringList('emtask_client.hidden_panel_tasks.v1'),
+      <String>['panel-test/smoke'],
+    );
+
+    await tester.tap(find.text('显示所有'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('测试面板 / smoke'), findsOneWidget);
+    expect(
+      tester
+          .widgetList<Opacity>(find.byType(Opacity))
+          .any((widget) => widget.opacity == 0.48),
+      isTrue,
+    );
+
+    await tester.tap(find.byTooltip('会话操作'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('取消隐藏'), findsOneWidget);
+  });
+
   test('panel defaults match emtask server auth defaults', () {
     final panel = EmTaskPanelProfile.defaults();
 

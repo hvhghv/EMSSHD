@@ -189,9 +189,11 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
   List<EmTaskConnection> _connections = <EmTaskConnection>[];
   List<EmTaskPanelProfile> _panels = <EmTaskPanelProfile>[];
   EmTaskClientSettings _settings = EmTaskClientSettings.defaults();
+  Set<String> _hiddenPanelTaskKeys = <String>{};
   final Set<String> _refreshingPanels = <String>{};
   Timer? _ticker;
   bool _loadingProfiles = true;
+  bool _showHiddenPanelTasks = false;
 
   @override
   void initState() {
@@ -208,6 +210,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     final profiles = await _store.loadProfiles();
     final panels = await _store.loadPanels();
     final settings = await _store.loadSettings();
+    final hiddenPanelTaskKeys = await _store.loadHiddenPanelTasks();
     if (!mounted) {
       return;
     }
@@ -215,6 +218,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       _connections = profiles.map(EmTaskConnection.new).toList();
       _panels = panels;
       _settings = settings;
+      _hiddenPanelTaskKeys = hiddenPanelTaskKeys;
       _loadingProfiles = false;
     });
   }
@@ -227,6 +231,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
 
   Future<void> _savePanels() async {
     await _store.savePanels(_panels);
+  }
+
+  Future<void> _saveHiddenPanelTasks() async {
+    await _store.saveHiddenPanelTasks(_hiddenPanelTaskKeys);
   }
 
   void _applySettings(EmTaskClientSettings settings) {
@@ -498,12 +506,17 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       _panels.removeWhere((item) => item.id == panel.id);
       _refreshingPanels.remove(panel.id);
       _connections.removeWhere(panelConnections.contains);
+      _hiddenPanelTaskKeys.removeWhere((key) => key.startsWith('${panel.id}/'));
+      if (_hiddenPanelTaskCount == 0) {
+        _showHiddenPanelTasks = false;
+      }
     });
     for (final connection in panelConnections) {
       connection.dispose();
     }
     await _savePanels();
     await _saveProfiles();
+    await _saveHiddenPanelTasks();
   }
 
   Future<void> _importPanelFromQrText(String text) async {
@@ -1073,6 +1086,74 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     return '';
   }
 
+  String _panelTaskHiddenKey(
+    EmTaskPanelProfile panel,
+    EmTaskSessionProfile profile,
+  ) {
+    final taskName = _panelTaskNameForProfile(profile);
+    final taskKey = taskName.trim().isEmpty
+        ? profile.id.trim()
+        : _normalizeTaskNameKey(taskName);
+    if (taskKey.isEmpty) {
+      return '';
+    }
+    return '${panel.id}/$taskKey';
+  }
+
+  bool _isHiddenPanelTask(EmTaskConnection connection) {
+    final panel = _panelForProfile(connection.profile);
+    if (panel == null) {
+      return false;
+    }
+    final key = _panelTaskHiddenKey(panel, connection.profile);
+    return key.isNotEmpty && _hiddenPanelTaskKeys.contains(key);
+  }
+
+  int get _hiddenPanelTaskCount {
+    return _connections.where(_isHiddenPanelTask).length;
+  }
+
+  Future<void> _setPanelTaskHidden(
+    EmTaskConnection connection,
+    bool hidden,
+  ) async {
+    final panel = _panelForProfile(connection.profile);
+    if (panel == null) {
+      return;
+    }
+    final key = _panelTaskHiddenKey(panel, connection.profile);
+    if (key.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      if (hidden) {
+        _hiddenPanelTaskKeys.add(key);
+      } else {
+        _hiddenPanelTaskKeys.remove(key);
+      }
+      if (_hiddenPanelTaskCount == 0) {
+        _showHiddenPanelTasks = false;
+      }
+    });
+    await _saveHiddenPanelTasks();
+    if (mounted) {
+      _showHomeSnackBar(
+        hidden
+            ? '已隐藏子任务 “${_panelTaskNameForProfile(connection.profile)}”。'
+            : '已取消隐藏子任务 “${_panelTaskNameForProfile(connection.profile)}”。',
+        duration: const Duration(seconds: 2),
+      );
+    }
+  }
+
+  void _toggleShowHiddenPanelTasks() {
+    if (_hiddenPanelTaskCount == 0) {
+      return;
+    }
+    setState(() => _showHiddenPanelTasks = !_showHiddenPanelTasks);
+  }
+
   List<EmTaskConnection> _panelConnections(EmTaskPanelProfile panel) {
     return _connections
         .where((connection) => _isPanelConnection(connection, panel))
@@ -1158,9 +1239,23 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       }
     }
 
-    setState(() => _connections.remove(connection));
+    setState(() {
+      if (panel != null) {
+        final hiddenKey = _panelTaskHiddenKey(panel, connection.profile);
+        if (hiddenKey.isNotEmpty) {
+          _hiddenPanelTaskKeys.remove(hiddenKey);
+        }
+      }
+      _connections.remove(connection);
+      if (_hiddenPanelTaskCount == 0) {
+        _showHiddenPanelTasks = false;
+      }
+    });
     connection.dispose();
     await _saveProfiles();
+    if (panel != null) {
+      await _saveHiddenPanelTasks();
+    }
     if (panel != null) {
       await _refreshPanel(panel, showSnackBar: false);
       if (mounted) {
@@ -1353,6 +1448,17 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         title: const Text('emtask Client'),
         backgroundColor: const Color(0xff111827),
         actions: <Widget>[
+          if (_hiddenPanelTaskCount > 0)
+            TextButton.icon(
+              onPressed: _toggleShowHiddenPanelTasks,
+              icon: Icon(
+                _showHiddenPanelTasks
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 18,
+              ),
+              label: Text(_showHiddenPanelTasks ? '隐藏' : '显示所有'),
+            ),
           IconButton(
             tooltip: '新增会话',
             onPressed: () => _addOrEditProfile(),
@@ -1448,22 +1554,37 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
         ),
         for (final panel in _panels) ...<Widget>[
           const SizedBox(height: 10),
-          _buildSessionGroupCard(
-            layout: layout,
-            title: panel.name,
-            subtitle: '${panel.host}:${panel.port} · ${panel.authMode.label}',
-            icon: Icons.dashboard_outlined,
-            connections: _panelConnections(panel),
-            emptyMessage: '此面板暂无会话，点击刷新重新获取。',
-            trailing: _PanelActions(
-              refreshing: _refreshingPanels.contains(panel.id),
-              onRefresh: () => _refreshPanel(panel),
-              onAddTask: () => _addPanelTask(panel),
-              onRegisterKey: () => _registerPanelPublicKey(panel),
-              onEdit: () => _editPanel(panel),
-              onDelete: () => _removePanel(panel),
-            ),
-          ),
+          Builder(builder: (context) {
+            final allPanelConnections = _panelConnections(panel);
+            final hiddenCount =
+                allPanelConnections.where(_isHiddenPanelTask).length;
+            final visiblePanelConnections = _showHiddenPanelTasks
+                ? allPanelConnections
+                : allPanelConnections
+                    .where((connection) => !_isHiddenPanelTask(connection))
+                    .toList(growable: false);
+            return _buildSessionGroupCard(
+              layout: layout,
+              title: panel.name,
+              subtitle: hiddenCount == 0
+                  ? '${panel.host}:${panel.port} · ${panel.authMode.label}'
+                  : '${panel.host}:${panel.port} · ${panel.authMode.label} · 隐藏 $hiddenCount',
+              icon: Icons.dashboard_outlined,
+              connections: visiblePanelConnections,
+              totalConnectionCount: allPanelConnections.length,
+              emptyMessage: hiddenCount > 0 && !_showHiddenPanelTasks
+                  ? '此面板的子任务已隐藏，点击“显示所有”查看。'
+                  : '此面板暂无会话，点击刷新重新获取。',
+              trailing: _PanelActions(
+                refreshing: _refreshingPanels.contains(panel.id),
+                onRefresh: () => _refreshPanel(panel),
+                onAddTask: () => _addPanelTask(panel),
+                onRegisterKey: () => _registerPanelPublicKey(panel),
+                onEdit: () => _editPanel(panel),
+                onDelete: () => _removePanel(panel),
+              ),
+            );
+          }),
         ],
       ],
     );
@@ -1475,9 +1596,14 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
     required String subtitle,
     required IconData icon,
     required List<EmTaskConnection> connections,
+    int? totalConnectionCount,
     required String emptyMessage,
     Widget? trailing,
   }) {
+    final countLabel = totalConnectionCount != null &&
+            totalConnectionCount != connections.length
+        ? '${connections.length}/$totalConnectionCount'
+        : '${connections.length}';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1508,7 +1634,7 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
                   ),
                 ),
                 Text(
-                  '${connections.length}',
+                  countLabel,
                   style: Theme.of(context).textTheme.labelLarge,
                 ),
                 if (trailing != null) ...<Widget>[
@@ -1557,8 +1683,10 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
       animation: connection,
       builder: (context, _) {
         final panel = _panelForProfile(connection.profile);
+        final hidden = _isHiddenPanelTask(connection);
         return _SessionTile(
           connection: connection,
+          hidden: hidden,
           onOpen: () => _openSession(connection),
           onToggle: () => _toggleConnection(connection),
           onEdit: () => _addOrEditProfile(connection: connection),
@@ -1569,6 +1697,9 @@ class _EmTaskHomePageState extends State<EmTaskHomePage> {
           onCreatePanelTaskFromTemplate: panel == null
               ? null
               : () => _addPanelTask(panel, template: connection.profile),
+          onToggleHidden: panel == null
+              ? null
+              : () => _setPanelTaskHidden(connection, !hidden),
           onDelete: () => _removeProfile(connection),
         );
       },
@@ -3705,6 +3836,7 @@ enum _SessionMenuAction {
   rerun,
   edit,
   createPanelTaskFromTemplate,
+  toggleHidden,
   delete,
 }
 
@@ -4954,22 +5086,26 @@ class _StatusLine extends StatelessWidget {
 class _SessionTile extends StatelessWidget {
   const _SessionTile({
     required this.connection,
+    required this.hidden,
     required this.onOpen,
     required this.onToggle,
     required this.onEdit,
     this.onShowPanelTaskStatus,
     this.onRerunPanelTask,
     this.onCreatePanelTaskFromTemplate,
+    this.onToggleHidden,
     required this.onDelete,
   });
 
   final EmTaskConnection connection;
+  final bool hidden;
   final VoidCallback onOpen;
   final VoidCallback onToggle;
   final VoidCallback onEdit;
   final VoidCallback? onShowPanelTaskStatus;
   final VoidCallback? onRerunPanelTask;
   final VoidCallback? onCreatePanelTaskFromTemplate;
+  final VoidCallback? onToggleHidden;
   final VoidCallback onDelete;
 
   @override
@@ -4982,124 +5118,134 @@ class _SessionTile extends StatelessWidget {
         : taskFailed
             ? colors.error.withOpacity(0.75)
             : const Color(0xff1f2937);
-    return InkWell(
-      onTap: onOpen,
-      mouseCursor: connection.isConnected
-          ? SystemMouseCursors.click
-          : SystemMouseCursors.basic,
-      borderRadius: BorderRadius.circular(14),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: connection.isConnected
-              ? colors.primary.withOpacity(0.10)
-              : taskFailed
-                  ? colors.error.withOpacity(0.08)
-                  : const Color(0xff0f172a),
-          border: Border.all(color: borderColor),
-        ),
-        child: Row(
-          children: <Widget>[
-            _UnreadDot(
-              visible: connection.hasUnread,
-              connected: connection.isConnected,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    connection.profile.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall,
+    return Opacity(
+      opacity: hidden ? 0.48 : 1,
+      child: InkWell(
+        onTap: onOpen,
+        mouseCursor: connection.isConnected
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        borderRadius: BorderRadius.circular(14),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: connection.isConnected
+                ? colors.primary.withOpacity(0.10)
+                : taskFailed
+                    ? colors.error.withOpacity(0.08)
+                    : const Color(0xff0f172a),
+            border: Border.all(color: borderColor),
+          ),
+          child: Row(
+            children: <Widget>[
+              _UnreadDot(
+                visible: connection.hasUnread,
+                connected: connection.isConnected,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      connection.profile.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      statusLabel == null
+                          ? '${connection.profile.host}:${connection.profile.port}'
+                          : '${connection.profile.host}:${connection.profile.port} · $statusLabel',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: taskFailed ? colors.error : null,
+                          ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      _sessionElapsed(connection.lastUpdateAt),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      _sessionAccessHint(connection),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: connection.isConnected
+                                ? colors.primary
+                                : const Color(0xff94a3b8),
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _SessionConnectionButton(
+                connection: connection,
+                onToggle: onToggle,
+              ),
+              PopupMenuButton<_SessionMenuAction>(
+                tooltip: '会话操作',
+                onSelected: (action) {
+                  switch (action) {
+                    case _SessionMenuAction.status:
+                      onShowPanelTaskStatus?.call();
+                    case _SessionMenuAction.rerun:
+                      onRerunPanelTask?.call();
+                    case _SessionMenuAction.edit:
+                      onEdit();
+                    case _SessionMenuAction.createPanelTaskFromTemplate:
+                      onCreatePanelTaskFromTemplate?.call();
+                    case _SessionMenuAction.toggleHidden:
+                      onToggleHidden?.call();
+                    case _SessionMenuAction.delete:
+                      onDelete();
+                  }
+                },
+                itemBuilder: (context) => <PopupMenuEntry<_SessionMenuAction>>[
+                  if (onShowPanelTaskStatus != null)
+                    const PopupMenuItem<_SessionMenuAction>(
+                      value: _SessionMenuAction.status,
+                      child: Text('查看子任务状态/失败日志'),
+                    ),
+                  if (onRerunPanelTask != null)
+                    const PopupMenuItem<_SessionMenuAction>(
+                      value: _SessionMenuAction.rerun,
+                      child: Text('重新运行子任务'),
+                    ),
+                  if (onShowPanelTaskStatus != null || onRerunPanelTask != null)
+                    const PopupMenuDivider(),
+                  const PopupMenuItem<_SessionMenuAction>(
+                    value: _SessionMenuAction.edit,
+                    child: Text('编辑'),
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    statusLabel == null
-                        ? '${connection.profile.host}:${connection.profile.port}'
-                        : '${connection.profile.host}:${connection.profile.port} · $statusLabel',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: taskFailed ? colors.error : null,
-                        ),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    _sessionElapsed(connection.lastUpdateAt),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    _sessionAccessHint(connection),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: connection.isConnected
-                              ? colors.primary
-                              : const Color(0xff94a3b8),
-                        ),
+                  if (onCreatePanelTaskFromTemplate != null)
+                    const PopupMenuItem<_SessionMenuAction>(
+                      value: _SessionMenuAction.createPanelTaskFromTemplate,
+                      child: Text('以此为模板新增子任务'),
+                    ),
+                  if (onToggleHidden != null)
+                    PopupMenuItem<_SessionMenuAction>(
+                      value: _SessionMenuAction.toggleHidden,
+                      child: Text(hidden ? '取消隐藏' : '隐藏'),
+                    ),
+                  const PopupMenuItem<_SessionMenuAction>(
+                    value: _SessionMenuAction.delete,
+                    child: Text('删除'),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            _SessionConnectionButton(
-              connection: connection,
-              onToggle: onToggle,
-            ),
-            PopupMenuButton<_SessionMenuAction>(
-              tooltip: '会话操作',
-              onSelected: (action) {
-                switch (action) {
-                  case _SessionMenuAction.status:
-                    onShowPanelTaskStatus?.call();
-                  case _SessionMenuAction.rerun:
-                    onRerunPanelTask?.call();
-                  case _SessionMenuAction.edit:
-                    onEdit();
-                  case _SessionMenuAction.createPanelTaskFromTemplate:
-                    onCreatePanelTaskFromTemplate?.call();
-                  case _SessionMenuAction.delete:
-                    onDelete();
-                }
-              },
-              itemBuilder: (context) => <PopupMenuEntry<_SessionMenuAction>>[
-                if (onShowPanelTaskStatus != null)
-                  const PopupMenuItem<_SessionMenuAction>(
-                    value: _SessionMenuAction.status,
-                    child: Text('查看子任务状态/失败日志'),
-                  ),
-                if (onRerunPanelTask != null)
-                  const PopupMenuItem<_SessionMenuAction>(
-                    value: _SessionMenuAction.rerun,
-                    child: Text('重新运行子任务'),
-                  ),
-                if (onShowPanelTaskStatus != null || onRerunPanelTask != null)
-                  const PopupMenuDivider(),
-                const PopupMenuItem<_SessionMenuAction>(
-                  value: _SessionMenuAction.edit,
-                  child: Text('编辑'),
-                ),
-                if (onCreatePanelTaskFromTemplate != null)
-                  const PopupMenuItem<_SessionMenuAction>(
-                    value: _SessionMenuAction.createPanelTaskFromTemplate,
-                    child: Text('以此为模板新增子任务'),
-                  ),
-                const PopupMenuItem<_SessionMenuAction>(
-                  value: _SessionMenuAction.delete,
-                  child: Text('删除'),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
