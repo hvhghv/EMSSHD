@@ -12,7 +12,7 @@
 #endif
 
 #ifndef EMSSH_SFTP_MAX_IO
-#define EMSSH_SFTP_MAX_IO 8192u
+#define EMSSH_SFTP_MAX_IO EMSSH_MAX_PAYLOAD_SIZE
 #endif
 
 typedef enum sftp_policy_operation {

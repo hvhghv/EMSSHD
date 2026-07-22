@@ -5,6 +5,8 @@
 #include "emssh/sftp.h"
 #include "emssh/ssh_error.h"
 
+#define SFTP_DATA_RESPONSE_OVERHEAD 13u
+
 static void write_u32_be(uint8_t data[4], uint32_t value)
 {
     data[0] = (uint8_t)(value >> 24);
@@ -402,6 +404,28 @@ static int encode_status(
     return sftp_status_encode(response, response_capacity, response_len, request_id, status_code, message, "");
 }
 
+static int finish_data_response_in_place(
+    uint8_t *response,
+    size_t response_capacity,
+    size_t *response_len,
+    uint32_t request_id,
+    size_t data_len)
+{
+    if (response == NULL || response_len == NULL ||
+        data_len > UINT32_MAX - 9u ||
+        response_capacity < SFTP_DATA_RESPONSE_OVERHEAD ||
+        data_len > response_capacity - SFTP_DATA_RESPONSE_OVERHEAD) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+
+    write_u32_be(response, (uint32_t)data_len + 9u);
+    response[4] = SSH_FXP_DATA;
+    write_u32_be(response + 5u, request_id);
+    write_u32_be(response + 9u, (uint32_t)data_len);
+    *response_len = data_len + SFTP_DATA_RESPONSE_OVERHEAD;
+    return SSH_OK;
+}
+
 static int view_equals_cstring(ssh_string_view_t view, const char *text)
 {
     size_t text_len;
@@ -669,6 +693,7 @@ static int handle_open(
     char path[EMSSH_SFTP_MAX_PATH];
     void *fs_handle;
     ssh_fs_attrs_t attrs;
+    ssh_fs_attrs_t open_attrs;
     ssh_fs_attrs_t requested_attrs;
     int status;
 
@@ -695,7 +720,9 @@ static int handle_open(
     if (requested_attrs.flags != 0u && (open_request.pflags & SSH_FXF_WRITE) == 0u) {
         return encode_status(response, response_capacity, response_len, open_request.id, SSH_FX_PERMISSION_DENIED, "open attrs denied");
     }
-    if (requested_attrs.flags != 0u && session->fs->fsetstat == NULL) {
+    open_attrs = requested_attrs;
+    open_attrs.flags &= ~SSH_FILEXFER_ATTR_SIZE;
+    if (open_attrs.flags != 0u && session->fs->fsetstat == NULL) {
         return encode_status(response, response_capacity, response_len, open_request.id, SSH_FX_OP_UNSUPPORTED, "open attrs unsupported");
     }
     status = policy_check(
@@ -723,9 +750,9 @@ static int handle_open(
             status_message_from_error(status, "open failed"));
     }
 
-    attrs = requested_attrs;
-    if (requested_attrs.flags != 0u) {
-        status = session->fs->fsetstat(session->fs->ctx, fs_handle, &requested_attrs);
+    attrs = open_attrs;
+    if (open_attrs.flags != 0u) {
+        status = session->fs->fsetstat(session->fs->ctx, fs_handle, &open_attrs);
         if (status != SSH_OK) {
             if (session->fs->close != NULL) {
                 (void)session->fs->close(session->fs->ctx, fs_handle);
@@ -941,7 +968,8 @@ static int handle_read(
 {
     sftp_read_request_t read_request;
     sftp_handle_entry_t *entry;
-    uint8_t data[EMSSH_SFTP_MAX_IO];
+    uint8_t *data;
+    size_t data_capacity;
     size_t wanted;
     size_t read_len;
     int status;
@@ -962,7 +990,15 @@ static int handle_read(
         return encode_status(response, response_capacity, response_len, read_request.id, SSH_FX_PERMISSION_DENIED, "read denied");
     }
 
+    if (response_capacity <= SFTP_DATA_RESPONSE_OVERHEAD) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
+    }
+    data = response + SFTP_DATA_RESPONSE_OVERHEAD;
+    data_capacity = response_capacity - SFTP_DATA_RESPONSE_OVERHEAD;
     wanted = read_request.len < EMSSH_SFTP_MAX_IO ? read_request.len : EMSSH_SFTP_MAX_IO;
+    if (wanted > data_capacity) {
+        wanted = data_capacity;
+    }
     status = policy_check(
         session,
         SFTP_POLICY_READ,
@@ -991,11 +1027,14 @@ static int handle_read(
             status_from_error(status),
             status_message_from_error(status, "read failed"));
     }
+    if (read_len > wanted) {
+        return encode_status(response, response_capacity, response_len, read_request.id, SSH_FX_FAILURE, "invalid read length");
+    }
     if (read_len == 0u) {
         return encode_status(response, response_capacity, response_len, read_request.id, SSH_FX_EOF, "eof");
     }
 
-    return sftp_data_encode(response, response_capacity, response_len, read_request.id, data, read_len);
+    return finish_data_response_in_place(response, response_capacity, response_len, read_request.id, read_len);
 }
 
 static int handle_opendir(

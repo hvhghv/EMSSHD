@@ -38,6 +38,8 @@ typedef struct mock_fs {
     int statvfs_count;
     int fstatvfs_count;
     int stat_missing_txt;
+    int fsetstat_count;
+    size_t generated_read_len;
 } mock_fs_t;
 
 typedef struct test_policy_ctx {
@@ -159,6 +161,22 @@ static int mock_read_at(void *ctx, void *handle, uint64_t offset, uint8_t *buf, 
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    if (fs->generated_read_len != 0u) {
+        size_t i;
+
+        if (offset >= fs->generated_read_len) {
+            *read_len = 0u;
+            return SSH_OK;
+        }
+        available = fs->generated_read_len - (size_t)offset;
+        chunk = len < available ? len : available;
+        for (i = 0u; i < chunk; ++i) {
+            buf[i] = (uint8_t)(((size_t)offset + i) & 0xffu);
+        }
+        *read_len = chunk;
+        return SSH_OK;
+    }
+
     if (offset >= fs->data_len) {
         *read_len = 0u;
         return SSH_OK;
@@ -248,6 +266,7 @@ static int mock_fsetstat(void *ctx, void *handle, const ssh_fs_attrs_t *attrs)
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
+    ++fs->fsetstat_count;
     fs->fsetstat_attrs = *attrs;
     if ((attrs->flags & SSH_FILEXFER_ATTR_SIZE) != 0u) {
         if (attrs->size > sizeof(fs->data)) {
@@ -506,6 +525,7 @@ int main(void)
     sftp_server_session_t session;
     uint8_t request[256];
     uint8_t response[256];
+    static uint8_t large_response[EMSSH_MAX_PACKET_SIZE];
     uint8_t handle[8];
     size_t request_len;
     size_t response_len;
@@ -516,6 +536,7 @@ int main(void)
     uint64_t size_value;
     uint32_t value;
     uint32_t status_code;
+    size_t i;
 
     memset(&fs_ctx, 0, sizeof(fs_ctx));
     memcpy(fs_ctx.data, "abcdef", 6u);
@@ -574,7 +595,7 @@ int main(void)
     CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
     CHECK(value == 1u);
     CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
-    CHECK(view.len == 1u && view.data[0] == '.');
+    CHECK(view.len == 1u && view.data[0] == '/');
 
     ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
     CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_REALPATH) == SSH_OK);
@@ -680,6 +701,56 @@ int main(void)
     CHECK(decode_status(response, response_len, &value, &status_code) == SSH_OK);
     CHECK(value == 49u);
     CHECK(status_code == SSH_FX_PERMISSION_DENIED);
+
+    fs_ctx.data_len = 0u;
+    ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
+    CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_OPEN) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 70u) == SSH_OK);
+    CHECK(ssh_buffer_put_cstring(&payload, "winscp-ascii-edit.txt") == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, SSH_FILEXFER_ATTR_SIZE) == SSH_OK);
+    CHECK(ssh_buffer_put_u64(&payload, 18u) == SSH_OK);
+    finish_packet(request, &payload, &request_len);
+    CHECK(sftp_server_handle_packet(&session, request, request_len, response, sizeof(response), &response_len) == SSH_OK);
+    CHECK(sftp_packet_wrap(response, response_len, &packet) == SSH_OK);
+    CHECK(packet.type == SSH_FXP_HANDLE);
+    ssh_buffer_wrap(&payload, (uint8_t *)packet.payload.data, packet.payload.len);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 70u);
+    CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
+    CHECK(view.len <= sizeof(handle));
+    memcpy(handle, view.data, view.len);
+    handle_len = view.len;
+    CHECK(fs_ctx.fsetstat_count == 0);
+    CHECK(fs_ctx.data_len == 0u);
+
+    ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
+    CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_WRITE) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 71u) == SSH_OK);
+    CHECK(ssh_buffer_put_string(&payload, handle, handle_len) == SSH_OK);
+    CHECK(ssh_buffer_put_u64(&payload, 0u) == SSH_OK);
+    CHECK(ssh_buffer_put_cstring(&payload, "line1\nline2\n") == SSH_OK);
+    finish_packet(request, &payload, &request_len);
+    CHECK(sftp_server_handle_packet(&session, request, request_len, response, sizeof(response), &response_len) == SSH_OK);
+    CHECK(decode_status(response, response_len, &value, &status_code) == SSH_OK);
+    CHECK(value == 71u);
+    CHECK(status_code == SSH_FX_OK);
+    CHECK(fs_ctx.data_len == strlen("line1\nline2\n"));
+    CHECK(memcmp(fs_ctx.data, "line1\nline2\n", fs_ctx.data_len) == 0);
+
+    ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
+    CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_CLOSE) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 72u) == SSH_OK);
+    CHECK(ssh_buffer_put_string(&payload, handle, handle_len) == SSH_OK);
+    finish_packet(request, &payload, &request_len);
+    CHECK(sftp_server_handle_packet(&session, request, request_len, response, sizeof(response), &response_len) == SSH_OK);
+    CHECK(decode_status(response, response_len, &value, &status_code) == SSH_OK);
+    CHECK(value == 72u);
+    CHECK(status_code == SSH_FX_OK);
+    CHECK(fs_ctx.close_count == 1);
+    fs_ctx.close_count = 0;
+    memcpy(fs_ctx.data, "abcdef", 6u);
+    fs_ctx.data_len = 6u;
 
     ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
     CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_OPEN) == SSH_OK);
@@ -973,6 +1044,28 @@ int main(void)
     CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
     CHECK(view.len == 2u);
     CHECK(memcmp(view.data, "bc", 2u) == 0);
+
+    fs_ctx.generated_read_len = 32752u;
+    ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
+    CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_READ) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 69u) == SSH_OK);
+    CHECK(ssh_buffer_put_string(&payload, handle, handle_len) == SSH_OK);
+    CHECK(ssh_buffer_put_u64(&payload, 0u) == SSH_OK);
+    CHECK(ssh_buffer_put_u32(&payload, 32752u) == SSH_OK);
+    finish_packet(request, &payload, &request_len);
+    CHECK(sftp_server_handle_packet(&session, request, request_len, large_response, sizeof(large_response), &response_len) == SSH_OK);
+    CHECK(response_len == 32752u + 13u);
+    CHECK(sftp_packet_wrap(large_response, response_len, &packet) == SSH_OK);
+    CHECK(packet.type == SSH_FXP_DATA);
+    ssh_buffer_wrap(&payload, (uint8_t *)packet.payload.data, packet.payload.len);
+    CHECK(ssh_buffer_get_u32(&payload, &value) == SSH_OK);
+    CHECK(value == 69u);
+    CHECK(ssh_buffer_get_string_view(&payload, &view) == SSH_OK);
+    CHECK(view.len == 32752u);
+    for (i = 0u; i < view.len; ++i) {
+        CHECK(view.data[i] == (uint8_t)(i & 0xffu));
+    }
+    fs_ctx.generated_read_len = 0u;
 
     ssh_buffer_init(&payload, request + 4u, sizeof(request) - 4u);
     CHECK(ssh_buffer_put_u8(&payload, SSH_FXP_WRITE) == SSH_OK);
