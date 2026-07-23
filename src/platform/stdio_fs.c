@@ -183,6 +183,11 @@ static int stat_path(const char *path, ssh_fs_attrs_t *attrs)
     memset(attrs, 0, sizeof(*attrs));
     attrs->flags = SSH_FILEXFER_ATTR_SIZE | SSH_FILEXFER_ATTR_PERMISSIONS | SSH_FILEXFER_ATTR_ACMODTIME;
     attrs->size = (uint64_t)st.st_size;
+#ifndef _WIN32
+    attrs->flags |= SSH_FILEXFER_ATTR_UIDGID;
+    attrs->uid = (uint32_t)st.st_uid;
+    attrs->gid = (uint32_t)st.st_gid;
+#endif
     attrs->permissions = (uint32_t)st.st_mode;
     attrs->atime = (uint32_t)st.st_atime;
     attrs->mtime = (uint32_t)st.st_mtime;
@@ -199,8 +204,11 @@ static int lstat_path(const char *path, ssh_fs_attrs_t *attrs)
     }
 
     memset(attrs, 0, sizeof(*attrs));
-    attrs->flags = SSH_FILEXFER_ATTR_SIZE | SSH_FILEXFER_ATTR_PERMISSIONS | SSH_FILEXFER_ATTR_ACMODTIME;
+    attrs->flags = SSH_FILEXFER_ATTR_SIZE | SSH_FILEXFER_ATTR_UIDGID |
+                   SSH_FILEXFER_ATTR_PERMISSIONS | SSH_FILEXFER_ATTR_ACMODTIME;
     attrs->size = (uint64_t)st.st_size;
+    attrs->uid = (uint32_t)st.st_uid;
+    attrs->gid = (uint32_t)st.st_gid;
     attrs->permissions = (uint32_t)st.st_mode;
     attrs->atime = (uint32_t)st.st_atime;
     attrs->mtime = (uint32_t)st.st_mtime;

@@ -69,6 +69,9 @@ int main(void)
     size_t len;
     int eof;
     int saw_file;
+#ifndef _WIN32
+    struct stat native_attrs;
+#endif
 
     cleanup_root();
     CHECK(make_dir("stdio_fs_root") == SSH_OK);
@@ -85,6 +88,14 @@ int main(void)
     CHECK(fs->stat(fs->ctx, "file.txt", &attrs) == SSH_OK);
     CHECK((attrs.flags & SSH_FILEXFER_ATTR_SIZE) != 0u);
     CHECK(attrs.size == 6u);
+#ifndef _WIN32
+    CHECK(stat("stdio_fs_root/file.txt", &native_attrs) == 0);
+    CHECK((attrs.flags & SSH_FILEXFER_ATTR_UIDGID) != 0u);
+    CHECK(attrs.uid == (uint32_t)native_attrs.st_uid);
+    CHECK(attrs.gid == (uint32_t)native_attrs.st_gid);
+#else
+    CHECK((attrs.flags & SSH_FILEXFER_ATTR_UIDGID) == 0u);
+#endif
     CHECK(fs->stat(fs->ctx, "missing.txt", &attrs) == SSH_ERR_NOT_FOUND);
 
     handle = NULL;
@@ -209,6 +220,13 @@ int main(void)
             CHECK((entry.attrs.flags & SSH_FILEXFER_ATTR_SIZE) != 0u);
             CHECK((entry.attrs.flags & SSH_FILEXFER_ATTR_PERMISSIONS) != 0u);
             CHECK((entry.attrs.flags & SSH_FILEXFER_ATTR_ACMODTIME) != 0u);
+#ifndef _WIN32
+            CHECK((entry.attrs.flags & SSH_FILEXFER_ATTR_UIDGID) != 0u);
+            CHECK(entry.attrs.uid == (uint32_t)native_attrs.st_uid);
+            CHECK(entry.attrs.gid == (uint32_t)native_attrs.st_gid);
+#else
+            CHECK((entry.attrs.flags & SSH_FILEXFER_ATTR_UIDGID) == 0u);
+#endif
             CHECK(entry.attrs.size == 2u);
         }
     }
