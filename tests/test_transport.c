@@ -35,7 +35,7 @@ typedef struct memory_conn {
     const uint8_t *in;
     size_t in_len;
     size_t in_pos;
-    uint8_t out[8192];
+    uint8_t out[EMSSH_MAX_PACKET_SIZE * 4u];
     size_t out_len;
 } memory_conn_t;
 
@@ -593,6 +593,8 @@ int main(void)
     uint8_t malformed_first_block[EMSSH_MAX_CIPHER_IV];
     size_t malformed_block_size;
     uint32_t inbound_sequence_before;
+    uint32_t outbound_sequence_before;
+    static uint8_t large_channel_data[EMSSH_MAX_PAYLOAD_SIZE];
     ssh_packet_view_t reply_packet;
     ssh_buffer_t reply_payload;
     ssh_kex_ecdh_reply_t reply;
@@ -646,6 +648,7 @@ int main(void)
     ssh_server_config_defaults(&config);
     config.password_auth = test_password_auth;
     config.publickey_auth = test_publickey_auth;
+    config.publickey_signature_algorithms = "ssh-ed25519";
     CHECK(ssh_server_init(&server, &platform, &config) == SSH_OK);
     CHECK(ssh_transport_session_init(&session, &server, NULL) == SSH_OK);
 
@@ -700,6 +703,17 @@ int main(void)
     CHECK(session.inbound.sequence == 3u);
     CHECK(session.inbound.cipher_key_len == 16u);
     CHECK(session.inbound.mac_key_len == 32u);
+
+    memset(large_channel_data, 0x5au, sizeof(large_channel_data));
+    outbound_sequence_before = session.outbound.sequence;
+    CHECK(ssh_transport_send_channel_data(
+        &session,
+        &conn,
+        7u,
+        large_channel_data,
+        sizeof(large_channel_data),
+        1000u) == SSH_OK);
+    CHECK(session.outbound.sequence == outbound_sequence_before + 2u);
 
     CHECK(ssh_transport_set_rekey_limits(&session, 2u, 0u) == SSH_OK);
     CHECK(!ssh_transport_rekey_needed(&session));

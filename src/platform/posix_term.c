@@ -33,6 +33,7 @@ const ssh_term_api_t *ssh_posix_term_api(ssh_posix_term_platform_t *term)
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -45,6 +46,7 @@ const ssh_term_api_t *ssh_posix_term_api(ssh_posix_term_platform_t *term)
 typedef struct ssh_posix_term_handle {
     int master_fd;
     pid_t child_pid;
+    int is_pty;
     int exited;
     uint32_t exit_status;
 } ssh_posix_term_handle_t;
@@ -245,6 +247,111 @@ static int spawn_with_pty(
 
     handle->master_fd = master_fd;
     handle->child_pid = pid;
+    handle->is_pty = 1;
+    handle->exited = 0;
+    handle->exit_status = 0u;
+    *handle_out = handle;
+    return SSH_OK;
+}
+
+static int spawn_with_stream(
+    const char *username,
+    void (*child_main)(const char *arg),
+    const char *child_arg,
+    void **handle_out)
+{
+    int startup_pipe[2];
+    int stream_fds[2];
+    int startup_status;
+    pid_t pid;
+    ssh_posix_term_handle_t *handle;
+    int status;
+
+    if (child_main == NULL || handle_out == NULL) {
+        return SSH_ERR_INVALID_ARGUMENT;
+    }
+
+    startup_pipe[0] = -1;
+    startup_pipe[1] = -1;
+    stream_fds[0] = -1;
+    stream_fds[1] = -1;
+    if (pipe(startup_pipe) != 0) {
+        return SSH_ERR_PLATFORM;
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, stream_fds) != 0) {
+        (void)close(startup_pipe[0]);
+        (void)close(startup_pipe[1]);
+        return SSH_ERR_PLATFORM;
+    }
+#ifdef SO_NOSIGPIPE
+    {
+        int enabled = 1;
+        (void)setsockopt(stream_fds[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+        (void)setsockopt(stream_fds[1], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+    }
+#endif
+
+    pid = fork();
+    if (pid < 0) {
+        (void)close(startup_pipe[0]);
+        (void)close(startup_pipe[1]);
+        (void)close(stream_fds[0]);
+        (void)close(stream_fds[1]);
+        return SSH_ERR_PLATFORM;
+    }
+    if (pid == 0) {
+        (void)close(startup_pipe[0]);
+        (void)close(stream_fds[0]);
+        startup_status = SSH_OK;
+        if (dup2(stream_fds[1], STDIN_FILENO) < 0 ||
+            dup2(stream_fds[1], STDOUT_FILENO) < 0 ||
+            dup2(stream_fds[1], STDERR_FILENO) < 0) {
+            startup_status = SSH_ERR_PLATFORM;
+        }
+        if (stream_fds[1] > STDERR_FILENO) {
+            (void)close(stream_fds[1]);
+        }
+        if (startup_status == SSH_OK) {
+            startup_status = apply_authenticated_user_context(username);
+        }
+        (void)write(startup_pipe[1], &startup_status, sizeof(startup_status));
+        (void)close(startup_pipe[1]);
+        if (startup_status != SSH_OK) {
+            _exit(127);
+        }
+        child_main(child_arg);
+        _exit(127);
+    }
+
+    (void)close(startup_pipe[1]);
+    (void)close(stream_fds[1]);
+    startup_status = SSH_ERR_PLATFORM;
+    status = read_startup_status(startup_pipe[0], &startup_status);
+    (void)close(startup_pipe[0]);
+    if (status != SSH_OK || startup_status != SSH_OK) {
+        (void)close(stream_fds[0]);
+        (void)waitpid(pid, NULL, 0);
+        return status == SSH_OK ? startup_status : status;
+    }
+
+    if (set_nonblocking(stream_fds[0]) != SSH_OK) {
+        (void)close(stream_fds[0]);
+        (void)kill(pid, SIGTERM);
+        (void)waitpid(pid, NULL, 0);
+        return SSH_ERR_PLATFORM;
+    }
+
+    handle = (ssh_posix_term_handle_t *)calloc(1u, sizeof(*handle));
+    if (handle == NULL) {
+        (void)close(stream_fds[0]);
+        (void)kill(pid, SIGTERM);
+        (void)waitpid(pid, NULL, 0);
+        return SSH_ERR_PLATFORM;
+    }
+
+    handle->master_fd = stream_fds[0];
+    handle->child_pid = pid;
+    handle->is_pty = 0;
     handle->exited = 0;
     handle->exit_status = 0u;
     *handle_out = handle;
@@ -280,6 +387,9 @@ static int posix_term_spawn_shell(
     void **handle)
 {
     (void)ctx;
+    if (term_type == NULL) {
+        return spawn_with_stream(username, child_main_shell, NULL, handle);
+    }
     return spawn_with_pty(username, term_type, cols, rows, width_px, height_px, child_main_shell, NULL, handle);
 }
 
@@ -295,6 +405,9 @@ static int posix_term_spawn_exec(
     void **handle)
 {
     (void)ctx;
+    if (term_type == NULL) {
+        return spawn_with_stream(username, child_main_exec, command, handle);
+    }
     return spawn_with_pty(username, term_type, cols, rows, width_px, height_px, child_main_exec, command, handle);
 }
 
@@ -317,10 +430,21 @@ static int posix_term_write(
         return SSH_OK;
     }
 
-    n = write(handle->master_fd, buf, len);
+    if (handle->is_pty) {
+        n = write(handle->master_fd, buf, len);
+    } else {
+#ifdef MSG_NOSIGNAL
+        n = send(handle->master_fd, buf, len, MSG_NOSIGNAL);
+#else
+        n = write(handle->master_fd, buf, len);
+#endif
+    }
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             return SSH_OK;
+        }
+        if (!handle->is_pty && (errno == EPIPE || errno == ECONNRESET)) {
+            return SSH_ERR_CLOSED;
         }
         return SSH_ERR_PLATFORM;
     }
@@ -352,6 +476,9 @@ static int posix_term_read(
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             return SSH_OK;
         }
+        if (handle->is_pty && errno == EIO) {
+            return SSH_OK;
+        }
         return SSH_ERR_PLATFORM;
     }
     if (n == 0) {
@@ -375,6 +502,9 @@ static int posix_term_resize(
 
     if (handle == NULL) {
         return SSH_ERR_INVALID_ARGUMENT;
+    }
+    if (!handle->is_pty) {
+        return SSH_ERR_UNSUPPORTED;
     }
 
     memset(&ws, 0, sizeof(ws));

@@ -2349,22 +2349,48 @@ int ssh_transport_send_channel_data(
 {
     uint8_t payload[EMSSH_MAX_PAYLOAD_SIZE + 16u];
     ssh_buffer_t buf;
+    size_t chunk_len;
+    size_t max_data_len;
+    size_t offset;
     int status;
 
     if (session == NULL || (data == NULL && data_len != 0u)) {
         return SSH_ERR_INVALID_ARGUMENT;
     }
 
-    ssh_buffer_init(&buf, payload, sizeof(payload));
-    status = ssh_channel_data_encode(&buf, recipient_channel, data, data_len);
-    if (status != SSH_OK) {
-        return status;
+    /* Message id, recipient channel, and SSH string length consume 9 bytes. */
+    if (EMSSH_MAX_PAYLOAD_SIZE <= 9u) {
+        return SSH_ERR_BUFFER_TOO_SMALL;
     }
+    max_data_len = EMSSH_MAX_PAYLOAD_SIZE - 9u;
+    offset = 0u;
+    do {
+        chunk_len = data_len - offset;
+        if (chunk_len > max_data_len) {
+            chunk_len = max_data_len;
+        }
 
-    status = ssh_transport_send_protected_payload(session, conn, payload, ssh_buffer_len(&buf), timeout_ms);
-    if (status != SSH_OK) {
-        return status;
-    }
+        ssh_buffer_init(&buf, payload, sizeof(payload));
+        status = ssh_channel_data_encode(
+            &buf,
+            recipient_channel,
+            data_len != 0u ? data + offset : NULL,
+            chunk_len);
+        if (status != SSH_OK) {
+            return status;
+        }
+
+        status = ssh_transport_send_protected_payload(
+            session,
+            conn,
+            payload,
+            ssh_buffer_len(&buf),
+            timeout_ms);
+        if (status != SSH_OK) {
+            return status;
+        }
+        offset += chunk_len;
+    } while (offset < data_len);
 
     session->state = SSH_TRANSPORT_STATE_CHANNEL_DATA_SENT;
     return SSH_OK;
